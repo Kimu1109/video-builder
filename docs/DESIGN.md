@@ -1,10 +1,10 @@
-# Video Builder 設計書
+# video-builder 設計書
 
 | 項目 | 内容 |
 |---|---|
-| 文書バージョン | 0.1 (ドラフト) |
+| 文書バージョン | 0.2 |
 | 作成日 | 2026-11-16 |
-| 対象 | Video Builder (仮称) 初期実装 〜 v1.0 |
+| 対象 | video-builder 初期実装 〜 v1.0 |
 
 ---
 
@@ -30,13 +30,13 @@
 18. [テスト方針](#18-テスト方針)
 19. [ソリューション構成](#19-ソリューション構成)
 20. [開発ロードマップ](#20-開発ロードマップ)
-21. [未決事項](#21-未決事項)
+21. [決定事項](#21-決定事項)
 
 ---
 
 ## 1. 概要
 
-Video Builder は C# と Avalonia UI で作るデスクトップ向け動画編集アプリケーションである。
+video-builder は C# と Avalonia UI で作るデスクトップ向け動画編集アプリケーションである。
 Linux を主対象とし、Windows / macOS でも動かせるようにする。
 
 操作感は **AviUtl (拡張編集)** に合わせる。具体的には次のとおり。
@@ -82,6 +82,7 @@ AviUtl ユーザーが迷わず使えることを目指しつつ、操作を Lin
 | F-14 | エイリアス (オブジェクト設定のテンプレート保存) | 推奨 |
 | F-15 | スクリプト (Lua 互換レイヤー or C# スクリプト) | 将来 |
 | F-16 | プラグイン (入力・出力・フィルタ) | 将来 |
+| F-17 | ライト / ダークテーマ切替 (既定はシステムのテーマ・アクセントカラーに従う) | 必須 |
 
 ### 2.2 非機能要件
 
@@ -372,7 +373,7 @@ AviUtl の設定ダイアログをもとにする。
 1. **角ばったデザイン**: すべてのコントロールで `CornerRadius="0"`。丸いのはラジオボタンの中身だけにする (チェックボックスも角型)。
 2. **フラット**: グラデーション・影は原則使わない。ポップアップやメニューの境界は 1px の枠線で示す。
 3. **高密度**: AviUtl のように一画面に多くの情報を載せる。標準の行高さは 22〜24px。
-4. **ダーク基調**: 映像を見やすくするため、既定はダークテーマ。ライトテーマも用意する。
+4. **ライト / ダーク切替**: ライトテーマとダークテーマを用意し、実行中に切り替えられる。既定は **OS のテーマとアクセントカラーに従う** ([7.3](#73-テーマ切替とシステムカラー))。
 
 ### 7.2 カラートークン (ダークテーマ)
 
@@ -395,9 +396,136 @@ AviUtl の設定ダイアログをもとにする。
 | `Warning` | `#F2A900` | 警告 |
 | `Error` | `#D9433A` | エラー |
 
-ライトテーマは同じトークン名で値だけ差し替える (`Bg.Base=#F3F3F3`, `Fg.Primary=#1E1E1E` など)。
+`Accent` / `Accent.Hover` はアプリ既定の値。システムのアクセントカラーを使う設定では、[7.3.3](#733-システムアクセントカラー) の手順で置き換える。
 
-### 7.3 タイポグラフィ
+### 7.2.1 カラートークン (ライトテーマ)
+
+トークン名はダークテーマと共通にし、値だけを差し替える。
+
+| トークン | 値 | 用途 |
+|---|---|---|
+| `Bg.Base` | `#F3F3F3` | ウィンドウ背景 |
+| `Bg.Panel` | `#FFFFFF` | パネル・ダイアログ |
+| `Bg.Elevated` | `#FFFFFF` | メニュー・ポップアップ (枠線で区別) |
+| `Bg.Input` | `#FFFFFF` | テキストボックス・数値入力 |
+| `Bg.Hover` | `#E5E5E5` | ホバー |
+| `Bg.Pressed` | `#D6D6D6` | 押下 |
+| `Border.Default` | `#C8C8C8` | 標準の枠線 |
+| `Border.Strong` | `#A0A0A0` | 強調枠線・区切り |
+| `Fg.Primary` | `#1E1E1E` | 本文 |
+| `Fg.Secondary` | `#5F5F5F` | 補助テキスト・ラベル |
+| `Fg.Disabled` | `#A8A8A8` | 無効 |
+| `Accent` | `#1F6FD9` | 選択・フォーカス・スライダつまみ |
+| `Accent.Hover` | `#1A5FBA` | アクセントのホバー |
+| `Playhead` | `#D32F2F` | 現在位置カーソル |
+| `Warning` | `#B37A00` | 警告 |
+| `Error` | `#C62828` | エラー |
+
+### 7.3 テーマ切替とシステムカラー
+
+#### 7.3.1 設定項目
+
+「環境設定 > 外観」に次の 2 項目を置く。メニュー「表示 > テーマ」からも切り替えられる。
+
+| 設定 | 選択肢 | 既定値 |
+|---|---|---|
+| テーマ | **システムに従う** / ライト / ダーク | システムに従う |
+| アクセントカラー | **システムに従う** / アプリ既定 (青) / カスタム (カラーピッカー) | システムに従う |
+
+- 切り替えは **即時反映** する (再起動不要)。開いているすべてのウィンドウ・ダイアログに反映する。
+- 「システムに従う」を選んでいるときは、アプリ実行中に OS 側でテーマを変えた場合も追従する。
+
+#### 7.3.2 システムテーマの取得
+
+Avalonia の `IPlatformSettings` を使い、OS ごとの差を吸収する。
+
+| OS | 取得元 |
+|---|---|
+| Linux | xdg-desktop-portal の `org.freedesktop.appearance` (`color-scheme`, `accent-color`)。GNOME / KDE Plasma / Flatpak 環境で動作する |
+| Windows | レジストリ `AppsUseLightTheme` / `UISettings` のアクセントカラー (Avalonia が対応済み) |
+| macOS | `NSAppearance` / `controlAccentColor` (Avalonia が対応済み) |
+
+**フォールバック** (portal がない sway / i3 などの環境):
+
+1. 環境変数 `GTK_THEME` の値が `:dark` で終わる、またはテーマ名に `dark` を含む → ダーク
+2. それ以外で判定できない → **ダーク** (映像編集では暗い背景の方が見やすいため)
+3. アクセントカラーが取得できない → アプリ既定の青
+
+#### 7.3.3 システムアクセントカラー
+
+OS から得た色をそのまま使うと、背景とのコントラストが足りないことがある。そのため次の手順で調整してから `Accent` 系トークンに入れる。
+
+1. OS のアクセントカラーを OKLCH 色空間に変換する。
+2. 現在のテーマの `Bg.Panel` に対して、コントラスト比 **3:1 以上** (WCAG の非テキスト要素の基準) になるまで明度 L を調整する (ダークでは明るく、ライトでは暗く)。
+3. `Accent.Hover` は、ダークでは L を +0.06、ライトでは L を -0.06 した色にする。
+4. アクセント上の文字色 (`Fg.OnAccent`) は、白と黒のうちコントラスト比が高い方を選ぶ。
+
+#### 7.3.4 テーマに左右されない色
+
+映像の見え方や識別性を保つため、次はテーマを切り替えても変えない。
+
+| 対象 | 方針 |
+|---|---|
+| プレビュー内の映像 | テーマの影響を受けない。フレーム外 (余白) だけテーマの `Bg.Base` を使う |
+| プレビューの透明部分 | 市松模様 (グレー 2 色) で表示。テーマに関係なく同じ |
+| オブジェクト種別の色 ([6.3](#63-タイムラインウィンドウ)) | 色相は固定。ライトテーマでは枠線を `#00000040` にして背景から浮かせる |
+| 現在位置カーソル `Playhead` | 赤系で固定 (明度のみテーマごとに調整) |
+| アクセントカラー | オブジェクトの選択枠にだけ使う。オブジェクト本体の色には混ぜない |
+
+#### 7.3.5 実装
+
+- 色はすべて `DynamicResource` で参照する (`StaticResource` は禁止)。これにより実行中の切り替えが反映される。
+- `ThemeService` が設定と OS の状態を監視し、`Application.RequestedThemeVariant` とアクセント系リソースを更新する。
+
+```csharp
+public enum ThemeMode { System, Light, Dark }
+public enum AccentMode { System, AppDefault, Custom }
+
+public sealed class ThemeService
+{
+    private readonly Application _app;
+    private readonly IPlatformSettings? _platform;
+
+    public ThemeService(Application app)
+    {
+        _app = app;
+        _platform = app.PlatformSettings;
+        if (_platform is not null)
+            _platform.ColorValuesChanged += (_, _) => Apply();   // OS 側の変更に追従
+    }
+
+    public ThemeMode Mode { get; set; } = ThemeMode.System;
+    public AccentMode Accent { get; set; } = AccentMode.System;
+    public Color CustomAccent { get; set; } = Color.Parse("#2F80ED");
+
+    public void Apply()
+    {
+        _app.RequestedThemeVariant = Mode switch
+        {
+            ThemeMode.Light => ThemeVariant.Light,
+            ThemeMode.Dark  => ThemeVariant.Dark,
+            _               => ResolveSystemVariant(),          // portal → GTK_THEME → Dark
+        };
+
+        var isDark = _app.ActualThemeVariant == ThemeVariant.Dark;
+        var baseAccent = Accent switch
+        {
+            AccentMode.Custom => CustomAccent,
+            AccentMode.System when TryGetSystemAccent(out var c) => c,
+            _ => isDark ? Color.Parse("#2F80ED") : Color.Parse("#1F6FD9"),
+        };
+
+        var palette = AccentPalette.Create(baseAccent, isDark);  // 7.3.3 のコントラスト調整
+        _app.Resources["Accent"]       = new SolidColorBrush(palette.Accent);
+        _app.Resources["Accent.Hover"] = new SolidColorBrush(palette.Hover);
+        _app.Resources["Fg.OnAccent"]  = new SolidColorBrush(palette.OnAccent);
+    }
+    // ResolveSystemVariant / TryGetSystemAccent は IPlatformSettings.GetColorValues() を使い、
+    // 取得できない場合は 7.3.2 のフォールバックに従う
+}
+```
+
+### 7.4 タイポグラフィ
 
 | 用途 | フォント | サイズ |
 |---|---|---|
@@ -408,7 +536,7 @@ AviUtl の設定ダイアログをもとにする。
 
 フォントはアプリに同梱し (OFL ライセンス)、Linux 環境ごとの差を減らす。
 
-### 7.4 サイズ / 余白
+### 7.5 サイズ / 余白
 
 | 項目 | 値 |
 |---|---|
@@ -420,10 +548,10 @@ AviUtl の設定ダイアログをもとにする。
 | フォーカスリング | 1px `Accent` (内側にオフセット 0) |
 | CornerRadius | **0 (全コントロール)** |
 
-### 7.5 Avalonia スタイル実装方針
+### 7.6 Avalonia スタイル実装方針
 
 - `FluentTheme` をベースにし、`ResourceDictionary` で `ControlCornerRadius` / `OverlayCornerRadius` を 0 に上書きする。
-- 色は `ThemeVariant` (Dark / Light) ごとの `ResourceDictionary.ThemeDictionaries` で定義する。
+- 色は `ThemeVariant` (Dark / Light) ごとの `ResourceDictionary.ThemeDictionaries` で定義する。アクセント系だけは `ThemeService` が実行時に上書きする ([7.3.5](#735-実装))。
 - 独自コントロール (`TrackBar`, `TimelineCanvas`, `LayerHeader`, `IconButton`) は `ControlTheme` で見た目を定義する。
 
 ```xml
@@ -772,7 +900,7 @@ v1.0 以降に段階的に実装する。インターフェースは `VideoBuild
 
 - 読み込み: `~/.local/share/video-builder/plugins/*/` の .NET アセンブリを `AssemblyLoadContext` で分離して読み込む。
 - マニフェスト `plugin.json` (Id, Version, 対応 API バージョン) を必須にする。
-- スクリプト: AviUtl スクリプトとの互換を目指し、**Lua (NLua / MoonSharp)** で `obj.*` API のサブセットを提供する案を検討中 ([未決事項](#21-未決事項))。
+- スクリプト: AviUtl スクリプトとの互換を重視し、**Lua (NLua / MoonSharp)** で `obj.*` API のサブセットを提供する ([決定事項](#21-決定事項))。
 
 ---
 
@@ -790,7 +918,7 @@ XDG Base Directory に従う (Windows / macOS では各 OS の標準パス)。
 | 自動保存 | `$XDG_DATA_HOME/video-builder/autosave/` (既定 5 分間隔、10 世代) |
 | ログ | `$XDG_STATE_HOME/video-builder/logs/` |
 
-主な環境設定の項目: 最大画像サイズ、キャッシュサイズ、レイヤー高さ、ウィンドウモード (分離 / ドッキング)、テーマ、言語、ショートカット、ハードウェアデコードの有効化、プレビュー品質。
+主な環境設定の項目: 最大画像サイズ、キャッシュサイズ、レイヤー高さ、ウィンドウモード (分離 / ドッキング)、テーマ (システムに従う / ライト / ダーク)、アクセントカラー (システムに従う / アプリ既定 / カスタム)、言語、ショートカット、ハードウェアデコードの有効化、プレビュー品質。
 
 ---
 
@@ -885,7 +1013,7 @@ video-builder/
 
 | マイルストーン | 内容 | 完了条件 |
 |---|---|---|
-| **M0: 基盤** | ソリューション作成、テーマ (角型・ダーク)、アイコン生成、ウィンドウ骨格 | 空のメイン / タイムライン / 設定ダイアログが表示される |
+| **M0: 基盤** | ソリューション作成、テーマ (角型・ライト / ダーク切替・システムカラー追従)、アイコン生成、ウィンドウ骨格 | 空のメイン / タイムライン / 設定ダイアログが表示される |
 | **M1: タイムライン** | Core モデル、TimelineCanvas、オブジェクトの追加・移動・長さ変更、Undo | 図形オブジェクトをタイムラインで編集できる |
 | **M2: プレビュー** | RenderEngine (画像・図形・テキスト)、標準描画、プレビュー表示 | 静止画とテキストの合成がプレビューに出る |
 | **M3: メディア** | FFmpeg 入力、動画・音声オブジェクト、音声再生、A/V 同期 | 動画を読み込んで音声付きで再生できる |
@@ -897,16 +1025,19 @@ video-builder/
 
 ---
 
-## 21. 未決事項
+## 21. 決定事項
 
-| # | 項目 | 選択肢 | 現時点の推し |
+初版で未決だった項目は、次のとおり決定した。
+
+| # | 項目 | 決定 | 補足 |
 |---|---|---|---|
-| 1 | スクリプト言語 | Lua (AviUtl 互換重視) / C# Script (Roslyn) | Lua (互換性を重視) |
-| 2 | 既定のウィンドウモード | 分離 (AviUtl 準拠) / ドッキング | X11 は分離、Wayland はドッキング |
-| 3 | GPU バックエンド | Skia GL / Skia Vulkan | まず GL、Vulkan は後から |
-| 4 | 3D (カメラ制御) の実装方式 | Skia の 3D 行列 (`SKMatrix44`) / 独自 OpenGL | `SKMatrix44` で始める |
-| 5 | 色空間 | sRGB 8bit / リニア 16bit float | v1.0 は 8bit、内部設計は float に拡張できる形にする |
-| 6 | アプリ名 | Video Builder (仮) | – |
+| 1 | スクリプト言語 | **Lua** | AviUtl スクリプトとの互換性を優先する。C# スクリプトは採用しない |
+| 2 | 既定のウィンドウモード | **X11 は分離、Wayland はドッキング** | 環境設定でいつでも切り替えられる |
+| 3 | GPU バックエンド | **まず Skia GL** | Vulkan は v1.0 以降に対応する |
+| 4 | 3D (カメラ制御) の実装方式 | **`SKMatrix44`** | 性能が足りない場合に独自 OpenGL を検討する |
+| 5 | 色空間 | **v1.0 は sRGB 8bit** | 内部設計は 16bit float (リニア) に拡張できる形にする |
+| 6 | アプリ名 | **video-builder** | リポジトリ名と同じ。C# の名前空間は `VideoBuilder` |
+| 7 | テーマ | **ライト / ダーク切替。既定はシステムに従う** | アクセントカラーもシステムに従う ([7.3](#73-テーマ切替とシステムカラー)) |
 
 ---
 
