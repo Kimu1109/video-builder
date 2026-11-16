@@ -107,7 +107,7 @@ public sealed class TimelineObject
         foreach (var v in e.Tracks.Values)
         {
             v.EnsureSections(Sections);
-            double value = v.IsMoving && v.Mode != MovementMode.Delta ? v.Evaluate(bounds, frame) : v.Values[index];
+            double value = v.IsMoving && (v.Custom != null || v.Mode != MovementMode.Delta) ? v.Evaluate(bounds, frame) : v.Values[index];
             v.Values.Insert(index + 1, value);
         }
         KeyFrames.Insert(index, frame);

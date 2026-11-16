@@ -2,6 +2,8 @@
   <ItemGroup>
     <ProjectReference Include="../VideoBuilder.Core/VideoBuilder.Core.csproj" />
     <ProjectReference Include="../VideoBuilder.Media/VideoBuilder.Media.csproj" />
+    <ProjectReference Include="../VideoBuilder.Plugin.Abstractions/VideoBuilder.Plugin.Abstractions.csproj" />
+    <PackageReference Include="MoonSharp" />
     <PackageReference Include="SkiaSharp" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
   </ItemGroup>

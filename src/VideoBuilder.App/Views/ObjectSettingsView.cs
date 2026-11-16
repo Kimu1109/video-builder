@@ -25,6 +25,7 @@ public sealed class ObjectSettingsView : UserControl
     private readonly TextBlock _empty;
     private readonly List<Action> _refreshers = new();
     private readonly HashSet<string> _collapsed = new();
+    private readonly List<Action> _frameWatchers = new();
     private string _signature = "";
     private bool _refreshing;
 
@@ -52,6 +53,8 @@ public sealed class ObjectSettingsView : UserControl
         _session.SelectionChanged += Sync;
         _session.ProjectChanged += Sync;
         _session.FrameChanged += RefreshValues;
+        // 描画が終わるたびに確認するもの (スクリプトのエラー表示)
+        Svc.Preview.FrameReady += () => { foreach (var w in _frameWatchers.ToList()) w(); };
         Sync();
     }
 
@@ -80,6 +83,7 @@ public sealed class ObjectSettingsView : UserControl
         _body.Children.Clear();
         _header.Children.Clear();
         _refreshers.Clear();
+        _frameWatchers.Clear();
         var o = Target;
         _empty.IsVisible = o == null;
         if (o == null)
@@ -138,6 +142,21 @@ public sealed class ObjectSettingsView : UserControl
 
         var rows = new StackPanel { Margin = new Thickness(8, 4, 18, 8), Spacing = 2 };
         foreach (var p in def.Params) rows.Children.Add(BuildParam(index, p));
+        if (def.Id == "filter.script")
+        {
+            // スクリプトのエラーを入力欄の下に出す
+            var error = new TextBlock { TextWrapping = TextWrapping.Wrap, IsVisible = false };
+            error[!TextBlock.ForegroundProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Error");
+            rows.Children.Add(error);
+            void Show()
+            {
+                var t = Target;
+                var message = t == null ? null : ScriptEffect.ErrorOf(t.Id);
+                error.Text = message; error.IsVisible = message != null;
+            }
+            _refreshers.Add(Show);
+            _frameWatchers.Add(Show);
+        }
         rows.IsVisible = !_collapsed.Contains(collapseKey);
 
         var head = new DockPanel { Margin = new Thickness(4, 0, 16, 0), Height = 24 };
@@ -292,7 +311,8 @@ public sealed class ObjectSettingsView : UserControl
             right.IsEnabled = rightSlider.IsEnabled = rightSteps.IsEnabled = moving;
             // 移動方法を設定したパラメータは、名前のボタンを強調する
             name.Classes.Set("accent", moving);
-            ToolTip.SetTip(name, moving ? $"移動方法: {ModeName(t.Mode)}" : "クリックで移動方法を選択");
+            string modeName = t.Custom != null ? Interpolators.Find(t.Custom)?.DisplayName ?? $"{t.Custom} (プラグインがありません)" : ModeName(t.Mode);
+            ToolTip.SetTip(name, moving ? $"移動方法: {modeName}" : "クリックで移動方法を選択");
         });
         return grid;
     }
@@ -318,8 +338,15 @@ public sealed class ObjectSettingsView : UserControl
         var menu = new ContextMenu();
         foreach (var (mode, label) in Modes)
         {
-            var item = new MenuItem { Header = label, ToggleType = MenuItemToggleType.Radio, IsChecked = t.Mode == mode };
-            item.Click += (_, _) => Change("移動方法の変更", v => v.Mode = mode);
+            var item = new MenuItem { Header = label, ToggleType = MenuItemToggleType.Radio, IsChecked = t.Custom == null && t.Mode == mode };
+            item.Click += (_, _) => Change("移動方法の変更", v => { v.Mode = mode; v.Custom = null; });
+            menu.Items.Add(item);
+        }
+        // プラグインが追加した移動方法
+        foreach (var custom in Interpolators.All)
+        {
+            var item = new MenuItem { Header = custom.DisplayName, ToggleType = MenuItemToggleType.Radio, IsChecked = t.Custom == custom.Id };
+            item.Click += (_, _) => Change("移動方法の変更", v => v.Custom = custom.Id);
             menu.Items.Add(item);
         }
         menu.Items.Add(Menus.Sep());

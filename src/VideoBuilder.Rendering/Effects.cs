@@ -11,8 +11,12 @@ public static class Effects
     {
         Register(new ColorCorrect()); Register(new Blur()); Register(new Border()); Register(new Shadow());
         Register(new Clip()); Register(new Mosaic()); Register(new ChromaKey()); Register(new Mono());
-        Register(new Flip()); Register(new Fade());
+        Register(new Flip()); Register(new Fade()); Register(new ScriptEffect());
     }
+
+    private static readonly Dictionary<string, VideoBuilder.Plugins.IVideoSource> Sources = new();
+    public static void RegisterSource(string definitionId, VideoBuilder.Plugins.IVideoSource source) { lock (Sources) Sources[definitionId] = source; }
+    public static VideoBuilder.Plugins.IVideoSource? FindSource(string id) { lock (Sources) return Sources.GetValueOrDefault(id); }
 
     public static void Register(IVideoEffect effect) => Map[effect.Id] = effect;
     public static IVideoEffect? Find(string id) => Map.TryGetValue(id, out var e) ? e : null;

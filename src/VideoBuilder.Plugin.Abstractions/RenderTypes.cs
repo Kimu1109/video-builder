@@ -30,6 +30,11 @@ public sealed class RenderContext
         }
         return SKSurface.Create(new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Premul));
     }
+    /// <summary>
+    /// 今描いているオブジェクトの描画に足す補正 (スクリプト制御などの効果が書き込む)。オブジェクトごとに初期化される。
+    /// </summary>
+    public DrawModifiers Modifiers = DrawModifiers.None;
+
     /// <summary>フレームを描き終わったら捨てる画像。</summary>
     public List<IDisposable> Temporaries { get; } = new();
 
@@ -44,6 +49,14 @@ public sealed class RenderContext
         foreach (var d in Temporaries) d.Dispose();
         Temporaries.Clear();
     }
+}
+
+/// <summary>標準描画の値に足す (Zoom と Alpha は掛ける) 補正。</summary>
+public struct DrawModifiers
+{
+    public float Ox, Oy, Oz, Rx, Ry, Rz;
+    public float Zoom, Alpha;
+    public static DrawModifiers None => new() { Zoom = 1, Alpha = 1 };
 }
 
 /// <summary>効果に渡す引数。パラメータは現在フレームで評価済みの値を返す。</summary>

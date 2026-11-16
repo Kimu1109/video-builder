@@ -208,6 +208,17 @@ public sealed class PreferencesDialog : DialogBase
         keys.Click += async (_, _) => await new ShortcutDialog().ShowDialog(this);
         Body.Children.Add(keys);
 
+        Body.Children.Add(Heading("プラグイン"));
+        var plugins = VideoBuilder.Rendering.PluginLoader.Loaded;
+        var pluginText = new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap,
+            Text = (plugins.Count == 0 ? "プラグインはありません。" : string.Join("\n", plugins.Select(pl => pl.Loaded ? $"{pl.Name} {pl.Version}" : $"{pl.Name}: {pl.Error}")))
+                   + $"\n置き場所: {AppPaths.PluginDir}",
+        };
+        pluginText.Classes.Add("secondary");
+        Body.Children.Add(pluginText);
+
         Body.Children.Add(Heading("FFmpeg"));
         var ff = new TextBlock
         {

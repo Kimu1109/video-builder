@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../VideoBuilder.Core/VideoBuilder.Core.csproj" />
+    <PackageReference Include="SkiaSharp" />
+  </ItemGroup>
+</Project>

@@ -14,6 +14,24 @@ public enum MovementMode
     Repeat,     // 反復移動
 }
 
+/// <summary>プラグインが追加する移動方法。</summary>
+public interface IInterpolator
+{
+    /// <summary>プロジェクトファイルに保存される ID。</summary>
+    string Id { get; }
+    string DisplayName { get; }
+    /// <param name="t">区間の中での進み具合 (0〜1)。</param>
+    double Evaluate(double start, double end, double t);
+}
+
+public static class Interpolators
+{
+    private static readonly Dictionary<string, IInterpolator> Map = new();
+    public static void Register(IInterpolator i) { lock (Map) Map[i.Id] = i; }
+    public static IInterpolator? Find(string id) { lock (Map) return Map.GetValueOrDefault(id); }
+    public static IReadOnlyList<IInterpolator> All { get { lock (Map) return Map.Values.ToList(); } }
+}
+
 /// <summary>
 /// 中間点で区切った区間ごとの値を持つパラメータ。
 /// Values の要素数は常に「区間数 + 1」(開始・各中間点・終了)。
@@ -26,6 +44,8 @@ public sealed class AnimatedValue
     public bool Decel { get; set; }
     /// <summary>ランダム移動・反復移動の間隔 (フレーム)。</summary>
     public int Interval { get; set; } = 10;
+    /// <summary>プラグインの移動方法の ID。設定されていれば Mode より優先する。</summary>
+    public string? Custom { get; set; }
 
     public AnimatedValue() { }
 
@@ -34,11 +54,11 @@ public sealed class AnimatedValue
         Values = Enumerable.Repeat(value, sections + 1).ToList();
     }
 
-    public bool IsMoving => Mode != MovementMode.None;
+    public bool IsMoving => Mode != MovementMode.None || Custom != null;
 
     public AnimatedValue Clone() => new()
     {
-        Values = new List<double>(Values), Mode = Mode, Accel = Accel, Decel = Decel, Interval = Interval,
+        Values = new List<double>(Values), Mode = Mode, Accel = Accel, Decel = Decel, Interval = Interval, Custom = Custom,
     };
 
     /// <summary>区間数に合わせて Values の長さを揃える。</summary>
@@ -63,6 +83,12 @@ public sealed class AnimatedValue
         int len = bounds[i + 1] - bounds[i];
         double t = len <= 0 ? 0 : (double)(frame - bounds[i]) / len;
 
+        if (Custom != null)
+        {
+            // プラグインが入っていない環境では直線移動で代用する
+            var custom = Interpolators.Find(Custom);
+            return custom != null ? custom.Evaluate(V(i), V(i + 1), ApplyEase(t)) : Lerp(V(i), V(i + 1), ApplyEase(t));
+        }
         switch (Mode)
         {
             case MovementMode.None:

@@ -428,3 +428,164 @@ public class GpuRenderTests
         Console.WriteLine($"BENCH 1080p gpu ({gpu.Renderer}): {Measure(engine):0.0} ms/frame");
     }
 }
+
+public class ScriptAndPluginTests
+{
+    private static Project Small()
+    {
+        var p = new Project();
+        p.Settings.Width = 320; p.Settings.Height = 240;
+        return p;
+    }
+
+    private static SKColor Pixel(Project p, int frame, int x, int y)
+    {
+        using var engine = new RenderEngine();
+        using var img = engine.RenderImage(p, p.Root, frame);
+        using var bmp = SKBitmap.FromImage(img);
+        return bmp.GetPixel(x, y);
+    }
+
+    private static (Project, TimelineObject, Effect) WithScript(string code)
+    {
+        var p = Small();
+        var o = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 60);
+        o.Main.Values["color"] = "#FF0000";
+        o.Main.Tracks["size"] = new AnimatedValue(40);
+        var fx = ObjectFactory.AddFilter(o, "filter.script");
+        fx.Values["code"] = code;
+        p.Root.Objects.Add(o);
+        return (p, o, fx);
+    }
+
+    [Fact]
+    public void Lua_script_moves_the_object_using_time()
+    {
+        var (p, o, _) = WithScript("obj.ox = obj.frame * 2\nobj.oy = -50");
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 160, 70));
+        Assert.Equal(SKColors.Black, Pixel(p, 0, 160, 120));
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 30, 220, 70));   // 30 フレーム目: 右へ 60
+        Assert.Null(ScriptEffect.ErrorOf(o.Id));
+    }
+
+    [Fact]
+    public void Lua_script_can_scale_fade_and_use_math()
+    {
+        var (p, _, _) = WithScript("obj.zoom = 2\nobj.alpha = math.max(0, 0.5)");
+        var c = Pixel(p, 0, 125, 120);   // 2 倍 (120..200) で半透明
+        Assert.InRange(c.Red, 120, 135);
+    }
+
+    [Fact]
+    public void Lua_errors_and_endless_loops_are_reported_without_stopping_the_render()
+    {
+        var (p, o, fx) = WithScript("obj.ox = = 1");
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 160, 120));    // スクリプトなしと同じ絵になる
+        Assert.NotNull(ScriptEffect.ErrorOf(o.Id));
+
+        fx.Values["code"] = "obj.ox = nothing.here";
+        Pixel(p, 0, 160, 120);
+        Assert.Contains("nil", ScriptEffect.ErrorOf(o.Id));
+
+        fx.Values["code"] = "while true do end";
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 160, 120));
+        Assert.True(sw.Elapsed.TotalSeconds < 10, "無限ループが止まらない");
+        Assert.Contains("中断", ScriptEffect.ErrorOf(o.Id));
+
+        fx.Values["code"] = "obj.ox = 0";
+        Pixel(p, 0, 160, 120);
+        Assert.Null(ScriptEffect.ErrorOf(o.Id));                         // 直せばエラーは消える
+    }
+
+    [Fact]
+    public void Lua_sandbox_has_no_file_or_os_access()
+    {
+        var (p, o, _) = WithScript("local f = io.open('/etc/passwd')\nobj.ox = 100");
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 160, 120));    // io がないのでエラーになり、動かない
+        Assert.NotNull(ScriptEffect.ErrorOf(o.Id));
+        var (p2, o2, _) = WithScript("os.execute('true')");
+        Pixel(p2, 0, 160, 120);
+        Assert.NotNull(ScriptEffect.ErrorOf(o2.Id));
+    }
+
+    private static string? SamplePluginDir()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "VideoBuilder.sln"))) dir = dir.Parent;
+        if (dir == null) return null;
+        var bin = Path.Combine(dir.FullName, "samples", "SamplePlugin", "bin");
+        if (!Directory.Exists(bin)) return null;
+        return Directory.EnumerateFiles(bin, "SamplePlugin.dll", SearchOption.AllDirectories)
+            .OrderByDescending(File.GetLastWriteTimeUtc).Select(Path.GetDirectoryName).FirstOrDefault();
+    }
+
+    [Fact]
+    public void Sample_plugin_loads_and_its_filter_source_and_interpolator_work()
+    {
+        var dir = SamplePluginDir();
+        Assert.NotNull(dir);   // ソリューション全体をビルドしていれば必ずある
+        if (!EffectRegistry.Exists("sample.vignette"))
+        {
+            var info = PluginLoader.Load(dir!, Path.Combine(dir!, "plugin.json"));
+            Assert.True(info.Loaded, info.Error);
+            Assert.Equal("サンプルプラグイン", info.Name);
+        }
+        Assert.Contains(EffectRegistry.Filters, f => f.Id == "sample.vignette");
+
+        // メディアオブジェクト: 市松模様 (左上のマスは塗られ、その隣は透明 = 黒)
+        var p = Small();
+        var checker = ObjectFactory.Create("sample.checker", 0, 0, 60);
+        checker.Main.Values["color"] = "#00FF00";
+        p.Root.Objects.Add(checker);
+        Assert.Equal(new SKColor(0, 255, 0), Pixel(p, 0, 10, 10));
+        Assert.Equal(SKColors.Black, Pixel(p, 0, 50, 10));
+
+        // フィルタ: 中心はそのまま、隅は暗くなる
+        var q = Small();
+        var bg = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 60);
+        bg.Main.Values["type"] = "0";
+        ObjectFactory.AddFilter(bg, "sample.vignette").Tracks["strength"] = new AnimatedValue(100);
+        q.Root.Objects.Add(bg);
+        Assert.Equal(new SKColor(255, 255, 255), Pixel(q, 0, 160, 120));
+        Assert.True(Pixel(q, 0, 2, 2).Red < 60);
+
+        // 移動方法: 終点に着いたあとも ID で保存・復元できる
+        var v = new AnimatedValue { Values = new() { 0, 100 }, Custom = "sample.bounce" };
+        Assert.Equal(100, v.Evaluate(new[] { 0, 100 }, 100), 3);
+        Assert.True(v.Evaluate(new[] { 0, 100 }, 40) > 40);        // 直線より先に進む
+        var o = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 60);
+        o.Draw!.Tracks["x"].Custom = "sample.bounce";
+        var r = new Project(); r.Root.Objects.Add(o);
+        Assert.Equal("sample.bounce", ProjectSerializer.FromJson(ProjectSerializer.ToJson(r)).Root.Objects[0].Draw!.Tracks["x"].Custom);
+    }
+
+    [Fact]
+    public void Broken_plugins_are_reported_not_thrown()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"vb-plugins-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "a"));
+            File.WriteAllText(Path.Combine(root, "a", "plugin.json"), "{ not json");
+            Directory.CreateDirectory(Path.Combine(root, "b"));
+            File.WriteAllText(Path.Combine(root, "b", "plugin.json"), "{\"id\":\"x.b\",\"apiVersion\":99,\"assembly\":\"b.dll\"}");
+            Directory.CreateDirectory(Path.Combine(root, "c"));
+            File.WriteAllText(Path.Combine(root, "c", "plugin.json"), "{\"id\":\"x.c\",\"apiVersion\":1,\"assembly\":\"../../outside.dll\"}");
+            var result = PluginLoader.LoadAll(root);
+            Assert.Equal(3, result.Count);
+            Assert.All(result, r => Assert.False(r.Loaded));
+            Assert.Contains("API", result[1].Error);
+            Assert.Contains("見つかりません", result[2].Error);
+        }
+        finally { try { Directory.Delete(root, true); } catch { } }
+    }
+
+    [Fact]
+    public void Missing_interpolator_plugin_falls_back_to_linear()
+    {
+        var v = new AnimatedValue { Values = new() { 0, 100 }, Custom = "not.installed" };
+        Assert.Equal(50, v.Evaluate(new[] { 0, 100 }, 50), 6);
+    }
+}
+

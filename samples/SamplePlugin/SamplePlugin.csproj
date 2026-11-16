@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- 依存先 (API・SkiaSharp) はアプリ本体のものを使うので、出力フォルダにコピーしない -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/VideoBuilder.Plugin.Abstractions/VideoBuilder.Plugin.Abstractions.csproj" Private="false" ExcludeAssets="runtime" />
+    <PackageReference Include="SkiaSharp" ExcludeAssets="runtime" />
+    <None Include="plugin.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -74,3 +74,6 @@ logout Exit
 history History
 toggle_on ToggleOn
 toggle_off ToggleOff
+code Code
+extension Extension
+translate Translate

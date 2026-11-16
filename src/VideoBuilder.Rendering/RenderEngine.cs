@@ -160,6 +160,7 @@ public sealed class RenderEngine : IDisposable
                         var src = GetSource(ctx, obj, bounds, frame, depth);
                         if (src == null) break;
                         var sprite = Sprite.Centered(src);
+                        ctx.Modifiers = DrawModifiers.None;
                         for (int i = 1; i < obj.Effects.Count; i++)
                         {
                             var e = obj.Effects[i];
@@ -168,7 +169,7 @@ public sealed class RenderEngine : IDisposable
                             if (fx != null)
                                 sprite = fx.Apply(sprite, new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx });
                         }
-                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, cameras, W, H, depth == 0 ? LastQuads : null);
+                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, cameras, W, H, depth == 0 ? LastQuads : null, ctx.Modifiers);
                         break;
                     }
                 }
@@ -181,7 +182,7 @@ public sealed class RenderEngine : IDisposable
     }
 
     private static void DrawSprite(SKCanvas canvas, Sprite sprite, TimelineObject obj, int[] bounds, int frame,
-        List<GroupState> groups, List<CameraState> cameras, int W, int H, List<(string, SKPoint[])>? quads)
+        List<GroupState> groups, List<CameraState> cameras, int W, int H, List<(string, SKPoint[])>? quads, DrawModifiers mod)
     {
         var draw = obj.Draw;
         float x = 0, y = 0, z = 0, scale = 1, rot = 0, rx = 0, ry = 0, alpha = 1;
@@ -195,6 +196,9 @@ public sealed class RenderEngine : IDisposable
             alpha = 1 - E("alpha") / 100f;
             blend = draw.GetInt("blend");
         }
+        x += mod.Ox; y += mod.Oy; z += mod.Oz;
+        rot += mod.Rz; rx += mod.Rx; ry += mod.Ry;
+        scale *= mod.Zoom; alpha *= mod.Alpha;
         const float Rad = MathF.PI / 180f;
         // オブジェクト自身の変形 (拡大 → 回転 → 移動)。そのあとにグループ制御を内側から順にかける
         var model = Matrix4x4.CreateScale(scale, scale, 1) * Matrix4x4.CreateRotationZ(rot * Rad);
@@ -345,7 +349,9 @@ public sealed class RenderEngine : IDisposable
                 return ctx.Own(surface.Snapshot());
             }
         }
-        return null;
+        // プラグインが追加したメディアオブジェクト
+        var source = Effects.FindSource(main.DefinitionId);
+        return source?.Render(new EffectArgs { Effect = main, Object = obj, Bounds = bounds, Context = ctx });
     }
 
     /// <summary>オブジェクト内のフレーム位置を、素材の再生位置 (秒) に直す。</summary>

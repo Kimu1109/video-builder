@@ -20,13 +20,14 @@ public static class Svc
         Settings = AppSettings.Load();
         Aliases = new AliasStore(AppPaths.AliasDir);
         RegisterBundledFonts();
+        if (!_pluginsLoaded) { _pluginsLoaded = true; VideoBuilder.Rendering.PluginLoader.LoadAll(AppPaths.PluginDir); }
         Session.History.Limit = Settings.UndoLimit;
         Theme = new ThemeService(app, Settings);
         Theme.Apply();
         Preview = new PreviewService(Session, Settings);
     }
 
-    private static bool _fontsRegistered;
+    private static bool _fontsRegistered, _pluginsLoaded;
 
     /// <summary>同梱の Noto Sans JP を、テキストオブジェクトの描画でも使えるようにする。</summary>
     private static void RegisterBundledFonts()

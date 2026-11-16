@@ -163,6 +163,8 @@ public static class EffectRegistry
         F("filter.mono", "単色化", "Icon.InvertColors", T("strength", "強さ", 0, 100, 100), Col("color", "色", "#FFFFFF"), C("keep", "輝度を保持する", true));
         F("filter.flip", "反転", "Icon.Flip", C("vertical", "上下反転"), C("horizontal", "左右反転"), C("luma", "輝度反転"));
         F("filter.fade", "フェード", "Icon.Gradient", T("in", "イン", 0, 30, 0.5, 2), T("out", "アウト", 0, 30, 0.5, 2));
+        F("filter.script", "スクリプト制御", "Icon.Code",
+            new ParamDefinition { Key = "code", Name = "Lua スクリプト", Kind = ParamKind.MultilineText, DefaultText = "-- obj.ox, obj.oy : 位置のずれ   obj.zoom : 拡大率 (1 = 等倍)\n-- obj.rz : 回転   obj.alpha : 不透明度 (1 = そのまま)\nobj.oy = math.sin(obj.time * 4) * 20" });
     }
 
     public static void Register(EffectDefinition def)

@@ -88,6 +88,7 @@ public static class AppPaths
     public static string ConfigDir => Xdg("XDG_CONFIG_HOME", Environment.SpecialFolder.ApplicationData, ".config");
     public static string DataDir => Xdg("XDG_DATA_HOME", Environment.SpecialFolder.LocalApplicationData, ".local", "share");
     public static string CacheDir => Xdg("XDG_CACHE_HOME", Environment.SpecialFolder.LocalApplicationData, ".cache");
+    public static string PluginDir => Path.Combine(DataDir, "plugins");
     public static string AliasDir => Path.Combine(DataDir, "aliases");
     public static string SettingsFile => Path.Combine(ConfigDir, "settings.json");
     public static string AutoSaveDir => Path.Combine(DataDir, "autosave");
