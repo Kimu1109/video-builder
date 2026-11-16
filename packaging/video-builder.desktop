@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=video-builder
+GenericName=Video Editor
+GenericName[ja]=動画編集
+Comment=AviUtl-like video editor
+Comment[ja]=AviUtl ライクな動画編集アプリ
+Exec=video-builder %f
+Icon=video-builder
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=application/x-video-builder-project;
+StartupWMClass=video-builder

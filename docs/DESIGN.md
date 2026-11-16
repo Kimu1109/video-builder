@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 文書バージョン | 0.4 |
+| 文書バージョン | 0.5 |
 | 作成日 | 2026-11-16 |
 | 対象 | video-builder 初期実装 〜 v1.0 |
 
@@ -992,18 +992,22 @@ video-builder/
 │  ├─ VideoBuilder.Editing/       # EditorSession, UndoStack, IEditCommand
 │  ├─ VideoBuilder.Core/          # Project, Scene, TimelineObject, Effect, AnimatedValue, EffectRegistry
 │  ├─ VideoBuilder.Rendering/     # RenderEngine, Effects, Generators (テキスト・図形), AudioMixer, Exporter
-│  └─ VideoBuilder.Media/         # VideoReader, AudioReader, MediaWriter, AudioOutput
+│  ├─ VideoBuilder.Media/         # VideoReader, AudioReader, MediaWriter, AudioOutput
+│  └─ VideoBuilder.Plugin.Abstractions/   # プラグイン用の公開インターフェース
+├─ samples/
+│  └─ SamplePlugin/               # プラグインの見本
 ├─ tests/
 │  ├─ VideoBuilder.Tests/         # Core / Editing / Media / Rendering の単体テスト
 │  └─ VideoBuilder.App.Tests/     # Avalonia.Headless による UI テスト
 ├─ tools/
-│  └─ IconGen/                    # Material Symbols SVG → Icons.axaml 変換
+│  ├─ IconGen/                    # Material Symbols SVG → Icons.axaml 変換
+│  └─ I18n/                       # 日本語 → 英語の対応表 (en.txt) と生成スクリプト
+├─ packaging/                     # .desktop・アイコン・AppImage 用スクリプト
 └─ docs/
    └─ DESIGN.md                   # 本書
 ```
 
 `VideoBuilder.Application` という名前は Avalonia の `Application` クラスと衝突するため、プロジェクト名を `VideoBuilder.Editing` にした。
-`VideoBuilder.Plugin.Abstractions` と `packaging/` は、それぞれプラグイン API・配布の実装時に追加する。
 
 ---
 
@@ -1042,7 +1046,7 @@ video-builder/
 
 ## 22. 実装状況
 
-2026-11-16 時点。ロードマップ ([20 章](#20-開発ロードマップ)) の M0〜M6 と、M7 の一部を実装した。
+2026-11-16 時点。ロードマップ ([20 章](#20-開発ロードマップ)) の M0〜M7 と、M8 のうちプラグイン API・スクリプトを実装した。
 
 ### 22.1 実装済み
 
@@ -1055,7 +1059,12 @@ video-builder/
 | アニメーション (M4) | 中間点、移動方法 9 種 (移動無し・直線・曲線・加減速・瞬間・中間点無視・移動量指定・ランダム・反復)、加速 / 減速、トラックバー (左右の値・スライダー・数式入力) |
 | エフェクト (M5) | 色調補正・ぼかし・縁取り・シャドー・クリッピング・モザイク・クロマキー・単色化・反転・フェード、フィルタオブジェクト、合成モード 13 種 |
 | 出力 (M6) | H.264 / H.265 / VP9 / AV1 / ProRes / 連番 PNG / WAV / FLAC (その環境の FFmpeg にあるエンコーダだけを表示) |
-| M7 の一部 | シーンとシーンオブジェクト、グループ制御、自動保存 (10 世代) と復元 |
+| 仕上げ (M7) | シーンとシーンオブジェクト、グループ制御、カメラ制御 (3D: Z・X/Y 軸回転・視点・視野角)、エイリアス、自動保存 (10 世代) と復元 |
+| タイムライン表示 | 音声波形 (ディスクにキャッシュ)、動画・画像のサムネイル、BPM グリッドと拍へのスナップ、出力範囲 (`[` `]`) |
+| 素材 | 見つからない素材の付け替え (フォルダから同名ファイルを検索)、相対パスによる自動復元、素材を収集して保存 |
+| 操作 | ショートカットのカスタマイズ、日本語 / 英語の切替 |
+| 拡張 (M8) | プラグイン API (フィルタ効果・メディアオブジェクト・移動方法) とサンプル、Lua によるスクリプト制御 |
+| 配布 | AppImage 用のビルドスクリプト (`packaging/appimage/build.sh`) |
 
 ### 22.2 設計書との差分
 
@@ -1071,14 +1080,23 @@ video-builder/
 
 ### 22.3 未実装
 
-カメラ制御 (3D)、エイリアス、Lua スクリプト、プラグイン API、ハードウェアデコード、プロキシ生成、音声波形・動画サムネイルのタイムライン表示、
-BPM グリッド、出力範囲の指定、ショートカットのカスタマイズ、国際化 (英語)、素材の再リンクと「素材を収集して保存」、`.exo` インポート、
-AppImage / Flatpak のパッケージング、Windows / macOS での動作確認。
+| 項目 | 状況 |
+|---|---|
+| ハードウェアデコード | 未着手。GPU のある環境で確認しながら実装する必要がある |
+| プロキシ生成 | 未着手 |
+| `.exo` インポート | 未着手。実際の `.exo` ファイルで確認しながら実装する必要がある |
+| プラグインの音声効果・入力・出力 | API が未定義 (今は映像のフィルタ・メディアオブジェクト・移動方法のみ) |
+| カメラ制御の奥行きによる並べ替え・深度ぼけ | 未実装。描画順は常にレイヤー順 |
+| Flatpak | 未着手 |
+| AppImage | AppDir を作って起動するところまで確認。`appimagetool` による AppImage 化は未確認 |
+| Windows / macOS | 動作未確認。GPU 描画は Linux のみ |
 
 ### 22.4 確認できていないこと
 
 - **GPU 描画の速度**: 開発環境に GPU がなく、ソフトウェア実装の OpenGL (llvmpipe) でしか動かしていない。絵が CPU 描画と一致することは確認したが、実際の GPU でどれだけ速くなるかは未計測。
 - **音声の再生**: 開発環境に音声デバイスがないため、OpenAL での実際の出力は確認していない (デバイスがない場合に無音で再生が進むことは確認済み)。
+- **波形・サムネイル・BPM グリッド**: テスト用の動画で表示を確認した。長時間の素材での速度は未計測。
+- **英語表示**: 主要な画面を確認した。エラーメッセージの一部 (FFmpeg やプラグインの読み込みエラーの詳細) は日本語のまま。
 - **実機での操作感**: 画面は仮想ディスプレイ上のスクリーンショットと UI 自動テストで確認した。Wayland・タイル型 WM・IME での動作は未確認。
 
 ---
@@ -1095,6 +1113,41 @@ AppImage / Flatpak のパッケージング、Windows / macOS での動作確認
 | 出力 | プレビューと同じ方式で描く。出力用スレッドが自分の GPU コンテキストを作る |
 | 対応 OS | Linux (`libEGL.so.1`)。Windows / macOS は未対応で、CPU 描画になる |
 | 確認方法 | 同じシーンを CPU と GPU で描いて比較するテスト (平均の差 0.27 / 255) |
+
+---
+
+### 22.6 プラグインの作り方
+
+`samples/SamplePlugin` が見本。
+
+1. クラスライブラリを作り、`VideoBuilder.Plugin.Abstractions` を参照する。
+2. `IPlugin` を実装し、`Initialize(IPluginHost host)` で登録する。
+   - `host.RegisterFilter(定義, IVideoEffect)` … フィルタ効果
+   - `host.RegisterMediaObject(定義, IVideoSource)` … メディアオブジェクト
+   - `host.RegisterInterpolator(IInterpolator)` … トラックバーの移動方法
+3. `plugin.json` (id / name / version / apiVersion / assembly) と DLL を、`$XDG_DATA_HOME/video-builder/plugins/<名前>/` に置く。
+
+読み込みの結果 (失敗した場合は理由) は、環境設定の「プラグイン」に表示される。
+プラグインはアプリと同じ権限で動くので、信頼できるものだけを入れること。
+
+### 22.7 スクリプト制御 (Lua)
+
+フィルタ効果「スクリプト制御」に書いた Lua が、フレームごとに実行される。
+
+| 変数 | 内容 |
+|---|---|
+| `obj.ox` `obj.oy` `obj.oz` | 位置に足す値 (書き込み可) |
+| `obj.rx` `obj.ry` `obj.rz` | 回転に足す値 (度, 書き込み可) |
+| `obj.zoom` | 拡大率に掛ける値 (1 = 等倍, 書き込み可) |
+| `obj.alpha` | 不透明度に掛ける値 (0〜1, 書き込み可) |
+| `obj.x` `obj.y` `obj.z` | 標準描画の値 (読み取り) |
+| `obj.time` `obj.frame` `obj.totaltime` `obj.totalframe` `obj.framerate` | オブジェクト内の時刻 |
+| `obj.w` `obj.h` `obj.layer` `obj.screen_w` `obj.screen_h` | 大きさ・レイヤー・画面サイズ |
+| `obj.rand(min, max [, seed, frame])` | 再現性のある乱数 (整数) |
+
+- AviUtl の `obj.*` のうち、上の表のものだけに対応する (`obj.draw` や `obj.effect` などは使えない)。
+- ファイルや OS には触れない (`io` `os` は使えない)。他人のプロジェクトを開いても、スクリプトが勝手にファイルを操作することはない。
+- 命令数に上限があり、無限ループは中断してエラーを表示する。
 
 ---
 
