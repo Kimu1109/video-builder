@@ -18,6 +18,9 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var args = desktop.Args ?? Array.Empty<string>();
+            int lang = Array.IndexOf(args, "--lang");
+            if (lang >= 0 && lang + 1 < args.Length)
+                Svc.LanguageOverride = args[lang + 1].ToLowerInvariant() switch { "en" => Language.English, "ja" => Language.Japanese, _ => null };
             Svc.Initialize(this);
             ApplyOverrides(args);
             var main = new MainWindow();

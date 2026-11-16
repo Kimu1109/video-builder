@@ -460,4 +460,30 @@ public class UiTests
         }
         finally { Svc.Aliases.Delete("テスト用"); }
     }
+
+    [AvaloniaFact]
+    public void English_translation_covers_fixed_and_composed_strings()
+    {
+        var w = Open();
+        bool wasEnglish = L.English;
+        try
+        {
+            L.Initialize(Language.English);
+            Assert.Equal("Undo", L.T("元に戻す"));
+            Assert.Equal("Undo: Move object", L.T("元に戻す: オブジェクトの移動"));       // 型紙の中身も訳す
+            Assert.Equal("Shape [Circle]", L.T("図形 [円]"));
+            Assert.Equal("Could not open a.vbproj.\nboom", L.T("a.vbproj を開けませんでした。\nboom"));
+            Assert.Equal("ユーザーが付けた名前", L.T("ユーザーが付けた名前"));             // 対応がなければそのまま
+            Assert.Equal("clip.mp4", L.T("clip.mp4"));
+
+            // 画面に出る文字は、入った時点で自動的に英語になる
+            var text = new TextBlock { Text = "環境設定" };
+            Assert.Equal("Preferences", text.Text);
+            Svc.Session.AddObject(EffectRegistry.Shape, 0, 0, 30);
+            Pump();
+            Assert.Contains("video-builder", w.Title);
+            Assert.DoesNotContain("無題", w.Title);
+        }
+        finally { L.Initialize(wasEnglish ? Language.English : Language.Japanese); }
+    }
 }

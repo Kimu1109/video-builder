@@ -19,6 +19,7 @@ public static class Svc
     {
         Settings = AppSettings.Load();
         Aliases = new AliasStore(AppPaths.AliasDir);
+        L.Initialize(LanguageOverride ?? Settings.Language);
         RegisterBundledFonts();
         if (!_pluginsLoaded) { _pluginsLoaded = true; VideoBuilder.Rendering.PluginLoader.LoadAll(AppPaths.PluginDir); }
         Session.History.Limit = Settings.UndoLimit;
@@ -28,6 +29,8 @@ public static class Svc
     }
 
     private static bool _fontsRegistered, _pluginsLoaded;
+    /// <summary>起動オプション (--lang) による指定。設定ファイルより優先する。</summary>
+    public static Language? LanguageOverride { get; set; }
 
     /// <summary>同梱の Noto Sans JP を、テキストオブジェクトの描画でも使えるようにする。</summary>
     private static void RegisterBundledFonts()

@@ -150,6 +150,11 @@ public sealed class PreferencesDialog : DialogBase
         }
 
         Body.Children.Add(Heading("外観"));
+        // 言語名はどの表示言語でも読めるよう、それぞれの言語で書く
+        Body.Children.Add(Row("言語", Combo(new[] { "自動", "日本語", "English" }, (int)s.Language, i => s.Language = (Language)i)));
+        var langNote = new TextBlock { Text = "言語の変更は、次回起動時に反映されます。", TextWrapping = TextWrapping.Wrap };
+        langNote.Classes.Add("secondary");
+        Body.Children.Add(langNote);
         Body.Children.Add(Row("テーマ", Combo(new[] { "システムに従う", "ライト", "ダーク" }, (int)s.Theme, i => { s.Theme = (ThemeMode)i; Svc.Theme.Apply(); })));
 
         var custom = new ColorPicker { Color = Color.TryParse(s.CustomAccent, out var cc) ? cc : Colors.DodgerBlue, IsAlphaEnabled = false, IsAlphaVisible = false, HorizontalAlignment = HorizontalAlignment.Left, IsEnabled = s.Accent == AccentMode.Custom };

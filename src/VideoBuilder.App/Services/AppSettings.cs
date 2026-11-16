@@ -12,6 +12,7 @@ public enum RenderBackend { Auto, Gpu, Cpu }
 /// <summary>環境設定。XDG_CONFIG_HOME/video-builder/settings.json に保存する。</summary>
 public sealed class AppSettings
 {
+    public Language Language { get; set; } = Language.Auto;
     public ThemeMode Theme { get; set; } = ThemeMode.System;
     public AccentMode Accent { get; set; } = AccentMode.System;
     public string CustomAccent { get; set; } = "#2F80ED";

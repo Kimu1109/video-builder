@@ -246,7 +246,7 @@ public sealed class ObjectSettingsView : UserControl
         var right = new NumberBox { Minimum = p.Min, Maximum = p.Max, Decimals = p.Decimals };
         var leftSlider = new MiniSlider { Minimum = p.SliderMin, Maximum = p.SliderMax, Margin = new Thickness(4, 0) };
         var rightSlider = new MiniSlider { Minimum = p.SliderMin, Maximum = p.SliderMax, Margin = new Thickness(4, 0) };
-        var name = new Button { Content = p.Name, Width = 84, Padding = new Thickness(2, 0), Focusable = false };
+        var name = new Button { Content = p.Name, Width = 96, Padding = new Thickness(2, 0), Focusable = false };
         ToolTip.SetTip(name, "クリックで移動方法を選択");
 
         AnimatedValue? Track() => EffectAt(effectIndex)?.Tracks.GetValueOrDefault(p.Key);

@@ -1,0 +1,91 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
+using Avalonia;
+using Avalonia.Controls;
+
+namespace VideoBuilder.App.Services;
+
+public enum Language { Auto, Japanese, English }
+
+/// <summary>
+/// 表示言語。ソースコード中の文言は日本語で書き、英語のときだけ対応表 (tools/I18n/en.txt) で置き換える。
+/// 置き換えは TextBlock などに文字が入る瞬間に自動で行うので、画面側のコードは言語を意識しない。
+/// </summary>
+public static class L
+{
+    private static Dictionary<string, string> _exact = new();
+    private static List<(Regex Pattern, string Template)> _patterns = new();
+    private static bool _installed;
+
+    public static bool English { get; private set; }
+
+    public static void Initialize(Language language)
+    {
+        English = language switch
+        {
+            Language.English => true,
+            Language.Japanese => false,
+            _ => CultureInfo.CurrentUICulture.TwoLetterISOLanguageName != "ja",
+        };
+        if (!English) return;
+        _exact = new Dictionary<string, string>();
+        var patterns = new List<(Regex, string, int)>();
+        foreach (var (ja, en) in TranslationsEn.Pairs)
+        {
+            if (!ja.Contains("{0}")) { _exact[ja] = en; continue; }
+            // "{0}" を含むものは、実行時の値が入る型紙として扱う
+            string regex = "^" + Regex.Replace(Regex.Escape(ja), @"\\\{(\d)}", m => $"(?<g{m.Groups[1].Value}>.*?)") + "$";
+            patterns.Add((new Regex(regex, RegexOptions.Singleline | RegexOptions.CultureInvariant), en, ja.Length));
+        }
+        // 固定部分が長いものから試す (短い型紙が何にでも当たってしまうのを防ぐ)
+        _patterns = patterns.OrderByDescending(p => p.Item3).Select(p => (p.Item1, p.Item2)).ToList();
+        Install();
+    }
+
+    /// <summary>s を表示言語に直す。対応がなければそのまま返す。</summary>
+    public static string T(string? s)
+    {
+        if (!English || string.IsNullOrEmpty(s)) return s ?? "";
+        if (_exact.TryGetValue(s, out var en)) return en;
+        if (!HasJapanese(s)) return s;
+        foreach (var (pattern, template) in _patterns)
+        {
+            var m = pattern.Match(s);
+            if (!m.Success) continue;
+            return Regex.Replace(template, @"\{(\d)}", x =>
+            {
+                var value = m.Groups["g" + x.Groups[1].Value].Value;
+                return _exact.TryGetValue(value, out var inner) ? inner : value;
+            });
+        }
+        return s;
+    }
+
+    private static bool HasJapanese(string s)
+    {
+        foreach (char c in s)
+            if (c is >= '぀' and <= 'ヿ' or >= '一' and <= '鿿') return true;
+        return false;
+    }
+
+    private static void Install()
+    {
+        if (_installed) return;
+        _installed = true;
+        // メニュー・ボタン・ツールチップ・入力欄の説明なども、最後は TextBlock に文字が入る
+        TextBlock.TextProperty.Changed.AddClassHandler<TextBlock>((tb, e) =>
+        {
+            var text = e.NewValue as string;
+            if (text == null) return;
+            var translated = T(text);
+            if (!ReferenceEquals(translated, text) && translated != text) tb.SetCurrentValue(TextBlock.TextProperty, translated);
+        });
+        Window.TitleProperty.Changed.AddClassHandler<Window>((w, e) =>
+        {
+            var text = e.NewValue as string;
+            if (text == null) return;
+            var translated = T(text);
+            if (translated != text) w.SetCurrentValue(Window.TitleProperty, translated);
+        });
+    }
+}

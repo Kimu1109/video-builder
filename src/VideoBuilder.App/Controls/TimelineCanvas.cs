@@ -378,7 +378,10 @@ public sealed class TimelineCanvas : Control
         ctx.DrawGeometry(null, new Pen(new SolidColorBrush(Colors.White, 0.45)), geo);
     }
 
-    public static string ObjectLabel(TimelineObject o)
+    /// <summary>オブジェクトの帯に出す名前 (表示言語に合わせる)。</summary>
+    public static string ObjectLabel(TimelineObject o) => L.T(RawLabel(o));
+
+    private static string RawLabel(TimelineObject o)
     {
         var main = o.Main;
         switch (main.DefinitionId)

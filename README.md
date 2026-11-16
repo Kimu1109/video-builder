@@ -29,6 +29,7 @@ dotnet run --project src/VideoBuilder.App
 | `--docked` / `--separate` | ウィンドウを 1 つにまとめる / AviUtl のように分ける |
 | `--theme light\|dark\|system` | テーマを指定する |
 | `--gpu` / `--cpu` | 描画方式を指定する (既定は自動) |
+| `--lang ja\|en` | 表示言語を指定する (既定は OS の言語) |
 | `--screenshot <png>` | ウィンドウを画像に保存して終了する (見た目の確認用) |
 
 ## テスト

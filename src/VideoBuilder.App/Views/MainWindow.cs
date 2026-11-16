@@ -369,7 +369,7 @@ public sealed class MainWindow : Window
     private void UpdateState()
     {
         var p = _session.Project;
-        string name = _session.FilePath != null ? Path.GetFileName(_session.FilePath) : "無題";
+        string name = _session.FilePath != null ? Path.GetFileName(_session.FilePath) : L.T("無題");
         Title = $"{name}{(_session.IsDirty ? " *" : "")} - video-builder";
         _projectInfo.Text = $"{p.Settings.Width}x{p.Settings.Height}  {p.Settings.Fps.Value:0.###}fps";
         foreach (var (c, enabled) in _enablers) c.IsEnabled = enabled();
