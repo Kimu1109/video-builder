@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <ProjectReference Include="../../src/VideoBuilder.Core/VideoBuilder.Core.csproj" />
+    <ProjectReference Include="../../src/VideoBuilder.Editing/VideoBuilder.Editing.csproj" />
+    <ProjectReference Include="../../src/VideoBuilder.Media/VideoBuilder.Media.csproj" />
+    <ProjectReference Include="../../src/VideoBuilder.Rendering/VideoBuilder.Rendering.csproj" />
+  </ItemGroup>
+</Project>

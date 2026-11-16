@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>video-builder</AssemblyName>
+    <RootNamespace>VideoBuilder.App</RootNamespace>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+  <ItemGroup>
+    <AvaloniaResource Include="Assets/**" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../VideoBuilder.Core/VideoBuilder.Core.csproj" />
+    <ProjectReference Include="../VideoBuilder.Media/VideoBuilder.Media.csproj" />
+    <ProjectReference Include="../VideoBuilder.Rendering/VideoBuilder.Rendering.csproj" />
+    <ProjectReference Include="../VideoBuilder.Editing/VideoBuilder.Editing.csproj" />
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Desktop" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="Avalonia.Fonts.Inter" />
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+  </ItemGroup>
+</Project>

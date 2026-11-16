@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../VideoBuilder.Core/VideoBuilder.Core.csproj" />
+    <PackageReference Include="FFmpeg.AutoGen" />
+    <PackageReference Include="Silk.NET.OpenAL" />
+  </ItemGroup>
+</Project>
