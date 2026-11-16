@@ -58,6 +58,8 @@ public sealed class TimelineCanvas : Control
         _session.SceneChanged += () => { _scrollX = _scrollY = 0; ViewChanged?.Invoke(); InvalidateVisual(); };
         _session.FrameChanged += OnFrameChanged;
         Svc.Theme.Changed += () => { _brushes.Clear(); InvalidateVisual(); };
+        Svc.Waveforms.Updated += InvalidateVisual;
+        Svc.Thumbnails.Updated += InvalidateVisual;
     }
 
     // ---------------- 表示範囲 ----------------
@@ -171,12 +173,47 @@ public sealed class TimelineCanvas : Control
                 else if (l % 2 == 1) ctx.FillRectangle(B("Timeline.RowAlt"), new Rect(HeaderWidth, y, ViewportWidth, lh));
                 ctx.DrawLine(borderPen, new Point(HeaderWidth, y + lh - 0.5), new Point(W, y + lh - 0.5));
             }
-            // 縦のグリッド (大目盛)
-            var gridPen = new Pen(B("Border.Default"), 1) { DashStyle = null };
-            for (long f = firstFrame / major * major; f <= lastFrame; f += major)
+            // 縦のグリッド: 時間 (大目盛ごと) または BPM (拍・小節ごと)
+            var gridPen = new Pen(B("Border.Default"), 1);
+            var grid = _session.Project.Grid;
+            if (grid.Mode == GridMode.Time)
             {
-                double x = Math.Round(FrameToX(f)) + 0.5;
-                ctx.DrawLine(gridPen, new Point(x, RulerHeight), new Point(x, H));
+                for (long f = firstFrame / major * major; f <= lastFrame; f += major)
+                {
+                    double x = Math.Round(FrameToX(f)) + 0.5;
+                    ctx.DrawLine(gridPen, new Point(x, RulerHeight), new Point(x, H));
+                }
+            }
+            else if (grid.Mode == GridMode.Bpm && grid.Bpm > 0)
+            {
+                double fps = _session.Project.Settings.Fps.Value, beatFrames = 60.0 / grid.Bpm * fps, offset = grid.OffsetSeconds * fps;
+                int beats = Math.Max(1, grid.Beats);
+                bool showBeats = beatFrames * _ppf >= 6, showBars = beatFrames * beats * _ppf >= 6;
+                var barPen = new Pen(B("Border.Strong"), 1);
+                if (showBars && beatFrames > 0)
+                {
+                    long k0 = (long)Math.Ceiling((firstFrame - offset) / beatFrames);
+                    for (long k = Math.Max(0, k0); ; k++)
+                    {
+                        double f = offset + k * beatFrames;
+                        if (f > lastFrame) break;
+                        bool bar = k % beats == 0;
+                        if (!bar && !showBeats) continue;
+                        double x = Math.Round(FrameToX(Math.Round(f))) + 0.5;
+                        ctx.DrawLine(bar ? barPen : gridPen, new Point(x, RulerHeight), new Point(x, H));
+                    }
+                }
+            }
+            // 出力範囲の両端
+            if (scene.RangeStart != null || scene.RangeEnd != null)
+            {
+                var (rs, re) = _session.EffectiveRange;
+                var rangePen = new Pen(B("Accent"), 1) { DashStyle = DashStyle.Dash };
+                foreach (double f in new double[] { rs, re + 1 })
+                {
+                    double x = Math.Round(FrameToX(f)) + 0.5;
+                    ctx.DrawLine(rangePen, new Point(x, RulerHeight), new Point(x, H));
+                }
             }
             // シーンの終端より後ろを少し暗くする
             double endX = FrameToX(scene.Length);
@@ -206,6 +243,13 @@ public sealed class TimelineCanvas : Control
                 ctx.DrawLine(tickPen, new Point(x, isMajor ? 4 : RulerHeight - 5), new Point(x, RulerHeight));
                 if (isMajor) ctx.DrawText(Text(RulerLabel((int)f, major), fg, 10, true), new Point(x + 3, 3));
             }
+        }
+        if (scene.RangeStart != null || scene.RangeEnd != null)
+        {
+            // 出力範囲: ルーラーの下端に帯で示す
+            var (rs, re) = _session.EffectiveRange;
+            double x1 = Math.Max(HeaderWidth, FrameToX(rs)), x2 = Math.Min(W, FrameToX(re + 1));
+            if (x2 > x1) ctx.FillRectangle(B("Accent"), new Rect(x1, RulerHeight - 4, x2 - x1, 3));
         }
         ctx.DrawLine(borderPen, new Point(0, RulerHeight - 0.5), new Point(W, RulerHeight - 0.5));
 
@@ -252,11 +296,24 @@ public sealed class TimelineCanvas : Control
         {
             ctx.FillRectangle(B(def.Color), rect);
             ctx.FillRectangle(new SolidColorBrush(Colors.White, 0.18), new Rect(rect.X, rect.Y, rect.Width, 1));   // 上端のハイライト
+            if (rect.Width > 8 && def.Id == EffectRegistry.Audio && Svc.Settings.ShowWaveform) DrawWaveform(ctx, o, rect);
             if (rect.Width > 8)
             {
                 using (ctx.PushClip(rect.Deflate(new Thickness(2, 0))))
                 {
                     double tx = Math.Max(rect.X, HeaderWidth) + 4;
+                    if (rect.Width > 60 && def.Id is EffectRegistry.Video or EffectRegistry.Image && Svc.Settings.ShowThumbnails)
+                    {
+                        // 先頭のサムネイル (できあがるまでは出さない)
+                        double t = def.Id == EffectRegistry.Video ? VideoBuilder.Rendering.RenderEngine.SourceTime(_session.Project, o, o.Bounds, o.Start) : 0;
+                        var thumb = Svc.Thumbnails.Get(o.Main.GetString("file"), t, def.Id == EffectRegistry.Video);
+                        if (thumb != null)
+                        {
+                            double th = lh - 3, tw = Math.Round(thumb.Size.Width * th / thumb.Size.Height);
+                            ctx.DrawImage(thumb, new Rect(rect.X + 1, y + 1, tw, th));
+                            tx = Math.Max(tx, rect.X + tw + 5);
+                        }
+                    }
                     var icon = Icons.Get(def.Icon);
                     if (icon != null && rect.Width > 22)
                     {
@@ -285,6 +342,40 @@ public sealed class TimelineCanvas : Control
         }
         if (selected) ctx.DrawRectangle(null, new Pen(B("Accent"), 2), rect.Deflate(1));
         else ctx.DrawRectangle(null, new Pen(B("Timeline.ObjectBorder")), rect.Deflate(0.5));
+    }
+
+    /// <summary>音声オブジェクトの中に、ピーク値の波形を描く。</summary>
+    private void DrawWaveform(DrawingContext ctx, TimelineObject o, Rect rect)
+    {
+        var peaks = Svc.Waveforms.Get(o.Main.GetString("file"));
+        if (peaks == null || peaks.Values.Length == 0) return;
+        var project = _session.Project;
+        var bounds = o.Bounds;
+        double speed = o.Main.Eval("speed", bounds, o.Start) / 100.0;
+        double offset = o.Main.Eval("position", bounds, o.Start) + project.FrameToSeconds(o.SourceOffsetFrames);
+        bool loop = o.Main.GetBool("loop");
+        double fps = project.Settings.Fps.Value;
+        double x1 = Math.Max(rect.X, HeaderWidth), x2 = Math.Min(rect.Right, Bounds.Width);
+        double mid = rect.Y + rect.Height / 2, half = rect.Height / 2 - 1;
+        var geo = new StreamGeometry();
+        using (var g = geo.Open())
+        {
+            for (double x = Math.Floor(x1); x < x2; x += 1)
+            {
+                // この 1px が表す時間の範囲で、いちばん大きい値を使う
+                double f0 = (x - HeaderWidth + _scrollX) / _ppf - o.Start, f1 = f0 + 1 / _ppf;
+                double t0 = offset + f0 / fps * speed, t1 = offset + f1 / fps * speed;
+                if (loop && peaks.Duration > 0) { double d = t1 - t0; t0 %= peaks.Duration; t1 = t0 + d; }
+                int i0 = (int)(t0 * WaveformCache.PeaksPerSecond), i1 = Math.Max(i0, (int)(t1 * WaveformCache.PeaksPerSecond));
+                if (i0 < 0 || i0 >= peaks.Values.Length) continue;
+                int max = 0;
+                for (int i = i0; i <= Math.Min(i1, peaks.Values.Length - 1); i++) max = Math.Max(max, peaks.Values[i]);
+                double hgt = Math.Max(0.5, max / 255.0 * half);
+                g.BeginFigure(new Point(x + 0.5, mid - hgt), false);
+                g.LineTo(new Point(x + 0.5, mid + hgt));
+            }
+        }
+        ctx.DrawGeometry(null, new Pen(new SolidColorBrush(Colors.White, 0.45)), geo);
     }
 
     public static string ObjectLabel(TimelineObject o)
@@ -577,6 +668,17 @@ public sealed class TimelineCanvas : Control
     private int SnapDelta(IEnumerable<int> edges, HashSet<string> ignore, int range)
     {
         var points = new List<int> { 0, _session.CurrentFrame };
+        var grid = _session.Project.Grid;
+        if (grid.Mode == GridMode.Bpm && grid.Bpm > 0)
+        {
+            // BPM グリッド表示中は、いちばん近い拍にも合わせる
+            double fps = _session.Project.Settings.Fps.Value, beat = 60.0 / grid.Bpm * fps, off = grid.OffsetSeconds * fps;
+            foreach (var edge in edges)
+            {
+                double k = Math.Round((edge - off) / beat);
+                if (k >= 0) points.Add((int)Math.Round(off + k * beat));
+            }
+        }
         foreach (var o in _session.Scene.Objects)
         {
             if (ignore.Contains(o.Id)) continue;

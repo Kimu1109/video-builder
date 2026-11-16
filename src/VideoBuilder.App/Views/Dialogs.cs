@@ -198,6 +198,16 @@ public sealed class PreferencesDialog : DialogBase
         auto.IsCheckedChanged += (_, _) => { s.AutoSave = auto.IsChecked == true; s.Save(); };
         Body.Children.Add(auto);
 
+        var wave = new CheckBox { Content = "音声の波形をタイムラインに表示する", IsChecked = s.ShowWaveform };
+        wave.IsCheckedChanged += (_, _) => { s.ShowWaveform = wave.IsChecked == true; s.Save(); Svc.Session.NotifyChanged(); };
+        Body.Children.Add(wave);
+        var thumbs = new CheckBox { Content = "動画・画像のサムネイルをタイムラインに表示する", IsChecked = s.ShowThumbnails };
+        thumbs.IsCheckedChanged += (_, _) => { s.ShowThumbnails = thumbs.IsChecked == true; s.Save(); Svc.Session.NotifyChanged(); };
+        Body.Children.Add(thumbs);
+        var keys = new IconButton { Icon = Icons.Get("Tune"), Text = "ショートカットの設定...", HorizontalAlignment = HorizontalAlignment.Left };
+        keys.Click += async (_, _) => await new ShortcutDialog().ShowDialog(this);
+        Body.Children.Add(keys);
+
         Body.Children.Add(Heading("FFmpeg"));
         var ff = new TextBlock
         {
@@ -231,3 +241,166 @@ public sealed class AboutDialog : DialogBase
         AddButton("閉じる", Close, accent: true);
     }
 }
+
+/// <summary>1 行の文字入力。</summary>
+public sealed class PromptDialog : DialogBase
+{
+    public string? Result { get; private set; }
+
+    public PromptDialog(string title, string label, string initial = "") : base(title, 380)
+    {
+        var box = new TextBox { Text = initial };
+        Body.Children.Add(new TextBlock { Text = label });
+        Body.Children.Add(box);
+        AddButton("キャンセル", Close);
+        AddButton("OK", () => { if (!string.IsNullOrWhiteSpace(box.Text)) { Result = box.Text.Trim(); Close(); } }, accent: true);
+        Opened += (_, _) => { box.Focus(); box.SelectAll(); };
+    }
+
+    public static async Task<string?> Show(Window owner, string title, string label, string initial = "")
+    {
+        var d = new PromptDialog(title, label, initial);
+        await d.ShowDialog(owner);
+        return d.Result;
+    }
+}
+
+public sealed class GridDialog : DialogBase
+{
+    public GridDialog() : base("グリッドの設定", 380)
+    {
+        var session = Svc.Session;
+        var g = session.Project.Grid;
+        var mode = new ComboBox { ItemsSource = new[] { "表示しない", "時間", "BPM (テンポ)" }, SelectedIndex = (int)g.Mode, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var bpm = new NumberBox { Minimum = 1, Maximum = 999, Decimals = 2, Value = g.Bpm, Width = 80, HorizontalAlignment = HorizontalAlignment.Left };
+        var beats = new NumberBox { Minimum = 1, Maximum = 32, Decimals = 0, Value = g.Beats, Width = 80, HorizontalAlignment = HorizontalAlignment.Left };
+        var offset = new NumberBox { Minimum = 0, Maximum = 36000, Decimals = 3, Value = g.OffsetSeconds, Width = 80, HorizontalAlignment = HorizontalAlignment.Left };
+        Body.Children.Add(Row("グリッド", mode));
+        Body.Children.Add(Row("テンポ (BPM)", bpm));
+        Body.Children.Add(Row("拍子 (1 小節の拍数)", beats, 150));
+        Body.Children.Add(Row("1 拍目の位置 (秒)", offset, 150));
+        var here = new Button { Content = "現在位置を 1 拍目にする", HorizontalAlignment = HorizontalAlignment.Left };
+        here.Click += (_, _) => offset.Value = Math.Round(session.Project.FrameToSeconds(session.CurrentFrame), 3);
+        Body.Children.Add(here);
+        var note = new TextBlock { Text = "BPM グリッドを表示している間は、オブジェクトの端が拍にスナップします。", TextWrapping = TextWrapping.Wrap };
+        note.Classes.Add("secondary");
+        Body.Children.Add(note);
+        AddButton("キャンセル", Close);
+        AddButton("OK", () =>
+        {
+            session.Edit("グリッドの設定", () => session.Project.Grid = new GridSettings
+            {
+                Mode = (GridMode)Math.Max(0, mode.SelectedIndex), Bpm = bpm.Value, Beats = (int)beats.Value, OffsetSeconds = offset.Value,
+            });
+            Close();
+        }, accent: true);
+    }
+}
+
+/// <summary>見つからない素材の一覧と、付け替えの操作。</summary>
+public sealed class MissingFilesDialog : DialogBase
+{
+    private readonly StackPanel _list = new() { Spacing = 2 };
+    private readonly TextBlock _status = new() { TextWrapping = TextWrapping.Wrap };
+
+    public MissingFilesDialog() : base("見つからない素材", 560)
+    {
+        Body.Children.Add(new TextBlock { Text = "次の素材ファイルが見つかりません。フォルダを指定すると、同じ名前のファイルを探して付け替えます。", TextWrapping = TextWrapping.Wrap });
+        Body.Children.Add(new ScrollViewer { Content = _list, MaxHeight = 240 });
+        _status.Classes.Add("secondary");
+        Body.Children.Add(_status);
+        AddButton("閉じる", Close);
+        AddButton("フォルダから探す...", async () =>
+        {
+            var folders = await StorageProvider.OpenFolderPickerAsync(new Avalonia.Platform.Storage.FolderPickerOpenOptions { Title = "素材を探すフォルダ" });
+            var folder = folders.FirstOrDefault()?.Path.LocalPath;
+            if (folder == null) return;
+            int n = 0;
+            Svc.Session.Edit("素材の付け替え", () => n = ProjectMedia.RelinkFromFolder(Svc.Session.Project, folder));
+            _status.Text = n > 0 ? $"{n} 個のファイルを付け替えました" : "同じ名前のファイルは見つかりませんでした";
+            Refresh();
+        }, accent: true, icon: "FolderOpen");
+        Refresh();
+    }
+
+    private void Refresh()
+    {
+        _list.Children.Clear();
+        var missing = ProjectMedia.FindMissing(Svc.Session.Project);
+        foreach (var path in missing)
+        {
+            var row = new DockPanel();
+            var pick = new IconButton("FolderOpen", "このファイルの場所を指定");
+            pick.Click += async (_, _) =>
+            {
+                var files = await StorageProvider.OpenFilePickerAsync(new Avalonia.Platform.Storage.FilePickerOpenOptions { Title = Path.GetFileName(path) });
+                var now = files.FirstOrDefault()?.Path.LocalPath;
+                if (now == null) return;
+                Svc.Session.Edit("素材の付け替え", () => ProjectMedia.Relink(Svc.Session.Project, path, now));
+                Refresh();
+            };
+            DockPanel.SetDock(pick, Dock.Right);
+            row.Children.Add(pick);
+            var text = new TextBlock { Text = path, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.PathSegmentEllipsis };
+            text.Classes.Add("mono");
+            ToolTip.SetTip(text, path);
+            row.Children.Add(text);
+            _list.Children.Add(row);
+        }
+        if (missing.Count == 0) _list.Children.Add(new TextBlock { Text = "すべての素材が見つかりました。" });
+    }
+}
+
+public sealed class ShortcutDialog : DialogBase
+{
+    private readonly StackPanel _list = new() { Spacing = 1 };
+    private readonly TextBlock _status = new() { Text = "変更したい操作のボタンを押してから、新しいキーを押してください。", TextWrapping = TextWrapping.Wrap };
+    private string? _capturing;
+
+    public ShortcutDialog() : base("ショートカットの設定", 520)
+    {
+        Body.Children.Add(new ScrollViewer { Content = _list, Height = 420 });
+        _status.Classes.Add("secondary");
+        Body.Children.Add(_status);
+        AddButton("すべて既定に戻す", () => { Shortcuts.Reset(); _capturing = null; Refresh(); });
+        AddButton("閉じる", Close, accent: true);
+        AddHandler(KeyDownEvent, OnKey, Avalonia.Interactivity.RoutingStrategies.Tunnel);
+        Refresh();
+    }
+
+    private void OnKey(object? sender, Avalonia.Input.KeyEventArgs e)
+    {
+        if (_capturing == null) return;
+        e.Handled = true;
+        var k = e.Key;
+        if (k is Avalonia.Input.Key.LeftCtrl or Avalonia.Input.Key.RightCtrl or Avalonia.Input.Key.LeftShift or Avalonia.Input.Key.RightShift
+            or Avalonia.Input.Key.LeftAlt or Avalonia.Input.Key.RightAlt or Avalonia.Input.Key.LWin or Avalonia.Input.Key.RWin) return;
+        string id = _capturing;
+        _capturing = null;
+        if (k == Avalonia.Input.Key.Escape) { _status.Text = "変更をやめました"; Refresh(); return; }
+        var stolen = Shortcuts.Assign(id, new Avalonia.Input.KeyGesture(k, e.KeyModifiers));
+        _status.Text = stolen != null ? $"「{stolen}」に割り当てられていたキーを移しました" : "キーを変更しました (メニューの表示は次回起動時に更新されます)";
+        Refresh();
+    }
+
+    private void Refresh()
+    {
+        _list.Children.Clear();
+        foreach (var c in Shortcuts.All)
+        {
+            var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,150,Auto,Auto"), MinHeight = 26 };
+            grid.Children.Add(new TextBlock { Text = c.Name, VerticalAlignment = VerticalAlignment.Center });
+            string shown = Shortcuts.Display(c.Id);
+            var key = new Button { Content = _capturing == c.Id ? "キーを押してください..." : shown.Length == 0 ? "(なし)" : shown, HorizontalAlignment = HorizontalAlignment.Stretch, Focusable = false };
+            if (_capturing == c.Id) key.Classes.Add("accent");
+            key.Click += (_, _) => { _capturing = c.Id; _status.Text = $"「{c.Name}」の新しいキーを押してください (Esc でやめる)"; Refresh(); };
+            Grid.SetColumn(key, 1); grid.Children.Add(key);
+            var clear = new IconButton("Close", "割り当てをなくす", () => { Shortcuts.Assign(c.Id, null); Refresh(); });
+            Grid.SetColumn(clear, 2); grid.Children.Add(clear);
+            var reset = new IconButton("Reset", "既定に戻す", () => { Shortcuts.Reset(c.Id); Refresh(); });
+            Grid.SetColumn(reset, 3); grid.Children.Add(reset);
+            _list.Children.Add(grid);
+        }
+    }
+}
+

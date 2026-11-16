@@ -366,4 +366,98 @@ public class UiTests
         Assert.Equal(0xFF00FF00u, await CenterAfterSwitch(RenderBackend.Auto));
         Console.WriteLine("BENCH app backend (Auto): " + Svc.Preview.BackendDescription);
     }
+
+    [AvaloniaFact]
+    public void Bracket_keys_set_the_export_range_and_shortcuts_can_be_reassigned()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        s.AddObject(EffectRegistry.Shape, 0, 0, 100);
+        s.CurrentFrame = 20;
+        w.KeyPressQwerty(PhysicalKey.BracketLeft, RawInputModifiers.None);
+        s.CurrentFrame = 70;
+        w.KeyPressQwerty(PhysicalKey.BracketRight, RawInputModifiers.None);
+        Assert.Equal((20, 70), s.EffectiveRange);
+
+        // 「分割」を S から K に変える
+        try
+        {
+            Assert.Null(Shortcuts.Assign("edit.split", new KeyGesture(Key.K)));
+            s.CurrentFrame = 50;
+            w.KeyPressQwerty(PhysicalKey.S, RawInputModifiers.None);
+            Assert.Single(s.Scene.Objects);
+            w.KeyPressQwerty(PhysicalKey.K, RawInputModifiers.None);
+            Assert.Equal(2, s.Scene.Objects.Count);
+            // すでに使われているキーを割り当てると、元の操作から外れる
+            Assert.Equal("中間点を追加", Shortcuts.Assign("edit.split", new KeyGesture(Key.P)));
+            Assert.Equal("", Shortcuts.GesturesOf("edit.addKey"));
+        }
+        finally { Shortcuts.Reset(); }
+        Assert.Equal("S", Shortcuts.GesturesOf("edit.split"));
+        Assert.Equal("P", Shortcuts.GesturesOf("edit.addKey"));
+    }
+
+    [AvaloniaFact]
+    public async Task Waveform_thumbnail_and_bpm_grid_are_shown_on_the_timeline()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        if (!VideoBuilder.Media.FFmpegLoader.EnsureLoaded()) return;
+        var dir = Path.Combine(Path.GetTempPath(), "vb-ui-media-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var clip = Path.Combine(dir, "clip.mp4");
+            using (var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ffmpeg",
+                $"-y -loglevel error -f lavfi -i testsrc=size=320x180:rate=30:duration=4 -f lavfi -i \"sine=frequency=3:beep_factor=200:duration=4\" -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest \"{clip}\"")))
+            {
+                proc!.WaitForExit(30000);
+                if (proc.ExitCode != 0) return;
+            }
+            Assert.Null(MediaImport.AddFile(clip, 0, 0));
+            Assert.Equal(2, s.Scene.Objects.Count);        // 映像 + 音声
+            Assert.Equal(320, s.Project.Settings.Width);   // 最初の動画にプロジェクトを合わせる
+            s.Edit("grid", () => s.Project.Grid = new GridSettings { Mode = GridMode.Bpm, Bpm = 120 });
+
+            WaveformCache.Peaks? peaks = null; Avalonia.Media.Imaging.Bitmap? thumb = null;
+            for (int i = 0; i < 300 && (peaks == null || thumb == null); i++)
+            {
+                await Task.Delay(20);
+                Pump();
+                peaks ??= Svc.Waveforms.Get(clip);
+                thumb ??= Svc.Thumbnails.Get(clip, 0, true);
+            }
+            Assert.NotNull(peaks);
+            Assert.InRange(peaks!.Values.Length, 180, 220);            // 4 秒 × 50
+            Assert.Contains(peaks.Values, v => v > 20);
+            Assert.NotNull(thumb);
+            Assert.Equal(ThumbnailCache.Height, (int)thumb!.Size.Height);
+
+            w.Timeline.Canvas.InvalidateVisual();
+            Pump();
+            var shot = Environment.GetEnvironmentVariable("VB_UI_SHOT");
+            if (!string.IsNullOrEmpty(shot)) w.CaptureRenderedFrame()?.Save(shot);
+        }
+        finally
+        {
+            s.NewProject(new ProjectSettings());
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [AvaloniaFact]
+    public void Alias_can_be_created_from_the_store_and_inserted()
+    {
+        Open();
+        var s = Svc.Session;
+        var t = s.AddObject(EffectRegistry.Text, 0, 0, 30)!;
+        Svc.Aliases.Save("テスト用", new[] { t });
+        try
+        {
+            EditorCommands.InsertAlias("テスト用", 4, 200);
+            Assert.Equal(2, s.Scene.Objects.Count);
+            Assert.Equal((4, 200), (s.Primary!.Layer, s.Primary.Start));
+        }
+        finally { Svc.Aliases.Delete("テスト用"); }
+    }
 }

@@ -35,6 +35,7 @@ public sealed class ExportDialog : DialogBase
     private readonly TextBlock _status = new() { Text = " " };
     private readonly Button _start, _close;
     private readonly StackPanel _options = new() { Spacing = 8 };
+    private readonly CheckBox _rangeOnly = new();
     private CancellationTokenSource? _cancel;
 
     public ExportDialog() : base("動画の出力", 480)
@@ -60,6 +61,13 @@ public sealed class ExportDialog : DialogBase
         _options.Children.Add(Row("出力先", pathRow, 100));
         _options.Children.Add(Row("品質 (CRF)", _crf, 100));
         _options.Children.Add(Row("速度", _preset, 100));
+        var (rs, re) = session.EffectiveRange;
+        bool hasRange = session.Scene.RangeStart != null || session.Scene.RangeEnd != null;
+        _rangeOnly.Content = hasRange
+            ? $"出力範囲だけを出力する ({p.FormatTime(rs)} - {p.FormatTime(re + 1)}, {re - rs + 1} フレーム)"
+            : "出力範囲だけを出力する (範囲が設定されていません。[ と ] で設定できます)";
+        _rangeOnly.IsEnabled = hasRange; _rangeOnly.IsChecked = hasRange;
+        _options.Children.Add(_rangeOnly);
         Body.Children.Add(info);
         Body.Children.Add(_options);
         Body.Children.Add(_progress);
@@ -118,7 +126,9 @@ public sealed class ExportDialog : DialogBase
         var request = new ExportRequest
         {
             Project = session.Project.Clone(), SceneId = session.Scene.Id,
-            StartFrame = 0, EndFrame = session.Scene.Length - 1, ImageSequence = f.Sequence,
+            StartFrame = _rangeOnly.IsChecked == true ? session.EffectiveRange.Start : 0,
+            EndFrame = _rangeOnly.IsChecked == true ? session.EffectiveRange.End : session.Scene.Length - 1,
+            ImageSequence = f.Sequence,
             UseGpu = Svc.Preview.IsGpuActive,   // プレビューと同じ描画方式で出力する
             Settings = new ExportSettings { Path = path, VideoCodec = f.VideoCodec, AudioCodec = f.AudioCodec, Crf = (int)_crf.Value, Preset = (string)_preset.SelectedItem! },
         };

@@ -44,8 +44,21 @@ public static class ProjectSerializer
         return p;
     }
 
+    /// <summary>オブジェクトの並びを JSON にする (エイリアス用)。</summary>
+    public static string ObjectsToJson(IEnumerable<TimelineObject> objects) => JsonSerializer.Serialize(objects.ToList(), Options);
+
+    public static List<TimelineObject> ObjectsFromJson(string json)
+    {
+        var list = JsonSerializer.Deserialize<List<TimelineObject>>(json, Options) ?? new List<TimelineObject>();
+        // プロジェクトと同じ補正をかけるため、仮のプロジェクトに入れて読み直す
+        var p = new Project();
+        p.Root.Objects.AddRange(list);
+        return FromJson(ToJson(p)).Root.Objects;
+    }
+
     public static void Save(Project project, string path)
     {
+        ProjectMedia.UpdateRelativePaths(project, path);
         var tmp = path + ".tmp";
         using (var fs = File.Create(tmp))
         using (var zip = new ZipArchive(fs, ZipArchiveMode.Create))
@@ -62,7 +75,9 @@ public static class ProjectSerializer
         using var zip = new ZipArchive(fs, ZipArchiveMode.Read);
         var entry = zip.GetEntry("project.json") ?? throw new InvalidDataException("project.json が見つかりません");
         using var reader = new StreamReader(entry.Open());
-        return FromJson(reader.ReadToEnd());
+        var project = FromJson(reader.ReadToEnd());
+        ProjectMedia.ResolveMovedFiles(project, path);
+        return project;
     }
 
     private static void WriteEntry(ZipArchive zip, string name, string content)

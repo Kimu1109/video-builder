@@ -26,6 +26,10 @@ public sealed class AppSettings
     public int PreviewDivisor { get; set; } = 1;
     public double DefaultObjectSeconds { get; set; } = 3;
     public List<string> RecentFiles { get; set; } = new();
+    /// <summary>変更したショートカット (操作 ID → キー)。ここにない操作は既定のキー。</summary>
+    public Dictionary<string, string> Shortcuts { get; set; } = new();
+    public bool ShowWaveform { get; set; } = true;
+    public bool ShowThumbnails { get; set; } = true;
 
     private static readonly JsonSerializerOptions Options = new()
     {
@@ -83,6 +87,8 @@ public static class AppPaths
 
     public static string ConfigDir => Xdg("XDG_CONFIG_HOME", Environment.SpecialFolder.ApplicationData, ".config");
     public static string DataDir => Xdg("XDG_DATA_HOME", Environment.SpecialFolder.LocalApplicationData, ".local", "share");
+    public static string CacheDir => Xdg("XDG_CACHE_HOME", Environment.SpecialFolder.LocalApplicationData, ".cache");
+    public static string AliasDir => Path.Combine(DataDir, "aliases");
     public static string SettingsFile => Path.Combine(ConfigDir, "settings.json");
     public static string AutoSaveDir => Path.Combine(DataDir, "autosave");
 }

@@ -16,6 +16,20 @@ public sealed class ProjectSettings
     public ProjectSettings Clone() => (ProjectSettings)MemberwiseClone();
 }
 
+public enum GridMode { None, Time, Bpm }
+
+/// <summary>タイムラインのグリッド。BPM グリッドは曲のテンポに合わせて線を引く。</summary>
+public sealed class GridSettings
+{
+    public GridMode Mode { get; set; } = GridMode.Time;
+    public double Bpm { get; set; } = 120;
+    /// <summary>1 小節の拍数。</summary>
+    public int Beats { get; set; } = 4;
+    /// <summary>1 拍目の位置 (秒)。</summary>
+    public double OffsetSeconds { get; set; }
+    public GridSettings Clone() => (GridSettings)MemberwiseClone();
+}
+
 public sealed class LayerInfo
 {
     public string Name { get; set; } = "";
@@ -33,6 +47,9 @@ public sealed class Scene
     public List<TimelineObject> Objects { get; set; } = new();
     /// <summary>既定値と違うレイヤーだけを保持する (キー = レイヤー番号, 0 始まり)。</summary>
     public Dictionary<int, LayerInfo> Layers { get; set; } = new();
+    /// <summary>出力範囲 (フレーム, 両端を含む)。null なら先頭 / 末尾まで。</summary>
+    public int? RangeStart { get; set; }
+    public int? RangeEnd { get; set; }
 
     public LayerInfo GetLayer(int index) => Layers.TryGetValue(index, out var l) ? l : DefaultLayer;
     private static readonly LayerInfo DefaultLayer = new();
@@ -78,7 +95,7 @@ public sealed class Scene
 
     public Scene Clone()
     {
-        var s = new Scene { Id = Id, Name = Name };
+        var s = new Scene { Id = Id, Name = Name, RangeStart = RangeStart, RangeEnd = RangeEnd };
         foreach (var o in Objects) s.Objects.Add(o.Clone());
         foreach (var (k, v) in Layers) s.Layers[k] = v.Clone();
         return s;
@@ -92,6 +109,9 @@ public sealed class Project
     public int FormatVersion { get; set; } = CurrentFormatVersion;
     public ProjectSettings Settings { get; set; } = new();
     public List<Scene> Scenes { get; set; } = new() { new Scene() };
+    public GridSettings Grid { get; set; } = new();
+    /// <summary>素材の絶対パス → プロジェクトファイルから見た相対パス。保存時に作り、フォルダごと移動したときの復元に使う。</summary>
+    public Dictionary<string, string> MediaPaths { get; set; } = new();
 
     public Scene Root => Scenes[0];
     public Scene? FindScene(string id) => Scenes.FirstOrDefault(s => s.Id == id);
@@ -113,7 +133,7 @@ public sealed class Project
     /// <summary>レンダリングスレッドに渡すための複製。</summary>
     public Project Clone()
     {
-        var p = new Project { FormatVersion = FormatVersion, Settings = Settings.Clone(), Scenes = new List<Scene>() };
+        var p = new Project { FormatVersion = FormatVersion, Settings = Settings.Clone(), Scenes = new List<Scene>(), Grid = Grid.Clone(), MediaPaths = new Dictionary<string, string>(MediaPaths) };
         foreach (var s in Scenes) p.Scenes.Add(s.Clone());
         return p;
     }

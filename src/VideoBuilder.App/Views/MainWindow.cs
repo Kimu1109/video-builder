@@ -55,6 +55,7 @@ public sealed class MainWindow : Window
     public MainWindow()
     {
         EditorCommands.Main = this;
+        EditorCommands.RegisterCommands();
         Width = 1360; Height = 860; MinWidth = 640; MinHeight = 360;
         _play = new IconButton("Play.Fill", "再生 / 停止 (Space)", () => Svc.Preview.TogglePlay()) { IconSize = 20 };
         _themeButton = new IconButton("ThemeAuto", "テーマの切替", CycleTheme);
@@ -210,16 +211,18 @@ public sealed class MainWindow : Window
 
         var file = Menus.Sub("ファイル(_F)", null, new object[]
         {
-            Menus.Item("新規プロジェクト...", "NoteAdd", () => _ = EditorCommands.NewAsync(), "Ctrl+N"),
-            Menus.Item("開く...", "FolderOpen", () => _ = EditorCommands.OpenAsync(), "Ctrl+O"),
+            Menus.Item("新規プロジェクト...", "NoteAdd", () => _ = EditorCommands.NewAsync(), Shortcuts.First("file.new")),
+            Menus.Item("開く...", "FolderOpen", () => _ = EditorCommands.OpenAsync(), Shortcuts.First("file.open")),
             recent,
             Menus.Sep(),
-            Menus.Item("保存", "Save", () => _ = EditorCommands.SaveAsync(), "Ctrl+S"),
-            Menus.Item("名前を付けて保存...", "SaveAs", () => _ = EditorCommands.SaveAsAsync(), "Ctrl+Shift+S"),
+            Menus.Item("保存", "Save", () => _ = EditorCommands.SaveAsync(), Shortcuts.First("file.save")),
+            Menus.Item("名前を付けて保存...", "SaveAs", () => _ = EditorCommands.SaveAsAsync(), Shortcuts.First("file.saveAs")),
             Menus.Item("自動保存から復元...", "Reset", () => _ = EditorCommands.OpenAutoSaveAsync()),
+            Menus.Item("素材を収集して保存...", "FolderOpen", () => _ = EditorCommands.CollectAndSaveAsync()),
+            Menus.Item("素材の付け替え...", "Link", () => _ = EditorCommands.CheckMissingFilesAsync(always: true)),
             Menus.Sep(),
             Menus.Item("メディアファイルを読み込む...", "Movie", () => _ = EditorCommands.ImportFilesAsync(Timeline.LastLayer, _session.CurrentFrame)),
-            Menus.Item("動画の出力...", "Output", () => _ = EditorCommands.ExportAsync(), "Ctrl+E"),
+            Menus.Item("動画の出力...", "Output", () => _ = EditorCommands.ExportAsync(), Shortcuts.First("file.export")),
             Menus.Sep(),
             Menus.Item("終了", "Exit", Close),
         });
@@ -231,19 +234,28 @@ public sealed class MainWindow : Window
             if (recent.Items.Count == 0) recent.Items.Add(new MenuItem { Header = "(なし)", IsEnabled = false });
         };
 
-        _undoItem = Track(Menus.Item("元に戻す", "Undo", _session.Undo, "Ctrl+Z"), () => _session.History.CanUndo);
-        _redoItem = Track(Menus.Item("やり直し", "Redo", _session.Redo, "Ctrl+Y"), () => _session.History.CanRedo);
+        _undoItem = Track(Menus.Item("元に戻す", "Undo", _session.Undo, Shortcuts.First("edit.undo")), () => _session.History.CanUndo);
+        _redoItem = Track(Menus.Item("やり直し", "Redo", _session.Redo, Shortcuts.First("edit.redo")), () => _session.History.CanRedo);
         var edit = Menus.Sub("編集(_E)", null, new object[]
         {
             _undoItem, _redoItem,
             Menus.Sep(),
-            Track(Menus.Item("切り取り", "Cut", _session.CutSelected, "Ctrl+X"), HasSelection),
-            Track(Menus.Item("コピー", "Copy", _session.CopySelected, "Ctrl+C"), HasSelection),
-            Track(Menus.Item("貼り付け", "Paste", EditorCommands.Paste, "Ctrl+V"), () => _session.HasClipboard),
-            Track(Menus.Item("削除", "Delete", _session.DeleteSelected, "Delete"), HasSelection),
+            Track(Menus.Item("切り取り", "Cut", _session.CutSelected, Shortcuts.First("edit.cut")), HasSelection),
+            Track(Menus.Item("コピー", "Copy", _session.CopySelected, Shortcuts.First("edit.copy")), HasSelection),
+            Track(Menus.Item("貼り付け", "Paste", EditorCommands.Paste, Shortcuts.First("edit.paste")), () => _session.HasClipboard),
+            Track(Menus.Item("削除", "Delete", _session.DeleteSelected, Shortcuts.First("edit.delete")), HasSelection),
             Menus.Sep(),
-            Track(Menus.Item("現在位置で分割", "Split", EditorCommands.Split, "S"), HasSelection),
-            Track(Menus.Item("中間点を追加", "AddDiamond", EditorCommands.AddKeyFrame, "P"), HasSelection),
+            Track(Menus.Item("現在位置で分割", "Split", EditorCommands.Split, Shortcuts.First("edit.split")), HasSelection),
+            Track(Menus.Item("中間点を追加", "AddDiamond", EditorCommands.AddKeyFrame, Shortcuts.First("edit.addKey")), HasSelection),
+            Menus.Sep(),
+            Menus.Sub("出力範囲", "Crop", new object[]
+            {
+                Menus.Item("開始を現在位置に", null, EditorCommands.SetRangeStart, Shortcuts.First("range.start")),
+                Menus.Item("終了を現在位置に", null, EditorCommands.SetRangeEnd, Shortcuts.First("range.end")),
+                Menus.Item("解除", null, EditorCommands.ClearRange, Shortcuts.First("range.clear")),
+            }),
+            Track(Menus.Item("エイリアスを作成...", "Layers", () => _ = EditorCommands.CreateAliasAsync(), Shortcuts.First("alias.create")), HasSelection),
+            Menus.Item("グリッドの設定...", "GridOn", () => _ = EditorCommands.GridSettingsAsync()),
             Menus.Sep(),
             Menus.Item("プロジェクト設定...", "Tune", () => _ = EditorCommands.ProjectSettingsAsync()),
         });

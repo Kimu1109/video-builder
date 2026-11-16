@@ -295,20 +295,26 @@ public sealed class EditorSession
     }
 
     /// <summary>コピーしたオブジェクトを、layer / frame を左上として貼り付ける。</summary>
-    public void Paste(int layer, int frame)
+    public void Paste(int layer, int frame) => Insert(_clipboard, layer, frame, "貼り付け");
+
+    /// <summary>
+    /// オブジェクトの並びを、相対位置を保ったまま layer / frame を左上として追加する。
+    /// 重なる場合は、置けるところまで下のレイヤーにずらす。追加できた数を返す。
+    /// </summary>
+    public int Insert(IReadOnlyList<TimelineObject> sources, int layer, int frame, string description)
     {
-        if (_clipboard.Count == 0) return;
-        int minLayer = _clipboard.Min(o => o.Layer), minStart = _clipboard.Min(o => o.Start);
+        if (sources.Count == 0) return 0;
+        int minLayer = sources.Min(o => o.Layer), minStart = sources.Min(o => o.Start);
+        layer = Math.Max(0, layer); frame = Math.Max(0, frame);
         var added = new List<string>();
-        Edit("貼り付け", () =>
+        Edit(description, () =>
         {
-            // 重ならないレイヤーまで下にずらす
             for (int shift = 0; shift < Scene.LayerCount; shift++)
             {
-                bool ok = _clipboard.All(o => Scene.IsFree(o.Layer - minLayer + layer + shift, o.Start - minStart + frame, o.End - minStart + frame));
+                bool ok = sources.All(o => Scene.IsFree(o.Layer - minLayer + layer + shift, o.Start - minStart + frame, o.End - minStart + frame));
                 if (!ok) continue;
                 var groupMap = new Dictionary<string, string>();
-                foreach (var src in _clipboard)
+                foreach (var src in sources)
                 {
                     var o = src.Clone(newId: true);
                     int len = o.Length;
@@ -326,6 +332,25 @@ public sealed class EditorSession
             }
         });
         if (added.Count > 0) SelectMany(added);
+        return added.Count;
+    }
+
+    /// <summary>出力範囲を設定する。start / end のどちらかだけ変えるときは、もう一方に今の値を渡す。</summary>
+    public void SetRange(int? start, int? end)
+    {
+        if (start != null && end != null && end < start) (start, end) = (end, start);
+        Edit("範囲設定", () => { Scene.RangeStart = start; Scene.RangeEnd = end; });
+    }
+
+    /// <summary>出力範囲 (開始, 終了)。未設定の端はシーンの先頭 / 末尾。</summary>
+    public (int Start, int End) EffectiveRange
+    {
+        get
+        {
+            int last = Math.Max(0, Scene.Length - 1);
+            int start = Math.Clamp(Scene.RangeStart ?? 0, 0, last), end = Math.Clamp(Scene.RangeEnd ?? last, 0, last);
+            return end < start ? (0, last) : (start, end);
+        }
     }
 
     public void SplitSelectedAt(int frame)

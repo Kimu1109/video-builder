@@ -233,3 +233,125 @@ public class EditorSessionTests
         Assert.True(s.IsDirty);
     }
 }
+
+public class ProjectMediaTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), $"vb-pm-{Guid.NewGuid():N}");
+
+    public ProjectMediaTests() => Directory.CreateDirectory(_dir);
+    public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
+
+    private string Touch(string relative, string content = "x")
+    {
+        var path = Path.Combine(_dir, relative);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, content);
+        return path;
+    }
+
+    private static Project WithImages(params string[] files)
+    {
+        var p = new Project();
+        int layer = 0;
+        foreach (var f in files)
+        {
+            var o = ObjectFactory.Create(EffectRegistry.Image, layer++, 0, 30);
+            o.Main.Values["file"] = f;
+            p.Root.Objects.Add(o);
+        }
+        return p;
+    }
+
+    [Fact]
+    public void Missing_files_are_found_and_relinked_from_a_folder()
+    {
+        var real = Touch("new/deep/a.png");
+        var p = WithImages(Path.Combine(_dir, "old", "a.png"), Path.Combine(_dir, "old", "gone.png"));
+        Assert.Equal(2, ProjectMedia.FindMissing(p).Count);
+        Assert.Equal(1, ProjectMedia.RelinkFromFolder(p, Path.Combine(_dir, "new")));
+        Assert.Equal(real, p.Root.Objects[0].Main.GetString("file"));
+        Assert.Single(ProjectMedia.FindMissing(p));
+    }
+
+    [Fact]
+    public void A_project_moved_together_with_its_media_still_opens()
+    {
+        var img = Touch("work/media/a.png");
+        var proj = Path.Combine(_dir, "work", "p.vbproj");
+        ProjectSerializer.Save(WithImages(img), proj);
+        Directory.Move(Path.Combine(_dir, "work"), Path.Combine(_dir, "moved"));
+        var q = ProjectSerializer.Load(Path.Combine(_dir, "moved", "p.vbproj"));
+        Assert.Equal(Path.Combine(_dir, "moved", "media", "a.png"), q.Root.Objects[0].Main.GetString("file"));
+        Assert.Empty(ProjectMedia.FindMissing(q));
+    }
+
+    [Fact]
+    public void Collect_copies_media_and_keeps_same_named_files_apart()
+    {
+        var a1 = Touch("one/a.png", "first");
+        var a2 = Touch("two/a.png", "second!");
+        var p = WithImages(a1, a2, a1);
+        var target = Path.Combine(_dir, "collected");
+        Assert.Equal(2, ProjectMedia.Collect(p, target));
+        var files = p.Root.Objects.Select(o => o.Main.GetString("file")).ToList();
+        Assert.All(files, f => Assert.StartsWith(target, f));
+        Assert.Equal(files[0], files[2]);
+        Assert.NotEqual(files[0], files[1]);
+        Assert.Equal("first", File.ReadAllText(files[0]));
+        Assert.Equal("second!", File.ReadAllText(files[1]));
+        Assert.Equal(0, ProjectMedia.Collect(p, target));     // 2 回目は何もコピーしない
+    }
+}
+
+public class AliasAndRangeTests
+{
+    [Fact]
+    public void Alias_round_trips_and_is_inserted_at_the_requested_place()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-alias-{Guid.NewGuid():N}");
+        try
+        {
+            var s = new EditorSession();
+            var t = s.AddObject(EffectRegistry.Text, 3, 100, 60)!;
+            t.Main.Values["text"] = "見出し";
+            ObjectFactory.AddFilter(t, "filter.border");
+            t.AddKeyFrame(130);
+            var store = new AliasStore(dir);
+            store.Save("見出し/テロップ", new[] { t });
+            Assert.Equal(new[] { "見出し_テロップ" }, store.List());
+
+            var loaded = store.Load("見出し/テロップ");
+            Assert.Equal(0, loaded[0].Start);
+            Assert.Equal(new[] { 30 }, loaded[0].KeyFrames);
+            Assert.Equal(1, s.Insert(loaded, 0, 500, "エイリアスの追加"));
+            var added = s.Primary!;
+            Assert.Equal((0, 500, 559), (added.Layer, added.Start, added.End));
+            Assert.Equal("見出し", added.Main.GetString("text"));
+            Assert.Equal(3, added.Effects.Count);
+            Assert.NotEqual(t.Id, added.Id);
+            s.Undo();
+            Assert.Single(s.Scene.Objects);
+            store.Delete("見出し/テロップ");
+            Assert.Empty(store.List());
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
+    public void Export_range_defaults_to_the_whole_scene_and_is_undoable()
+    {
+        var s = new EditorSession();
+        s.AddObject(EffectRegistry.Shape, 0, 0, 100);
+        Assert.Equal((0, 99), s.EffectiveRange);
+        s.SetRange(20, null);
+        s.SetRange(s.Scene.RangeStart, 59);
+        Assert.Equal((20, 59), s.EffectiveRange);
+        s.SetRange(80, 30);                                  // 逆順は入れ替える
+        Assert.Equal((30, 80), s.EffectiveRange);
+        s.Undo();
+        Assert.Equal((20, 59), s.EffectiveRange);
+        var q = ProjectSerializer.FromJson(ProjectSerializer.ToJson(s.Project));
+        Assert.Equal(20, q.Root.RangeStart);
+    }
+}
+

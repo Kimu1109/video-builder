@@ -130,8 +130,29 @@ public sealed class TimelineView : UserControl
         menu.Items.Add(Menus.Sub("メディアオブジェクトの追加", "AddBox", media));
         menu.Items.Add(Menus.Sub("フィルタオブジェクトの追加", "Filter",
             EffectRegistry.Filters.Select(f => (object)Menus.Item(f.Name, f.Icon, () => _session.AddObject(f.Id, hit.Layer, hit.Frame, len)))));
+        var aliases = Svc.Aliases.List();
+        if (aliases.Count > 0)
+            menu.Items.Add(Menus.Sub("エイリアスから追加", "Layers", aliases.Select(a => (object)Menus.Item(a, null, () => EditorCommands.InsertAlias(a, hit.Layer, hit.Frame)))
+                .Append(Menus.Sep())
+                .Append(Menus.Sub("エイリアスを削除", "Delete", aliases.Select(a => (object)Menus.Item(a, null, () => Svc.Aliases.Delete(a)))))));
         menu.Items.Add(Menus.Sep());
-        menu.Items.Add(Menus.Item("貼り付け", "Paste", () => _session.Paste(hit.Layer, hit.Frame), "Ctrl+V", _session.HasClipboard));
+        menu.Items.Add(Menus.Item("貼り付け", "Paste", () => _session.Paste(hit.Layer, hit.Frame), Shortcuts.First("edit.paste"), _session.HasClipboard));
+        var scene = _session.Scene;
+        menu.Items.Add(Menus.Sub("範囲設定", "Crop", new object[]
+        {
+            Menus.Item("ここを出力範囲の開始にする", null, () => _session.SetRange(hit.Frame, scene.RangeEnd)),
+            Menus.Item("ここを出力範囲の終了にする", null, () => _session.SetRange(scene.RangeStart, hit.Frame)),
+            Menus.Item("出力範囲を解除", null, EditorCommands.ClearRange, null, scene.RangeStart != null || scene.RangeEnd != null),
+        }));
+        var grid = _session.Project.Grid.Mode;
+        menu.Items.Add(Menus.Sub("グリッド", "GridOn", new object[]
+        {
+            Menus.Item("表示しない", null, () => EditorCommands.SetGridMode(GridMode.None), isChecked: grid == GridMode.None),
+            Menus.Item("時間", null, () => EditorCommands.SetGridMode(GridMode.Time), isChecked: grid == GridMode.Time),
+            Menus.Item("BPM (テンポ)", null, () => EditorCommands.SetGridMode(GridMode.Bpm), isChecked: grid == GridMode.Bpm),
+            Menus.Sep(),
+            Menus.Item("グリッドの設定...", "Tune", () => _ = EditorCommands.GridSettingsAsync()),
+        }));
         menu.Items.Add(Menus.Sep());
         menu.Items.Add(Menus.Item("ここへ現在位置を移動", "ChevronRight", () => _session.CurrentFrame = hit.Frame));
         menu.Items.Add(Menus.Item("スナップ", "Snap", () => { Svc.Settings.Snap = !Svc.Settings.Snap; Svc.Settings.Save(); }, isChecked: Svc.Settings.Snap));
@@ -146,9 +167,10 @@ public sealed class TimelineView : UserControl
             menu.Items.Add(Menus.Item("中間点を削除", "Remove", () => _session.RemoveKeyFrame(o, hit.KeyIndex)));
         menu.Items.Add(Menus.Item("分割", "Split", () => _session.SplitSelectedAt(hit.Frame), null, inside));
         menu.Items.Add(Menus.Sep());
-        menu.Items.Add(Menus.Item("切り取り", "Cut", _session.CutSelected, "Ctrl+X"));
-        menu.Items.Add(Menus.Item("コピー", "Copy", _session.CopySelected, "Ctrl+C"));
-        menu.Items.Add(Menus.Item("削除", "Delete", _session.DeleteSelected, "Delete"));
+        menu.Items.Add(Menus.Item("切り取り", "Cut", _session.CutSelected, Shortcuts.First("edit.cut")));
+        menu.Items.Add(Menus.Item("コピー", "Copy", _session.CopySelected, Shortcuts.First("edit.copy")));
+        menu.Items.Add(Menus.Item("削除", "Delete", _session.DeleteSelected, Shortcuts.First("edit.delete")));
+        menu.Items.Add(Menus.Item("エイリアスを作成...", "Layers", () => _ = EditorCommands.CreateAliasAsync()));
         menu.Items.Add(Menus.Sep());
         menu.Items.Add(Menus.Sub("フィルタ効果の追加", "AddBox",
             EffectRegistry.Filters.Select(f => (object)Menus.Item(f.Name, f.Icon, () => _session.AddFilter(o, f.Id)))));

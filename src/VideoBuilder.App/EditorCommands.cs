@@ -54,6 +54,7 @@ public static class EditorCommands
         {
             Session.Load(path);
             Svc.Settings.AddRecent(path);
+            await CheckMissingFilesAsync();
         }
         catch (Exception ex)
         {
@@ -183,51 +184,110 @@ public static class EditorCommands
         Svc.Theme.Apply();
     }
 
+    // ---------------- 範囲・グリッド・エイリアス・素材 ----------------
+
+    public static void SetRangeStart() => Session.SetRange(Session.CurrentFrame, Session.Scene.RangeEnd);
+    public static void SetRangeEnd() => Session.SetRange(Session.Scene.RangeStart, Session.CurrentFrame);
+    public static void ClearRange() => Session.SetRange(null, null);
+
+    public static void SetGridMode(GridMode mode) => Session.Edit("グリッドの切替", () => Session.Project.Grid.Mode = mode);
+
+    public static async Task GridSettingsAsync()
+    {
+        if (Main != null) await new GridDialog().ShowDialog(Main);
+    }
+
+    public static async Task CreateAliasAsync()
+    {
+        var targets = Session.WithGroup(Session.SelectedObjects.ToList());
+        if (Main == null || targets.Count == 0) return;
+        var name = await PromptDialog.Show(Main, "エイリアスを作成", "エイリアスの名前", TimelineCanvasLabel(targets[0]));
+        if (name == null) return;
+        if (Svc.Aliases.Exists(name) &&
+            await MessageDialog.Show(Main, "エイリアスを作成", $"「{AliasStore.SafeName(name)}」はすでにあります。上書きしますか?", ("キャンセル", false), ("上書き", true)) != "上書き") return;
+        try { Svc.Aliases.Save(name, targets); }
+        catch (Exception ex) { await ShowErrorAsync("エイリアスを保存できませんでした。\n" + ex.Message); }
+    }
+
+    private static string TimelineCanvasLabel(TimelineObject o) => Controls.TimelineCanvas.ObjectLabel(o);
+
+    public static void InsertAlias(string name, int layer, int frame)
+    {
+        try
+        {
+            if (Session.Insert(Svc.Aliases.Load(name), layer, frame, "エイリアスの追加") == 0)
+                _ = ShowErrorAsync("空いているレイヤーがありません");
+        }
+        catch (Exception ex) { _ = ShowErrorAsync("エイリアスを読み込めませんでした。\n" + ex.Message); }
+    }
+
+    /// <summary>見つからない素材があれば、付け替えのダイアログを出す。</summary>
+    public static async Task CheckMissingFilesAsync(bool always = false)
+    {
+        if (Main == null) return;
+        if (!always && ProjectMedia.FindMissing(Session.Project).Count == 0) return;
+        await new MissingFilesDialog().ShowDialog(Main);
+    }
+
+    /// <summary>素材をプロジェクトの隣のフォルダに集めてから保存する。</summary>
+    public static async Task CollectAndSaveAsync()
+    {
+        if (Main == null) return;
+        if (Session.FilePath == null && !await SaveAsAsync()) return;
+        string path = Session.FilePath!;
+        string dir = Path.Combine(Path.GetDirectoryName(path) ?? ".", Path.GetFileNameWithoutExtension(path) + "_media");
+        int copied = 0;
+        try
+        {
+            Session.Edit("素材の収集", () => copied = ProjectMedia.Collect(Session.Project, dir));
+            if (!await SaveToAsync(path)) return;
+        }
+        catch (Exception ex) { await ShowErrorAsync("素材を収集できませんでした。\n" + ex.Message); return; }
+        var missing = ProjectMedia.FindMissing(Session.Project).Count;
+        await MessageDialog.Show(Main, "素材を収集して保存",
+            $"{copied} 個のファイルを次のフォルダにコピーしました。\n{dir}" + (missing > 0 ? $"\n\n見つからない素材が {missing} 個あり、それらはコピーしていません。" : ""));
+    }
+
     // ---------------- ショートカット ----------------
+
+    public static void RegisterCommands()
+    {
+        Shortcuts.Register(
+            new("file.new", "新規プロジェクト", "Ctrl+N", () => _ = NewAsync(), true),
+            new("file.open", "開く", "Ctrl+O", () => _ = OpenAsync(), true),
+            new("file.save", "保存", "Ctrl+S", () => _ = SaveAsync(), true),
+            new("file.saveAs", "名前を付けて保存", "Ctrl+Shift+S", () => _ = SaveAsAsync(), true),
+            new("file.export", "動画の出力", "Ctrl+E", () => _ = ExportAsync(), true),
+            new("edit.undo", "元に戻す", "Ctrl+Z", () => Session.Undo()),
+            new("edit.redo", "やり直し", "Ctrl+Y;Ctrl+Shift+Z", () => Session.Redo()),
+            new("edit.cut", "切り取り", "Ctrl+X", () => Session.CutSelected()),
+            new("edit.copy", "コピー", "Ctrl+C", () => Session.CopySelected()),
+            new("edit.paste", "貼り付け", "Ctrl+V", Paste),
+            new("edit.delete", "削除", "Delete", () => Session.DeleteSelected()),
+            new("edit.selectAll", "すべて選択", "Ctrl+A", () => Session.SelectMany(Session.Scene.Objects.Where(o => !Session.Scene.GetLayer(o.Layer).Locked).Select(o => o.Id))),
+            new("edit.deselect", "選択を解除", "Escape", () => Session.Select(null)),
+            new("edit.split", "現在位置で分割", "S", Split),
+            new("edit.addKey", "中間点を追加", "P", AddKeyFrame),
+            new("play.toggle", "再生 / 停止", "Space", () => Svc.Preview.TogglePlay()),
+            new("move.prev", "1 フレーム戻る", "Left", () => Step(-1)),
+            new("move.next", "1 フレーム進む", "Right", () => Step(1)),
+            new("move.prev10", "10 フレーム戻る", "Shift+Left", () => Step(-10)),
+            new("move.next10", "10 フレーム進む", "Shift+Right", () => Step(10)),
+            new("move.prevEdit", "前の編集点へ", "Ctrl+Left", () => Seek(Session.FindEditPoint(Session.CurrentFrame, -1))),
+            new("move.nextEdit", "次の編集点へ", "Ctrl+Right", () => Seek(Session.FindEditPoint(Session.CurrentFrame, 1))),
+            new("move.home", "先頭へ", "Home", () => Seek(0)),
+            new("move.end", "末尾へ", "End", () => Seek(Math.Max(0, Session.SceneLength - 1))),
+            new("range.start", "出力範囲の開始を現在位置に", "OemOpenBrackets", SetRangeStart),
+            new("range.end", "出力範囲の終了を現在位置に", "OemCloseBrackets", SetRangeEnd),
+            new("range.clear", "出力範囲を解除", "", ClearRange),
+            new("alias.create", "エイリアスを作成", "", () => _ = CreateAliasAsync()));
+    }
 
     /// <summary>キー入力を処理したら true。文字入力中 (TextBox) は編集用のキーを横取りしない。</summary>
     public static bool HandleKey(KeyEventArgs e, TopLevel top)
     {
-        bool ctrl = e.KeyModifiers.HasFlag(KeyModifiers.Control), shift = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
-        bool typing = top.FocusManager?.GetFocusedElement() is TextBox;
-
-        if (ctrl)
-        {
-            switch (e.Key)
-            {
-                case Key.S: _ = shift ? SaveAsAsync() : SaveAsync(); return true;
-                case Key.O: _ = OpenAsync(); return true;
-                case Key.N: _ = NewAsync(); return true;
-                case Key.E: _ = ExportAsync(); return true;
-            }
-            if (typing) return false;
-            switch (e.Key)
-            {
-                case Key.Z: if (shift) Session.Redo(); else Session.Undo(); return true;
-                case Key.Y: Session.Redo(); return true;
-                case Key.C: Session.CopySelected(); return true;
-                case Key.X: Session.CutSelected(); return true;
-                case Key.V: Paste(); return true;
-                case Key.A: Session.SelectMany(Session.Scene.Objects.Where(o => !Session.Scene.GetLayer(o.Layer).Locked).Select(o => o.Id)); return true;
-                case Key.Left: Seek(Session.FindEditPoint(Session.CurrentFrame, -1)); return true;
-                case Key.Right: Seek(Session.FindEditPoint(Session.CurrentFrame, 1)); return true;
-            }
-            return false;
-        }
-        if (typing || e.KeyModifiers.HasFlag(KeyModifiers.Alt)) return false;
-        switch (e.Key)
-        {
-            case Key.Space: Svc.Preview.TogglePlay(); return true;
-            case Key.Left: Step(shift ? -10 : -1); return true;
-            case Key.Right: Step(shift ? 10 : 1); return true;
-            case Key.Home: Seek(0); return true;
-            case Key.End: Seek(Math.Max(0, Session.SceneLength - 1)); return true;
-            case Key.Delete: Session.DeleteSelected(); return true;
-            case Key.P: AddKeyFrame(); return true;
-            case Key.S: Split(); return true;
-            case Key.Escape: Session.Select(null); return true;
-        }
-        return false;
+        if (Shortcuts.All.Count == 0) RegisterCommands();
+        return Shortcuts.Handle(e, top);
     }
 
     // ---------------- 自動保存 ----------------

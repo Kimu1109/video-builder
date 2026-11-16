@@ -11,10 +11,14 @@ public static class Svc
     public static AppSettings Settings { get; private set; } = new();
     public static ThemeService Theme { get; private set; } = null!;
     public static PreviewService Preview { get; private set; } = null!;
+    public static WaveformCache Waveforms { get; } = new();
+    public static ThumbnailCache Thumbnails { get; } = new();
+    public static AliasStore Aliases { get; private set; } = new(AppPaths.AliasDir);
 
     public static void Initialize(Application app)
     {
         Settings = AppSettings.Load();
+        Aliases = new AliasStore(AppPaths.AliasDir);
         RegisterBundledFonts();
         Session.History.Limit = Settings.UndoLimit;
         Theme = new ThemeService(app, Settings);
