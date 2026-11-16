@@ -6,6 +6,8 @@ namespace VideoBuilder.App.Services;
 public enum ThemeMode { System, Light, Dark }
 public enum AccentMode { System, AppDefault, Custom }
 public enum WindowMode { Auto, Separate, Docked }
+/// <summary>Auto: 本物の GPU があれば GPU、なければ CPU。</summary>
+public enum RenderBackend { Auto, Gpu, Cpu }
 
 /// <summary>環境設定。XDG_CONFIG_HOME/video-builder/settings.json に保存する。</summary>
 public sealed class AppSettings
@@ -14,6 +16,7 @@ public sealed class AppSettings
     public AccentMode Accent { get; set; } = AccentMode.System;
     public string CustomAccent { get; set; } = "#2F80ED";
     public WindowMode WindowMode { get; set; } = WindowMode.Auto;
+    public RenderBackend RenderBackend { get; set; } = RenderBackend.Auto;
     public int LayerHeight { get; set; } = 24;
     public bool Snap { get; set; } = true;
     public bool AutoSave { get; set; } = true;

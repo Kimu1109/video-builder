@@ -40,6 +40,9 @@ public partial class App : Application
         var s = Svc.Settings;
         if (args.Contains("--docked")) s.WindowMode = WindowMode.Docked;
         if (args.Contains("--separate")) s.WindowMode = WindowMode.Separate;
+        if (args.Contains("--gpu")) s.RenderBackend = RenderBackend.Gpu;
+        if (args.Contains("--cpu")) s.RenderBackend = RenderBackend.Cpu;
+        if (args.Contains("--gpu") || args.Contains("--cpu")) Svc.Preview.ReloadBackend();
         int t = Array.IndexOf(args, "--theme");
         if (t >= 0 && t + 1 < args.Length && Enum.TryParse<ThemeMode>(args[t + 1], true, out var mode)) { s.Theme = mode; Svc.Theme.Apply(); }
     }

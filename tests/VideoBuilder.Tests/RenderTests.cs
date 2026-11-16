@@ -241,3 +241,135 @@ public class RenderTests
         public void Report((int Done, int Total) value) => onReport(value);
     }
 }
+
+/// <summary>GPU 描画が CPU 描画と同じ絵になることを確かめる。GPU コンテキストを作れない環境では何もしない。</summary>
+public class GpuRenderTests
+{
+    private static Project RichProject()
+    {
+        var p = new Project();
+        p.Settings.Width = 640; p.Settings.Height = 360;
+        TimelineObject Shape(int layer, string color, int type, int size, double x = 0, double y = 0)
+        {
+            var o = ObjectFactory.Create(EffectRegistry.Shape, layer, 0, 60);
+            o.Main.Values["color"] = color; o.Main.Values["type"] = type.ToString();
+            o.Main.Tracks["size"] = new AnimatedValue(size);
+            o.Draw!.Tracks["x"] = new AnimatedValue(x); o.Draw!.Tracks["y"] = new AnimatedValue(y);
+            p.Root.Objects.Add(o);
+            return o;
+        }
+        Shape(0, "#1B2A41", 0, 0);
+        var circle = Shape(1, "#F2A900", 1, 160, -150, -40);
+        ObjectFactory.AddFilter(circle, "filter.shadow");
+        var blurred = Shape(2, "#FFFFFF", 2, 80, 150, -60);
+        ObjectFactory.AddFilter(blurred, "filter.blur").Tracks["radius"] = new AnimatedValue(12);
+        blurred.Draw!.Tracks["rotation"] = new AnimatedValue(30);
+        var keyed = Shape(3, "#00FF00", 2, 120, 0, 90);            // クロマキーで消える
+        ObjectFactory.AddFilter(keyed, "filter.chromakey");
+        var star = Shape(4, "#E53935", 6, 120, 200, 90);
+        ObjectFactory.AddFilter(star, "filter.border").Tracks["size"] = new AnimatedValue(4);
+        ObjectFactory.AddFilter(star, "filter.color").Tracks["hue"] = new AnimatedValue(40);
+        var mosaic = Shape(5, "#3A6EA5", 5, 100, -220, 100);
+        ObjectFactory.AddFilter(mosaic, "filter.mosaic");
+        mosaic.Draw!.Values["blend"] = "1";                          // 加算
+        var sub = Shape(6, "#404040", 2, 60, -40, -120);
+        sub.Draw!.Values["blend"] = "2";                             // 減算
+        var text = ObjectFactory.Create(EffectRegistry.Text, 7, 0, 60);
+        text.Main.Values["text"] = "GPU テスト";
+        ObjectFactory.AddFilter(text, "filter.border");
+        p.Root.Objects.Add(text);
+        var filter = ObjectFactory.Create("filter.color", 8, 0, 60);
+        filter.Main.Tracks["contrast"] = new AnimatedValue(120);
+        p.Root.Objects.Add(filter);
+        return p;
+    }
+
+    [Fact]
+    public void Gpu_output_matches_cpu_output()
+    {
+        using var gpu = GpuContext.TryCreate(out var error);
+        if (gpu == null) { Console.WriteLine("BENCH gpu unavailable: " + error); return; }
+        Console.WriteLine($"BENCH gpu renderer={gpu.Renderer} vendor={gpu.Vendor} software={gpu.IsSoftware}");
+        var p = RichProject();
+        using var cpuEngine = new RenderEngine();
+        using var gpuEngine = new RenderEngine(gpu);
+        using var a = new SKBitmap(new SKImageInfo(640, 360, SKColorType.Bgra8888, SKAlphaType.Premul));
+        using var b = new SKBitmap(a.Info);
+        cpuEngine.RenderToBitmap(p, p.Root, 10, a);
+        gpuEngine.RenderToBitmap(p, p.Root, 10, b);
+
+        long total = 0; int max = 0, far = 0;
+        var pa = a.Bytes; var pb = b.Bytes;
+        for (int i = 0; i < pa.Length; i++)
+        {
+            int d = Math.Abs(pa[i] - pb[i]);
+            total += d; max = Math.Max(max, d);
+            if (d > 24) far++;
+        }
+        double mean = (double)total / pa.Length;
+        Console.WriteLine($"BENCH gpu-vs-cpu mean={mean:0.000} max={max} far={far}");
+        // 輪郭のアンチエイリアスとぼかしの計算方法が少し違うので、わずかな差は許す
+        Assert.True(mean < 0.6, $"平均の差が大きい: {mean}");
+        Assert.True(far < pa.Length / 400, $"大きく違うピクセルが多い: {far}");
+
+        // 代表点: GPU 側でも背景・図形・クロマキーが正しい
+        Assert.Equal(new SKColor(0xF2, 0xA9, 0x00).Red, b.GetPixel(320 - 150, 180 - 40).Red, 40.0);
+        var keyedPixel = b.GetPixel(320, 180 + 110);
+        Assert.True(keyedPixel.Green < 100, "クロマキーで緑が消えていない: " + keyedPixel);
+        Assert.Equal(gpuEngine.LastQuads.Count, cpuEngine.LastQuads.Count);
+    }
+
+    [Fact]
+    public void Gpu_engine_can_render_repeatedly_at_different_sizes_and_export()
+    {
+        using var gpu = GpuContext.TryCreate(out _);
+        if (gpu == null) return;
+        var p = RichProject();
+        using (var engine = new RenderEngine(gpu))
+        {
+            foreach (var (w, h) in new[] { (640, 360), (320, 180), (640, 360) })
+            {
+                using var bmp = new SKBitmap(new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Premul));
+                for (int f = 0; f < 5; f++) engine.RenderToBitmap(p, p.Root, f, bmp);
+                Assert.NotEqual(SKColors.Black, bmp.GetPixel(2, 2));       // 背景色が入っている
+            }
+        }
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        var path = Path.Combine(Path.GetTempPath(), $"vb-gpu-{Guid.NewGuid():N}.mp4");
+        try
+        {
+            // 出力は別スレッドで自分用の GPU コンテキストを作る
+            Task.Run(() => Exporter.Run(new ExportRequest
+            {
+                Project = p, SceneId = "root", StartFrame = 0, EndFrame = 9, UseGpu = true,
+                Settings = new ExportSettings { Path = path, AudioCodec = "" },
+            }, null, CancellationToken.None)).Wait();
+            var info = MediaInfo.Probe(path)!;
+            Assert.True(info.HasVideo);
+            using var r = new VideoReader(path);
+            var px = r.GetFrame(0.1)!;
+            Assert.True(px[0] > 40 && px[2] < 60, "出力した動画の背景色が違う");   // #1B2A41 にコントラスト補正: 青が強い
+        }
+        finally { try { File.Delete(path); } catch { } }
+    }
+
+    [Fact]
+    public void Report_render_speed()
+    {
+        var p = RichProject();
+        p.Settings.Width = 1920; p.Settings.Height = 1080;
+        double Measure(RenderEngine e)
+        {
+            using var bmp = new SKBitmap(new SKImageInfo(1920, 1080, SKColorType.Bgra8888, SKAlphaType.Premul));
+            e.RenderToBitmap(p, p.Root, 0, bmp);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            for (int f = 1; f <= 10; f++) e.RenderToBitmap(p, p.Root, f, bmp);
+            return sw.Elapsed.TotalMilliseconds / 10;
+        }
+        using (var cpu = new RenderEngine()) Console.WriteLine($"BENCH 1080p cpu: {Measure(cpu):0.0} ms/frame");
+        using var gpu = GpuContext.TryCreate(out _);
+        if (gpu == null) return;
+        using var engine = new RenderEngine(gpu);
+        Console.WriteLine($"BENCH 1080p gpu ({gpu.Renderer}): {Measure(engine):0.0} ms/frame");
+    }
+}

@@ -14,6 +14,8 @@ public sealed class ExportRequest
     public int EndFrame { get; init; }
     /// <summary>連番 PNG で書き出す (Settings.Path の拡張子の前に番号を付ける)。</summary>
     public bool ImageSequence { get; init; }
+    /// <summary>GPU で描画する (使えなければ自動的に CPU になる)。</summary>
+    public bool UseGpu { get; init; }
 }
 
 /// <summary>UI なしでプロジェクトをファイルに書き出す。</summary>
@@ -28,9 +30,10 @@ public static class Exporter
         if (total == 0) throw new InvalidOperationException("出力するフレームがありません");
         int w = project.Settings.Width, h = project.Settings.Height;
 
-        using var engine = new RenderEngine();
+        // GPU コンテキストは作ったスレッドでしか使えないので、この関数の中で作って捨てる
+        using var gpu = req.UseGpu ? GpuContext.TryCreate(out _) : null;
+        using var engine = new RenderEngine(gpu);
         using var bitmap = new SKBitmap(Effects.Info(w, h));
-        using var surface = SKSurface.Create(bitmap.Info, bitmap.GetPixels(), bitmap.RowBytes);
 
         if (req.ImageSequence)
         {
@@ -39,7 +42,7 @@ public static class Exporter
             for (int i = 0; i < total; i++)
             {
                 cancel.ThrowIfCancellationRequested();
-                engine.Render(project, scene, req.StartFrame + i, surface);
+                engine.RenderToBitmap(project, scene, req.StartFrame + i, bitmap);
                 using var image = SKImage.FromBitmap(bitmap);
                 using var data = image.Encode(SKEncodedImageFormat.Png, 100);
                 using var fs = File.Create(Path.Combine(dir, $"{name}_{i:00000}.png"));
@@ -63,7 +66,7 @@ public static class Exporter
                 int frame = req.StartFrame + i;
                 if (writer.HasVideo)
                 {
-                    engine.Render(project, scene, frame, surface);
+                    engine.RenderToBitmap(project, scene, frame, bitmap);
                     unsafe
                     {
                         writer.WriteVideoFrame(new ReadOnlySpan<byte>((void*)bitmap.GetPixels(), bitmap.RowBytes * h), bitmap.RowBytes);

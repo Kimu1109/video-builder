@@ -16,6 +16,20 @@ public sealed class RenderContext
 {
     public required Project Project { get; init; }
     public required int Frame { get; init; }
+    /// <summary>GPU で描くときの Skia コンテキスト。null なら CPU で描く。</summary>
+    public GRContext? Gpu { get; init; }
+
+    /// <summary>作業用の描画先を作る。GPU 描画中は GPU 上に作るので、フィルタも GPU で処理される。</summary>
+    public SKSurface? CreateSurface(int width, int height)
+    {
+        width = Math.Max(1, width); height = Math.Max(1, height);
+        if (Gpu != null)
+        {
+            var gpu = SKSurface.Create(Gpu, false, new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Premul));
+            if (gpu != null) return gpu;
+        }
+        return SKSurface.Create(new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Premul));
+    }
     /// <summary>フレームを描き終わったら捨てる画像。</summary>
     public List<IDisposable> Temporaries { get; } = new();
 

@@ -173,6 +173,19 @@ public sealed class PreferencesDialog : DialogBase
             s.LayerHeight = new[] { 20, 24, 32 }[i]; Svc.Session.NotifyChanged();
         })));
 
+        Body.Children.Add(Heading("描画"));
+        var backend = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        backend.Classes.Add("secondary");
+        void ShowBackend() => backend.Text = "現在: " + Svc.Preview.BackendDescription;
+        Svc.Preview.BackendChanged += ShowBackend;
+        Closed += (_, _) => Svc.Preview.BackendChanged -= ShowBackend;
+        Body.Children.Add(Row("描画方式", Combo(new[] { "自動 (GPU があれば使う)", "GPU", "CPU" }, (int)s.RenderBackend, i =>
+        {
+            s.RenderBackend = (RenderBackend)i; Svc.Preview.ReloadBackend();
+        })));
+        ShowBackend();
+        Body.Children.Add(backend);
+
         Body.Children.Add(Heading("編集"));
         Body.Children.Add(Row("プレビュー品質", Combo(new[] { "フル", "1/2", "1/4" }, s.PreviewDivisor >= 4 ? 2 : s.PreviewDivisor >= 2 ? 1 : 0, i =>
         {

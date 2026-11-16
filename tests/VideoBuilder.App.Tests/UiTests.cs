@@ -325,4 +325,45 @@ public class UiTests
         Console.WriteLine($"BENCH demo 1080p worst frame: {worst:0.0} ms");
         Assert.True(worst > 0);
     }
+
+    [AvaloniaFact]
+    public async Task Render_backend_can_be_switched_while_running()
+    {
+        Open();
+        var s = Svc.Session;
+        s.AddObject(EffectRegistry.Shape, 0, 0, 60, x => x.Main.Values["color"] = "#00FF00");
+
+        async Task<uint> CenterAfterSwitch(RenderBackend backend)
+        {
+            Svc.Settings.RenderBackend = backend;
+            bool changed = false;
+            void OnChanged() => changed = true;
+            Svc.Preview.BackendChanged += OnChanged;
+            Svc.Preview.ReloadBackend();
+            for (int i = 0; i < 200 && !changed; i++) { await Task.Delay(20); Pump(); }
+            Svc.Preview.BackendChanged -= OnChanged;
+            Assert.True(changed, "描画方式が切り替わらない");
+            uint center = 0;
+            for (int i = 0; i < 100 && center != 0xFF00FF00; i++)
+            {
+                s.NotifyChanged();
+                await Task.Delay(20);
+                Pump();
+                Svc.Preview.WithFrame(b => center = (uint)b.GetPixel(b.Width / 2, b.Height / 2));
+            }
+            return center;
+        }
+
+        Assert.Equal(0xFF00FF00u, await CenterAfterSwitch(RenderBackend.Gpu));
+        Console.WriteLine("BENCH app backend (Gpu requested): " + Svc.Preview.BackendDescription);
+        // GPU コンテキストを作れる環境なら GPU、作れなければ CPU に落ちて描画は続く
+        Assert.True(Svc.Preview.BackendDescription.StartsWith("GPU") == Svc.Preview.IsGpuActive);
+
+        Assert.Equal(0xFF00FF00u, await CenterAfterSwitch(RenderBackend.Cpu));
+        Assert.False(Svc.Preview.IsGpuActive);
+        Assert.Equal("CPU", Svc.Preview.BackendDescription);
+
+        Assert.Equal(0xFF00FF00u, await CenterAfterSwitch(RenderBackend.Auto));
+        Console.WriteLine("BENCH app backend (Auto): " + Svc.Preview.BackendDescription);
+    }
 }

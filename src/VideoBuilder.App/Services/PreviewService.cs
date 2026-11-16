@@ -16,7 +16,8 @@ public sealed class PreviewService : IDisposable
 {
     private readonly EditorSession _session;
     private readonly AppSettings _settings;
-    private readonly RenderEngine _engine = new();
+    private RenderEngine? _engine;      // 描画スレッドの中で作って捨てる (GPU コンテキストがスレッドに結び付くため)
+    private volatile bool _backendDirty = true;
     private readonly AudioMixer _mixer = new();
     private AudioOutput? _audio;
 
@@ -46,6 +47,47 @@ public sealed class PreviewService : IDisposable
     public event Action? PlayStateChanged;
     /// <summary>直近 1 フレームの描画にかかった時間 (ミリ秒)。</summary>
     public double LastRenderMs { get; private set; }
+    /// <summary>今使っている描画方式の説明 (環境設定に表示する)。</summary>
+    public string BackendDescription { get; private set; } = "";
+    public bool IsGpuActive { get; private set; }
+    public event Action? BackendChanged;
+
+    /// <summary>描画方式の設定が変わったので、エンジンを作り直す。</summary>
+    public void ReloadBackend()
+    {
+        _backendDirty = true;
+        Request();
+    }
+
+    /// <summary>設定と環境から、GPU を使うかどうかを決めてエンジンを作る。描画スレッドから呼ぶ。</summary>
+    private void CreateEngine()
+    {
+        _engine?.Gpu?.MakeCurrent();
+        var oldGpu = _engine?.Gpu;
+        _engine?.Dispose();
+        oldGpu?.Dispose();
+
+        GpuContext? gpu = null;
+        string description;
+        var mode = _settings.RenderBackend;
+        if (mode == RenderBackend.Cpu) description = "CPU";
+        else
+        {
+            gpu = GpuContext.TryCreate(out var error);
+            if (gpu == null) description = $"CPU (GPU を使えません: {error})";
+            else if (gpu.IsSoftware && mode == RenderBackend.Auto)
+            {
+                // ソフトウェア実装の OpenGL は CPU 描画より遅いので使わない
+                description = $"CPU (GPU が見つかりません: {gpu.Renderer})";
+                gpu.Dispose(); gpu = null;
+            }
+            else description = $"GPU ({gpu.Renderer})";
+        }
+        _engine = new RenderEngine(gpu);
+        IsGpuActive = gpu != null;
+        BackendDescription = description;
+        Dispatcher.UIThread.Post(() => BackendChanged?.Invoke());
+    }
 
     public PreviewService(EditorSession session, AppSettings settings)
     {
@@ -84,10 +126,19 @@ public sealed class PreviewService : IDisposable
                 Snapshot? req; int frame;
                 lock (_requestLock) { req = _requested; frame = _requestedFrame; _requested = null; }
                 if (req == null) break;
-                try { RenderOne(req, frame); }
+                try
+                {
+                    if (_backendDirty) { _backendDirty = false; CreateEngine(); }
+                    RenderOne(req, frame);
+                }
                 catch (Exception ex) { Debug.WriteLine(ex); }
             }
         }
+        // GPU のリソースは、作ったこのスレッドで片付ける
+        var gpu = _engine?.Gpu;
+        _engine?.Dispose();
+        gpu?.Dispose();
+        _engine = null;
     }
 
     private void RenderOne(Snapshot req, int frame)
@@ -102,10 +153,10 @@ public sealed class PreviewService : IDisposable
             _back = new SKBitmap(new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Premul));
         }
         var sw = Stopwatch.StartNew();
-        using (var surface = SKSurface.Create(_back.Info, _back.GetPixels(), _back.RowBytes))
-            _engine.Render(p, scene, frame, surface);
+        var engine = _engine!;
+        engine.RenderToBitmap(p, scene, frame, _back);
         LastRenderMs = sw.Elapsed.TotalMilliseconds;
-        var quads = _engine.LastQuads.ToList();
+        var quads = engine.LastQuads.ToList();
         bool post;
         lock (_frameLock)
         {
@@ -209,10 +260,9 @@ public sealed class PreviewService : IDisposable
         Stop();
         _quit = true;
         _signal.Set();
-        _thread.Join(1000);
+        _thread.Join(2000);
         _audio?.Dispose();
         _mixer.Dispose();
-        _engine.Dispose();
         _front?.Dispose(); _back?.Dispose();
     }
 }

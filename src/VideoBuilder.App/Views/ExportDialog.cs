@@ -119,6 +119,7 @@ public sealed class ExportDialog : DialogBase
         {
             Project = session.Project.Clone(), SceneId = session.Scene.Id,
             StartFrame = 0, EndFrame = session.Scene.Length - 1, ImageSequence = f.Sequence,
+            UseGpu = Svc.Preview.IsGpuActive,   // プレビューと同じ描画方式で出力する
             Settings = new ExportSettings { Path = path, VideoCodec = f.VideoCodec, AudioCodec = f.AudioCodec, Crf = (int)_crf.Value, Preset = (string)_preset.SelectedItem! },
         };
         _cancel = new CancellationTokenSource();

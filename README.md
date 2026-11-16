@@ -9,6 +9,7 @@ Avalonia UI / C# 製の、AviUtl ライクな動画編集アプリ (Linux 優先
 - .NET 10 SDK
 - FFmpeg 6.1 の共有ライブラリ (`libavcodec.so.60` など)。Ubuntu 24.04 なら `sudo apt install ffmpeg`
 - OpenAL Soft (`libopenal1`)。音声の再生に使う
+- (任意) EGL / OpenGL ES (`libegl1`)。GPU 描画に使う。なければ CPU で描画する
 
 FFmpeg を標準以外の場所に置いている場合は、環境変数 `VIDEO_BUILDER_FFMPEG` にライブラリのあるフォルダを指定する。
 
@@ -27,6 +28,7 @@ dotnet run --project src/VideoBuilder.App
 | `--demo` | サンプルのプロジェクトを読み込んで起動する |
 | `--docked` / `--separate` | ウィンドウを 1 つにまとめる / AviUtl のように分ける |
 | `--theme light\|dark\|system` | テーマを指定する |
+| `--gpu` / `--cpu` | 描画方式を指定する (既定は自動) |
 | `--screenshot <png>` | ウィンドウを画像に保存して終了する (見た目の確認用) |
 
 ## テスト

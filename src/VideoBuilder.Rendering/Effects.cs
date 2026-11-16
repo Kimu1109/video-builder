@@ -17,6 +17,7 @@ public static class Effects
     public static void Register(IVideoEffect effect) => Map[effect.Id] = effect;
     public static IVideoEffect? Find(string id) => Map.TryGetValue(id, out var e) ? e : null;
 
+
     internal static SKImageInfo Info(int w, int h) => new(Math.Max(1, w), Math.Max(1, h), SKColorType.Bgra8888, SKAlphaType.Premul);
 
     /// <summary>余白を足した新しい画像に描き直す。draw には元画像を置く位置 (左上) が渡される。</summary>
@@ -24,7 +25,7 @@ public static class Effects
     {
         // 極端なサイズでメモリを使い切らないようにする
         int w = Math.Min(s.Width + padL + padR, 16384), h = Math.Min(s.Height + padT + padB, 16384);
-        using var surface = SKSurface.Create(Info(w, h));
+        using var surface = a.Context.CreateSurface(w, h);
         if (surface == null) return s;
         surface.Canvas.Clear(SKColors.Transparent);
         draw(surface.Canvas, padL, padT);
@@ -192,7 +193,8 @@ public static class Effects
             int size = Math.Max(1, (int)a.Track("size"));
             if (size <= 1) return s;
             int sw = Math.Max(1, (int)MathF.Ceiling(s.Width / (float)size)), sh = Math.Max(1, (int)MathF.Ceiling(s.Height / (float)size));
-            using var small = SKSurface.Create(Info(sw, sh));
+            using var small = a.Context.CreateSurface(sw, sh);
+            if (small == null) return s;
             small.Canvas.Clear(SKColors.Transparent);
             using (var p = new SKPaint { FilterQuality = SKFilterQuality.Medium })
                 small.Canvas.DrawImage(s.Image, SKRect.Create(s.Width, s.Height), SKRect.Create(sw * size / (float)size, sh), p);
@@ -206,6 +208,8 @@ public static class Effects
     private sealed class ChromaKey : IVideoEffect
     {
         public string Id => "filter.chromakey";
+        // SkSL シェーダ (SKRuntimeEffect) での実装は、SkiaSharp 2.88 では描画時にネイティブ側で
+        // クラッシュするため使わない。GPU 描画中でも、この効果だけは画像を読み戻して CPU で処理する。
         public unsafe Sprite Apply(Sprite s, EffectArgs a)
         {
             var key = a.Color("color");

@@ -13,8 +13,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - name: Install FFmpeg, OpenAL and a Japanese font
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg libopenal1 fonts-ipafont-gothic
+      - name: Install FFmpeg, OpenAL, software OpenGL ES and a Japanese font
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libopenal1 fonts-ipafont-gothic libegl1 libgles2 libgl1-mesa-dri
       - name: Build
         run: dotnet build -warnaserror:CS8600,CS8602,CS8604
       - name: Test

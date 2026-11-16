@@ -12,6 +12,11 @@ public sealed class RenderEngine : IDisposable
     private const int MaxSceneDepth = 4;
 
     public MediaCache Media { get; } = new();
+    /// <summary>GPU 描画に使うコンテキスト。null なら CPU 描画。</summary>
+    public GpuContext? Gpu { get; }
+    private SKSurface? _gpuSurface;
+
+    public RenderEngine(GpuContext? gpu = null) => Gpu = gpu;
 
     // テキスト・図形は、パラメータが同じ間は作り直さない
     private readonly Dictionary<string, SKImage?> _generated = new();
@@ -29,7 +34,7 @@ public sealed class RenderEngine : IDisposable
     /// <summary>surface いっぱいにフレームを描く。surface の大きさがプロジェクトより小さければ縮小して描く。</summary>
     public void Render(Project project, Scene scene, int frame, SKSurface surface)
     {
-        var ctx = new RenderContext { Project = project, Frame = frame };
+        var ctx = new RenderContext { Project = project, Frame = frame, Gpu = _gpuSurface != null && ReferenceEquals(surface, _gpuSurface) ? Gpu?.Context : null };
         try
         {
             var canvas = surface.Canvas;
@@ -47,15 +52,42 @@ public sealed class RenderEngine : IDisposable
     /// <summary>プロジェクトの解像度でフレームを作って返す。</summary>
     public SKImage RenderImage(Project project, Scene scene, int frame)
     {
-        using var surface = SKSurface.Create(Effects.Info(project.Settings.Width, project.Settings.Height));
-        Render(project, scene, frame, surface);
-        return surface.Snapshot();
+        using var bitmap = new SKBitmap(Effects.Info(project.Settings.Width, project.Settings.Height));
+        RenderToBitmap(project, scene, frame, bitmap);
+        return SKImage.FromBitmap(bitmap);   // ビットマップが変更可能なので、ここで内容が複製される
     }
+
+    /// <summary>
+    /// dest の大きさでフレームを描いて、ピクセルを dest に入れる。
+    /// GPU が使えるときは GPU で描いてから読み戻し、使えないときは CPU で直接描く。
+    /// </summary>
+    public void RenderToBitmap(Project project, Scene scene, int frame, SKBitmap dest)
+    {
+        if (Gpu != null)
+        {
+            Gpu.MakeCurrent();
+            if (_gpuSurface == null || _gpuSize != (dest.Width, dest.Height))
+            {
+                _gpuSurface?.Dispose();
+                _gpuSurface = SKSurface.Create(Gpu.Context, false, new SKImageInfo(dest.Width, dest.Height, SKColorType.Rgba8888, SKAlphaType.Premul));
+                _gpuSize = (dest.Width, dest.Height);
+            }
+            if (_gpuSurface != null)
+            {
+                Render(project, scene, frame, _gpuSurface);
+                if (_gpuSurface.ReadPixels(dest.Info, dest.GetPixels(), dest.RowBytes, 0, 0)) return;
+            }
+        }
+        using var surface = SKSurface.Create(dest.Info, dest.GetPixels(), dest.RowBytes);
+        Render(project, scene, frame, surface);
+    }
+
+    private (int, int) _gpuSize;
 
     private void RenderScene(RenderContext root, Scene scene, int frame, SKSurface surface, int depth)
     {
         var project = root.Project;
-        var ctx = depth == 0 ? root : new RenderContext { Project = project, Frame = frame };
+        var ctx = depth == 0 ? root : new RenderContext { Project = project, Frame = frame, Gpu = root.Gpu };
         var canvas = surface.Canvas;
         int W = project.Settings.Width, H = project.Settings.Height;
         var groups = new List<GroupState>();
@@ -244,7 +276,8 @@ public sealed class RenderEngine : IDisposable
                 var scene = p.FindScene(main.GetString("scene"));
                 if (scene == null) return null;
                 int inner = frame - obj.Start + obj.SourceOffsetFrames + p.SecondsToFrames(main.Eval("position", bounds, frame));
-                using var surface = SKSurface.Create(Effects.Info(p.Settings.Width, p.Settings.Height));
+                using var surface = ctx.CreateSurface(p.Settings.Width, p.Settings.Height);
+                if (surface == null) return null;
                 surface.Canvas.Clear(SKColors.Transparent);
                 RenderScene(ctx, scene, inner, surface, depth + 1);
                 return ctx.Own(surface.Snapshot());
@@ -284,6 +317,9 @@ public sealed class RenderEngine : IDisposable
 
     public void Dispose()
     {
+        Gpu?.MakeCurrent();
+        _gpuSurface?.Dispose();
+        _gpuSurface = null;
         foreach (var img in _generated.Values) img?.Dispose();
         _generated.Clear();
         Media.Dispose();
