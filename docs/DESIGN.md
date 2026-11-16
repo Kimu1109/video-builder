@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 文書バージョン | 0.2 |
+| 文書バージョン | 0.3 |
 | 作成日 | 2026-11-16 |
 | 対象 | video-builder 初期実装 〜 v1.0 |
 
@@ -31,6 +31,7 @@
 19. [ソリューション構成](#19-ソリューション構成)
 20. [開発ロードマップ](#20-開発ロードマップ)
 21. [決定事項](#21-決定事項)
+22. [実装状況](#22-実装状況)
 
 ---
 
@@ -103,11 +104,11 @@ AviUtl ユーザーが迷わず使えることを目指しつつ、操作を Lin
 |---|---|---|
 | 言語 / ランタイム | C# 13 / .NET 9 (LTS 公開後は .NET 10 へ移行) | 指定どおり。Native AOT も検討できる |
 | UI | Avalonia UI 11.x | クロスプラットフォームの XAML UI。Linux で安定して動く |
-| MVVM | CommunityToolkit.Mvvm | Source Generator によりボイラープレートが少ない |
+| MVVM | CommunityToolkit.Mvvm (画面が増えた時点で導入。[22.2](#222-設計書との差分)) | Source Generator によりボイラープレートが少ない |
 | DI | Microsoft.Extensions.DependencyInjection | 標準的で軽量 |
 | 2D 描画 | SkiaSharp (Avalonia が内部で使うものと共通) | GPU (OpenGL / Vulkan) 対応。テキスト描画も強い |
 | GPU エフェクト | SkiaSharp `SKRuntimeEffect` (SkSL シェーダ) | 追加依存なしでフィルタを GPU 実行できる |
-| 動画デコード / エンコード | FFmpeg 7.x + `FFmpeg.AutoGen` | 対応コーデックが最も多い。ハードウェアデコードも使える |
+| 動画デコード / エンコード | FFmpeg + `FFmpeg.AutoGen` (現在は 6.1。[22.2](#222-設計書との差分)) | 対応コーデックが最も多い。ハードウェアデコードも使える |
 | 音声出力 | Silk.NET.OpenAL (OpenAL Soft) | Linux (PulseAudio / PipeWire / ALSA) を一通りカバーできる |
 | アイコン | Material Symbols **Sharp** (SVG → `StreamGeometry`) | 角ばったデザインに合う。Apache 2.0 |
 | シリアライズ | System.Text.Json (Source Generator) | AOT 対応・高速 |
@@ -124,7 +125,7 @@ AviUtl ユーザーが迷わず使えることを目指しつつ、操作を Lin
 ┌──────────────────────────────────────────────────────────┐
 │ VideoBuilder.App  (Avalonia: View / ViewModel / Controls)│
 ├──────────────────────────────────────────────────────────┤
-│ VideoBuilder.Application  (UseCase / Command / Undo)     │
+│ VideoBuilder.Editing  (編集セッション / Command / Undo)   │
 ├───────────────────────────┬──────────────────────────────┤
 │ VideoBuilder.Core         │ VideoBuilder.Rendering       │
 │ (ドメインモデル・補間・時間) │ (合成パイプライン・エフェクト)   │
@@ -980,32 +981,29 @@ XDG Base Directory に従う (Windows / macOS では各 OS の標準パス)。
 ```
 video-builder/
 ├─ VideoBuilder.sln
-├─ Directory.Build.props          # 共通設定 (Nullable, LangVersion, TreatWarningsAsErrors)
+├─ Directory.Build.props          # 共通設定 (Nullable, LangVersion, unsafe)
 ├─ Directory.Packages.props       # 中央パッケージ管理
 ├─ src/
-│  ├─ VideoBuilder.App/           # Avalonia エントリポイント
-│  │  ├─ Views/                   # MainWindow, TimelineWindow, ObjectSettingsWindow, ExportDialog
-│  │  ├─ ViewModels/
-│  │  ├─ Controls/                # TimelineCanvas, TrackBar, LayerHeader, IconButton, PreviewSurface
-│  │  ├─ Themes/                  # Base.axaml, Dark.axaml, Light.axaml, Icons.axaml
-│  │  └─ Assets/                  # フォント, アプリアイコン
-│  ├─ VideoBuilder.Application/   # コマンド, Undo, ユースケース, ショートカット
-│  ├─ VideoBuilder.Core/          # Project, Scene, Layer, TimelineObject, AnimatedValue, Interpolators
-│  ├─ VideoBuilder.Rendering/     # RenderEngine, Effects, TextRenderer, Cache
-│  ├─ VideoBuilder.Media/         # MediaReader, MediaWriter, AudioOutput, ProxyGenerator
-│  └─ VideoBuilder.Plugin.Abstractions/
+│  ├─ VideoBuilder.App/           # Avalonia エントリポイント (実行ファイル名: video-builder)
+│  │  ├─ Views/                   # MainWindow, TimelineView, ObjectSettingsView, 各ダイアログ
+│  │  ├─ Controls/                # TimelineCanvas, PreviewView, Icon, IconButton, NumberBox, MiniSlider
+│  │  ├─ Services/                # PreviewService, ThemeService, AppSettings, MediaImport
+│  │  └─ Themes/                  # Tokens.axaml (色), Base.axaml (スタイル), Icons.axaml (生成)
+│  ├─ VideoBuilder.Editing/       # EditorSession, UndoStack, IEditCommand
+│  ├─ VideoBuilder.Core/          # Project, Scene, TimelineObject, Effect, AnimatedValue, EffectRegistry
+│  ├─ VideoBuilder.Rendering/     # RenderEngine, Effects, Generators (テキスト・図形), AudioMixer, Exporter
+│  └─ VideoBuilder.Media/         # VideoReader, AudioReader, MediaWriter, AudioOutput
 ├─ tests/
-│  ├─ VideoBuilder.Core.Tests/
-│  ├─ VideoBuilder.Rendering.Tests/
-│  └─ VideoBuilder.App.Tests/
+│  ├─ VideoBuilder.Tests/         # Core / Editing / Media / Rendering の単体テスト
+│  └─ VideoBuilder.App.Tests/     # Avalonia.Headless による UI テスト
 ├─ tools/
 │  └─ IconGen/                    # Material Symbols SVG → Icons.axaml 変換
-├─ packaging/
-│  ├─ appimage/
-│  └─ flatpak/
 └─ docs/
    └─ DESIGN.md                   # 本書
 ```
+
+`VideoBuilder.Application` という名前は Avalonia の `Application` クラスと衝突するため、プロジェクト名を `VideoBuilder.Editing` にした。
+`VideoBuilder.Plugin.Abstractions` と `packaging/` は、それぞれプラグイン API・配布の実装時に追加する。
 
 ---
 
@@ -1038,6 +1036,48 @@ video-builder/
 | 5 | 色空間 | **v1.0 は sRGB 8bit** | 内部設計は 16bit float (リニア) に拡張できる形にする |
 | 6 | アプリ名 | **video-builder** | リポジトリ名と同じ。C# の名前空間は `VideoBuilder` |
 | 7 | テーマ | **ライト / ダーク切替。既定はシステムに従う** | アクセントカラーもシステムに従う ([7.3](#73-テーマ切替とシステムカラー)) |
+
+## 22. 実装状況
+
+2026-11-16 時点。ロードマップ ([20 章](#20-開発ロードマップ)) の M0〜M6 と、M7 の一部を実装した。
+
+### 22.1 実装済み
+
+| 区分 | 内容 |
+|---|---|
+| 基盤 (M0) | 角型テーマ、ライト / ダーク切替、システムのテーマ・アクセントカラー追従、Material Symbols Sharp のアイコン生成、分離 / ドッキングのウィンドウ切替 |
+| タイムライン (M1) | レイヤー 100 層、オブジェクトの追加・移動・長さ変更・分割・コピー / 貼り付け・削除、複数選択、範囲選択、スナップ、レイヤーの表示 / ロック、ズーム、ファイルの D&D、Undo / Redo |
+| プレビュー (M2) | 別スレッドでの合成、プレビュー上の選択枠とドラッグ移動、プレビュー品質 (フル・1/2・1/4) |
+| メディア (M3) | 動画・画像・音声の読み込み、音声付き再生 (音声を時計にした同期)、動画と音声の連結 |
+| アニメーション (M4) | 中間点、移動方法 9 種 (移動無し・直線・曲線・加減速・瞬間・中間点無視・移動量指定・ランダム・反復)、加速 / 減速、トラックバー (左右の値・スライダー・数式入力) |
+| エフェクト (M5) | 色調補正・ぼかし・縁取り・シャドー・クリッピング・モザイク・クロマキー・単色化・反転・フェード、フィルタオブジェクト、合成モード 13 種 |
+| 出力 (M6) | H.264 / H.265 / VP9 / AV1 / ProRes / 連番 PNG / WAV / FLAC (その環境の FFmpeg にあるエンコーダだけを表示) |
+| M7 の一部 | シーンとシーンオブジェクト、グループ制御、自動保存 (10 世代) と復元 |
+
+### 22.2 設計書との差分
+
+| 項目 | 設計 | 現在の実装 | 理由 |
+|---|---|---|---|
+| FFmpeg のバージョン | 7.x | **6.1** (`FFmpeg.AutoGen 6.1.0.1`) | Ubuntu 24.04 LTS 標準の FFmpeg が 6.1 のため。`FFmpeg.AutoGen` はライブラリのメジャーバージョンと一致している必要がある。7.x への移行は同梱方針とあわせて決める |
+| 描画バックエンド | Skia GL | **CPU ラスタ** (SkiaSharp) | まず動くものを優先した。1080p のサンプルで 1 フレーム最大 43ms (4 コア VM で計測) |
+| クロマキー | SkSL シェーダ | C# のピクセル処理 | CPU ラスタで確実に動かすため。GPU 化のときに SkSL へ移す |
+| MVVM / DI / ログ | CommunityToolkit.Mvvm / MS.DI / Serilog | 未使用 (コードビハインド + 静的な `Svc`) | 画面数が少ない間は依存を増やさない。画面が増えたら導入する |
+| フォント同梱 | Noto Sans JP などを同梱 | システムのフォントを使用 (Inter のみ同梱) | リポジトリに数 MB のバイナリを入れるかどうかの判断が必要 |
+| メディアプール | 素材を ID で参照 | オブジェクトがファイルパスを直接持つ | 単純化。素材の再リンク機能を作るときに導入する |
+| 再生位置の単位 | (未定義) | 秒 | AviUtl はフレームだが、フレームレートを変えても意味が変わらない秒にした |
+
+### 22.3 未実装
+
+カメラ制御 (3D)、エイリアス、Lua スクリプト、プラグイン API、ハードウェアデコード、プロキシ生成、音声波形・動画サムネイルのタイムライン表示、
+BPM グリッド、出力範囲の指定、ショートカットのカスタマイズ、国際化 (英語)、素材の再リンクと「素材を収集して保存」、`.exo` インポート、
+AppImage / Flatpak のパッケージング、Windows / macOS での動作確認。
+
+### 22.4 確認できていないこと
+
+- **音声の再生**: 開発環境に音声デバイスがないため、OpenAL での実際の出力は確認していない (デバイスがない場合に無音で再生が進むことは確認済み)。
+- **実機での操作感**: 画面は仮想ディスプレイ上のスクリーンショットと UI 自動テストで確認した。Wayland・タイル型 WM・IME での動作は未確認。
+
+---
 
 ---
 

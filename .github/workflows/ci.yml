@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - name: Install FFmpeg, OpenAL and a Japanese font
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libopenal1 fonts-ipafont-gothic
+      - name: Build
+        run: dotnet build -warnaserror:CS8600,CS8602,CS8604
+      - name: Test
+        run: dotnet test --no-build
+        env:
+          VB_REQUIRE_FFMPEG: "1"

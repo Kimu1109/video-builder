@@ -288,4 +288,41 @@ public class UiTests
         Assert.Empty(w.ToolWindows);
         Assert.Contains(w.Timeline, w.GetVisualDescendants());
     }
+
+    [AvaloniaFact]
+    public async Task Playback_advances_the_current_frame_and_stops_at_the_end()
+    {
+        Open();
+        var s = Svc.Session;
+        s.AddObject(EffectRegistry.Shape, 0, 0, 12);    // 30fps で 0.4 秒
+        Svc.Preview.Play();
+        Assert.True(Svc.Preview.IsPlaying);
+        int seen = 0;
+        for (int i = 0; i < 150 && Svc.Preview.IsPlaying; i++)
+        {
+            await Task.Delay(10);
+            Pump();
+            seen = Math.Max(seen, s.CurrentFrame);
+        }
+        Assert.False(Svc.Preview.IsPlaying);     // 末尾で自動的に止まる
+        Assert.Equal(11, s.CurrentFrame);
+        Assert.True(seen >= 5);
+    }
+
+    [AvaloniaFact]
+    public async Task Demo_project_renders_fast_enough_to_report()
+    {
+        Open();
+        DemoProject.Load(Svc.Session);
+        double worst = 0;
+        for (int f = 0; f < 240; f += 20)
+        {
+            Svc.Session.CurrentFrame = f;
+            await Task.Delay(120);
+            Pump();
+            worst = Math.Max(worst, Svc.Preview.LastRenderMs);
+        }
+        Console.WriteLine($"BENCH demo 1080p worst frame: {worst:0.0} ms");
+        Assert.True(worst > 0);
+    }
 }

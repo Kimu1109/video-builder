@@ -129,3 +129,21 @@ public class MediaTests : IDisposable
         }
     }
 }
+
+public class AudioOutputTests
+{
+    [Fact]
+    public void Audio_output_never_throws_even_without_a_device()
+    {
+        using var output = new AudioOutput(48000);
+        Console.WriteLine($"BENCH audio available={output.IsAvailable} error={output.Error}");
+        if (!output.IsAvailable) { output.Start(0, (_, b) => Array.Clear(b)); output.Stop(); return; }
+        int calls = 0;
+        output.Start(1000, (_, b) => { calls++; Array.Clear(b); });
+        Thread.Sleep(200);
+        long pos = output.Position;
+        output.Stop();
+        Assert.True(calls > 0);
+        Assert.True(pos >= 1000);
+    }
+}
