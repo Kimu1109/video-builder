@@ -128,6 +128,12 @@ public sealed class MainWindow : Window
         if (_settingsWindow != null) _settingsWindow.Content = null;
         _center.Children.Clear();
         _center.RowDefinitions.Clear(); _center.ColumnDefinitions.Clear();
+        foreach (var c in new Control[] { _previewArea, _settingsHost, _timelineHost })
+            (c.Parent as Panel)?.Children.Remove(c);
+        // 別のウィンドウへ移す前に、元のウィンドウで予約済みのレイアウト処理を済ませておく
+        // (移動後に古い側のレイアウトが走ると Avalonia が例外を出す)
+        UpdateLayout();
+        _timelineWindow?.UpdateLayout(); _settingsWindow?.UpdateLayout();
 
         if (docked)
         {

@@ -6,7 +6,8 @@
     <PackageVersion Include="Avalonia.Fonts.Inter" Version="11.3.23" />
     <PackageVersion Include="Avalonia.Diagnostics" Version="11.3.23" />
     <PackageVersion Include="Avalonia.Controls.ColorPicker" Version="11.3.23" />
-    <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageVersion Include="Avalonia.Headless.XUnit" Version="11.3.23" />
+    <PackageVersion Include="Avalonia.Skia" Version="11.3.23" />
     <PackageVersion Include="SkiaSharp" Version="2.88.9" />
     <PackageVersion Include="SkiaSharp.NativeAssets.Linux" Version="2.88.9" />
     <PackageVersion Include="FFmpeg.AutoGen" Version="6.1.0.1" />

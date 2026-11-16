@@ -32,7 +32,13 @@ public sealed class NumberBox : TextBox
     public double Value
     {
         get => _value;
-        set { _value = value; if (!_editing) Text = Format(value); }
+        set
+        {
+            // 入力途中の文字は消さない。表示が前の値のままなら (= まだ何も打っていなければ) 新しい値に更新する
+            bool untouched = !_editing || Text == Format(_value);
+            _value = value;
+            if (untouched) Text = Format(value);
+        }
     }
 
     private string Format(double v) => v.ToString("F" + Decimals, CultureInfo.InvariantCulture);
