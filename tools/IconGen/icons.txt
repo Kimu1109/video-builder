@@ -1,0 +1,76 @@
+# Material Symbols (Sharp, weight 400) の名前 → リソースキー (Icon.<Key>)
+# 末尾に "fill" と書くと塗りつぶし版 (Icon.<Key>.Fill) も出力する
+note_add NoteAdd
+folder_open FolderOpen
+save Save
+save_as SaveAs
+undo Undo
+redo Redo
+content_cut Cut
+content_copy Copy
+content_paste Paste
+delete Delete
+play_arrow Play fill
+pause Pause fill
+stop Stop fill
+first_page FirstPage
+last_page LastPage
+chevron_left ChevronLeft
+chevron_right ChevronRight
+splitscreen_vertical_add Split
+add_diamond AddDiamond
+straighten Snap
+grid_on GridOn
+visibility Visibility
+visibility_off VisibilityOff
+lock Lock fill
+lock_open LockOpen
+link Link
+output Output
+settings Settings
+add_box AddBox
+add Add
+remove Remove
+movie Movie
+image Image
+music_note MusicNote
+title Title
+category Category
+filter_alt Filter
+movie_edit MovieEdit
+select_all SelectAll
+videocam Videocam
+transform Transform
+tune Tune
+blur_on BlurOn
+border_style BorderStyle
+layers Layers
+crop Crop
+colorize Colorize
+invert_colors InvertColors
+flip Flip
+gradient Gradient
+volume_up VolumeUp
+close Close
+check Check
+keyboard_arrow_down ArrowDown
+keyboard_arrow_up ArrowUp
+keyboard_arrow_right ArrowRight
+arrow_left StepLeft
+arrow_right StepRight
+more_horiz More
+dock_to_bottom Dock
+open_in_new OpenInNew
+light_mode LightMode
+dark_mode DarkMode
+routine ThemeAuto
+zoom_in ZoomIn
+zoom_out ZoomOut
+fit_screen FitScreen
+info Info
+palette Palette
+restart_alt Reset
+logout Exit
+history History
+toggle_on ToggleOn
+toggle_off ToggleOff

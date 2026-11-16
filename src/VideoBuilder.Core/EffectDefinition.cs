@@ -26,7 +26,13 @@ public sealed class ParamDefinition
     /// <summary>ファイル選択ダイアログ用の拡張子。</summary>
     public string[] FileExtensions { get; init; } = Array.Empty<string>();
 
+    /// <summary>スライダーで動かせる範囲。Min / Max が広すぎるパラメータ用 (数値入力では Min / Max まで入る)。</summary>
+    public double? SoftMin { get; init; }
+    public double? SoftMax { get; init; }
+
     public double Step => Math.Pow(10, -Decimals);
+    public double SliderMin => SoftMin ?? Min;
+    public double SliderMax => SoftMax ?? Max;
 }
 
 public sealed class EffectDefinition

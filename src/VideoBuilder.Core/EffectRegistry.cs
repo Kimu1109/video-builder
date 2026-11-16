@@ -29,8 +29,8 @@ public static class EffectRegistry
 
     static EffectRegistry()
     {
-        static ParamDefinition T(string key, string name, double min, double max, double def, int dec = 1) =>
-            new() { Key = key, Name = name, Min = min, Max = max, Default = def, Decimals = dec };
+        static ParamDefinition T(string key, string name, double min, double max, double def, int dec = 1, double? softMin = null, double? softMax = null) =>
+            new() { Key = key, Name = name, Min = min, Max = max, Default = def, Decimals = dec, SoftMin = softMin, SoftMax = softMax };
         static ParamDefinition C(string key, string name, bool def = false) =>
             new() { Key = key, Name = name, Kind = ParamKind.Check, Default = def ? 1 : 0 };
         static ParamDefinition Col(string key, string name, string def) =>
@@ -42,8 +42,8 @@ public static class EffectRegistry
             Id = Video, Name = "動画ファイル", Category = EffectCategory.VideoSource, Icon = "Icon.Movie", Color = "#3A6EA5",
             Params = new[]
             {
-                T("position", "再生位置", 0, 36000, 0, 2),
-                T("speed", "再生速度", 0, 2000, 100, 1),
+                T("position", "再生位置", 0, 36000, 0, 2, 0, 600),
+                T("speed", "再生速度", 0, 2000, 100, 1, 0, 400),
                 C("loop", "ループ再生"),
                 new ParamDefinition { Key = "file", Name = "参照ファイル", Kind = ParamKind.File, FileExtensions = VideoExtensions },
             },
@@ -58,7 +58,7 @@ public static class EffectRegistry
             Id = Audio, Name = "音声ファイル", Category = EffectCategory.AudioSource, Icon = "Icon.MusicNote", Color = "#A5503A",
             Params = new[]
             {
-                T("position", "再生位置", 0, 36000, 0, 2),
+                T("position", "再生位置", 0, 36000, 0, 2, 0, 600),
                 T("speed", "再生速度", 10, 800, 100, 1),
                 C("loop", "ループ再生"),
                 new ParamDefinition { Key = "file", Name = "参照ファイル", Kind = ParamKind.File, FileExtensions = AudioExtensions.Concat(VideoExtensions).ToArray() },
@@ -69,7 +69,7 @@ public static class EffectRegistry
             Id = Text, Name = "テキスト", Category = EffectCategory.VideoSource, Icon = "Icon.Title", Color = "#6E5AA5",
             Params = new[]
             {
-                T("size", "サイズ", 1, 1000, 64, 0),
+                T("size", "サイズ", 1, 1000, 64, 0, 1, 256),
                 T("spacing", "字間", -100, 500, 0, 0),
                 T("leading", "行間", -100, 500, 0, 0),
                 new ParamDefinition { Key = "font", Name = "フォント", Kind = ParamKind.Font, DefaultText = "" },
@@ -84,9 +84,9 @@ public static class EffectRegistry
             Id = Shape, Name = "図形", Category = EffectCategory.VideoSource, Icon = "Icon.Category", Color = "#5A7F3A",
             Params = new[]
             {
-                T("size", "サイズ", 0, 4000, 200, 0),
+                T("size", "サイズ", 0, 4000, 200, 0, 0, 1000),
                 T("aspect", "縦横比", -100, 100, 0, 1),
-                T("line", "ライン幅", 0, 4000, 4000, 0),
+                T("line", "ライン幅", 0, 4000, 4000, 0, 0, 500),
                 new ParamDefinition { Key = "type", Name = "図形の種類", Kind = ParamKind.Choice, Choices = ShapeTypes, Default = 2 },
                 Col("color", "色", "#FFFFFF"),
             },
@@ -96,7 +96,7 @@ public static class EffectRegistry
             Id = SceneRef, Name = "シーン", Category = EffectCategory.VideoSource, Icon = "Icon.MovieEdit", Color = "#A58A3A",
             Params = new[]
             {
-                T("position", "再生位置", 0, 36000, 0, 2),
+                T("position", "再生位置", 0, 36000, 0, 2, 0, 600),
                 new ParamDefinition { Key = "scene", Name = "シーン", Kind = ParamKind.Text, DefaultText = "" },
             },
         });
@@ -105,8 +105,8 @@ public static class EffectRegistry
             Id = GroupControl, Name = "グループ制御", Category = EffectCategory.Control, Icon = "Icon.SelectAll", Color = "#4F6070",
             Params = new[]
             {
-                T("x", "X", -99999.9, 99999.9, 0), T("y", "Y", -99999.9, 99999.9, 0),
-                T("scale", "拡大率", 0, 5000, 100, 2), T("rotation", "回転", -3600, 3600, 0, 2),
+                T("x", "X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "Y", -99999.9, 99999.9, 0, 1, -2000, 2000),
+                T("scale", "拡大率", 0, 5000, 100, 2, 0, 800), T("rotation", "回転", -3600, 3600, 0, 2, -360, 360),
                 T("alpha", "透明度", 0, 100, 0),
                 T("layers", "対象レイヤー数", 0, 100, 0, 0),
             },
@@ -118,8 +118,8 @@ public static class EffectRegistry
             Id = StandardDraw, Name = "標準描画", Category = EffectCategory.Draw, Icon = "Icon.Transform",
             Params = new[]
             {
-                T("x", "X", -99999.9, 99999.9, 0), T("y", "Y", -99999.9, 99999.9, 0), T("z", "Z", -99999.9, 99999.9, 0),
-                T("scale", "拡大率", 0, 5000, 100, 2), T("alpha", "透明度", 0, 100, 0), T("rotation", "回転", -3600, 3600, 0, 2),
+                T("x", "X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "Y", -99999.9, 99999.9, 0, 1, -2000, 2000), T("z", "Z", -99999.9, 99999.9, 0, 1, -2000, 2000),
+                T("scale", "拡大率", 0, 5000, 100, 2, 0, 800), T("alpha", "透明度", 0, 100, 0), T("rotation", "回転", -3600, 3600, 0, 2, -360, 360),
                 new ParamDefinition { Key = "blend", Name = "合成モード", Kind = ParamKind.Choice, Choices = BlendModes },
             },
         });
@@ -136,12 +136,12 @@ public static class EffectRegistry
         F("filter.color", "色調補正", "Icon.Tune",
             T("brightness", "明るさ", 0, 200, 100), T("contrast", "コントラスト", 0, 200, 100),
             T("hue", "色相", -360, 360, 0), T("luminance", "輝度", 0, 200, 100), T("saturation", "彩度", 0, 200, 100));
-        F("filter.blur", "ぼかし", "Icon.BlurOn", T("radius", "範囲", 0, 1000, 5, 0), C("fixed", "サイズ固定"));
+        F("filter.blur", "ぼかし", "Icon.BlurOn", T("radius", "範囲", 0, 1000, 5, 0, 0, 200), C("fixed", "サイズ固定"));
         F("filter.border", "縁取り", "Icon.BorderStyle", T("size", "サイズ", 0, 500, 3, 0), T("blur", "ぼかし", 0, 100, 0, 0), Col("color", "縁色", "#000000"));
         F("filter.shadow", "シャドー", "Icon.Layers",
             T("x", "X", -200, 200, 8, 0), T("y", "Y", -200, 200, 8, 0), T("density", "濃さ", 0, 100, 60), T("spread", "拡散", 0, 50, 10, 0), Col("color", "影色", "#000000"));
-        F("filter.clip", "クリッピング", "Icon.Crop", T("top", "上", 0, 4000, 0, 0), T("bottom", "下", 0, 4000, 0, 0), T("left", "左", 0, 4000, 0, 0), T("right", "右", 0, 4000, 0, 0));
-        F("filter.mosaic", "モザイク", "Icon.GridOn", T("size", "サイズ", 1, 1000, 12, 0));
+        F("filter.clip", "クリッピング", "Icon.Crop", T("top", "上", 0, 4000, 0, 0, 0, 1000), T("bottom", "下", 0, 4000, 0, 0, 0, 1000), T("left", "左", 0, 4000, 0, 0, 0, 1000), T("right", "右", 0, 4000, 0, 0, 0, 1000));
+        F("filter.mosaic", "モザイク", "Icon.GridOn", T("size", "サイズ", 1, 1000, 12, 0, 1, 200));
         F("filter.chromakey", "クロマキー", "Icon.Colorize", T("hue", "色相範囲", 0, 256, 24, 0), T("saturation", "彩度範囲", 0, 256, 96, 0), T("edge", "境界補正", 0, 100, 10, 0), Col("color", "キー色", "#00FF00"));
         F("filter.mono", "単色化", "Icon.InvertColors", T("strength", "強さ", 0, 100, 100), Col("color", "色", "#FFFFFF"), C("keep", "輝度を保持する", true));
         F("filter.flip", "反転", "Icon.Flip", C("vertical", "上下反転"), C("horizontal", "左右反転"), C("luma", "輝度反転"));

@@ -1,0 +1,58 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- 設計書 7.2 / 7.2.1 のカラートークン。色は必ず DynamicResource で参照する。
+       Accent / Accent.Hover / Fg.OnAccent は ThemeService が実行時に上書きする。 -->
+  <ResourceDictionary.ThemeDictionaries>
+    <ResourceDictionary x:Key="Dark">
+      <SolidColorBrush x:Key="Bg.Base" Color="#1E1E1E" />
+      <SolidColorBrush x:Key="Bg.Panel" Color="#252526" />
+      <SolidColorBrush x:Key="Bg.Elevated" Color="#2D2D30" />
+      <SolidColorBrush x:Key="Bg.Input" Color="#1A1A1A" />
+      <SolidColorBrush x:Key="Bg.Hover" Color="#3A3A3D" />
+      <SolidColorBrush x:Key="Bg.Pressed" Color="#45454A" />
+      <SolidColorBrush x:Key="Border.Default" Color="#3F3F46" />
+      <SolidColorBrush x:Key="Border.Strong" Color="#5A5A60" />
+      <SolidColorBrush x:Key="Fg.Primary" Color="#E6E6E6" />
+      <SolidColorBrush x:Key="Fg.Secondary" Color="#A0A0A0" />
+      <SolidColorBrush x:Key="Fg.Disabled" Color="#606060" />
+      <SolidColorBrush x:Key="Accent" Color="#2F80ED" />
+      <SolidColorBrush x:Key="Accent.Hover" Color="#4A93F0" />
+      <SolidColorBrush x:Key="Fg.OnAccent" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="Playhead" Color="#E53935" />
+      <SolidColorBrush x:Key="Warning" Color="#F2A900" />
+      <SolidColorBrush x:Key="Error" Color="#D9433A" />
+      <SolidColorBrush x:Key="Timeline.RowAlt" Color="#222223" />
+      <SolidColorBrush x:Key="Timeline.RowHidden" Color="#151515" />
+      <SolidColorBrush x:Key="Timeline.ObjectBorder" Color="#99000000" />
+    </ResourceDictionary>
+    <ResourceDictionary x:Key="Light">
+      <SolidColorBrush x:Key="Bg.Base" Color="#F3F3F3" />
+      <SolidColorBrush x:Key="Bg.Panel" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="Bg.Elevated" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="Bg.Input" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="Bg.Hover" Color="#E5E5E5" />
+      <SolidColorBrush x:Key="Bg.Pressed" Color="#D6D6D6" />
+      <SolidColorBrush x:Key="Border.Default" Color="#C8C8C8" />
+      <SolidColorBrush x:Key="Border.Strong" Color="#A0A0A0" />
+      <SolidColorBrush x:Key="Fg.Primary" Color="#1E1E1E" />
+      <SolidColorBrush x:Key="Fg.Secondary" Color="#5F5F5F" />
+      <SolidColorBrush x:Key="Fg.Disabled" Color="#A8A8A8" />
+      <SolidColorBrush x:Key="Accent" Color="#1F6FD9" />
+      <SolidColorBrush x:Key="Accent.Hover" Color="#1A5FBA" />
+      <SolidColorBrush x:Key="Fg.OnAccent" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="Playhead" Color="#D32F2F" />
+      <SolidColorBrush x:Key="Warning" Color="#B37A00" />
+      <SolidColorBrush x:Key="Error" Color="#C62828" />
+      <SolidColorBrush x:Key="Timeline.RowAlt" Color="#ECECEC" />
+      <SolidColorBrush x:Key="Timeline.RowHidden" Color="#DCDCDC" />
+      <SolidColorBrush x:Key="Timeline.ObjectBorder" Color="#40000000" />
+    </ResourceDictionary>
+  </ResourceDictionary.ThemeDictionaries>
+
+  <!-- 角丸なし -->
+  <CornerRadius x:Key="ControlCornerRadius">0</CornerRadius>
+  <CornerRadius x:Key="OverlayCornerRadius">0</CornerRadius>
+  <x:Double x:Key="ControlContentThemeFontSize">12</x:Double>
+  <FontFamily x:Key="UiFont">Inter, Noto Sans CJK JP, Noto Sans JP, IPAGothic, Yu Gothic UI, Hiragino Sans, sans-serif</FontFamily>
+  <FontFamily x:Key="MonoFont">JetBrains Mono, Noto Sans Mono, DejaVu Sans Mono, Consolas, Menlo, monospace</FontFamily>
+</ResourceDictionary>

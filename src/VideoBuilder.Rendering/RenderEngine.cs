@@ -18,6 +18,12 @@ public sealed class RenderEngine : IDisposable
     private readonly Dictionary<string, long> _generatedUse = new();
     private long _tick;
 
+    /// <summary>
+    /// 直前に描いたフレームでの、各オブジェクトの四隅 (プロジェクト座標, 左上から時計回り)。
+    /// プレビューの選択枠とクリック判定に使う。キーはオブジェクト ID、順序は描画順。
+    /// </summary>
+    public List<(string Id, SKPoint[] Quad)> LastQuads { get; } = new();
+
     private readonly record struct GroupState(int FromLayer, int ToLayer, float X, float Y, float Scale, float Rotation, float Alpha);
 
     /// <summary>surface いっぱいにフレームを描く。surface の大きさがプロジェクトより小さければ縮小して描く。</summary>
@@ -27,6 +33,7 @@ public sealed class RenderEngine : IDisposable
         try
         {
             var canvas = surface.Canvas;
+            LastQuads.Clear();
             canvas.ResetMatrix();
             canvas.Clear(SKColors.Black);
             float scale = surface.Canvas.DeviceClipBounds.Width / (float)project.Settings.Width;
@@ -89,7 +96,7 @@ public sealed class RenderEngine : IDisposable
                             if (fx != null)
                                 sprite = fx.Apply(sprite, new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx });
                         }
-                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, W, H);
+                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, W, H, depth == 0 ? LastQuads : null);
                         break;
                     }
                 }
@@ -101,7 +108,7 @@ public sealed class RenderEngine : IDisposable
         }
     }
 
-    private static void DrawSprite(SKCanvas canvas, Sprite sprite, TimelineObject obj, int[] bounds, int frame, List<GroupState> groups, int W, int H)
+    private static void DrawSprite(SKCanvas canvas, Sprite sprite, TimelineObject obj, int[] bounds, int frame, List<GroupState> groups, int W, int H, List<(string, SKPoint[])>? quads)
     {
         var draw = obj.Draw;
         float x = 0, y = 0, scale = 1, rot = 0, alpha = 1;
@@ -128,6 +135,16 @@ public sealed class RenderEngine : IDisposable
         canvas.RotateDegrees(rot);
         canvas.Scale(scale);
         alpha = Math.Clamp(alpha, 0, 1);
+        if (quads != null)
+        {
+            // デバイス座標 → プロジェクト座標 (プレビューの縮小率を打ち消す)
+            float k = W / (float)Math.Max(1, canvas.DeviceClipBounds.Width);
+            var m = canvas.TotalMatrix;
+            var rect = SKRect.Create(-sprite.Cx, -sprite.Cy, sprite.Width, sprite.Height);
+            var pts = new[] { new SKPoint(rect.Left, rect.Top), new SKPoint(rect.Right, rect.Top), new SKPoint(rect.Right, rect.Bottom), new SKPoint(rect.Left, rect.Bottom) };
+            for (int i = 0; i < 4; i++) { var q = m.MapPoint(pts[i]); pts[i] = new SKPoint(q.X * k, q.Y * k); }
+            quads.Add((obj.Id, pts));
+        }
         if (alpha > 0 && scale != 0)
         {
             using var paint = new SKPaint

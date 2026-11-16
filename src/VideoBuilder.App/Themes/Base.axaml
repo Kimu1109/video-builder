@@ -1,0 +1,188 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:c="using:VideoBuilder.App.Controls">
+  <!-- 角ばった・フラット・高密度な見た目にするための共通スタイル (設計書 7 章) -->
+
+  <Style Selector="Window">
+    <Setter Property="FontFamily" Value="{DynamicResource UiFont}" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Background" Value="{DynamicResource Bg.Base}" />
+    <Setter Property="Foreground" Value="{DynamicResource Fg.Primary}" />
+  </Style>
+
+  <Style Selector="Button, ToggleButton, RepeatButton, DropDownButton">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Border.Default}" />
+    <Setter Property="Background" Value="{DynamicResource Bg.Panel}" />
+    <Setter Property="Padding" Value="8,2" />
+    <Setter Property="MinHeight" Value="24" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button:pointerover /template/ ContentPresenter#PART_ContentPresenter, ToggleButton:pointerover /template/ ContentPresenter#PART_ContentPresenter, RepeatButton:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Bg.Hover}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Border.Strong}" />
+  </Style>
+  <Style Selector="Button:pressed /template/ ContentPresenter#PART_ContentPresenter, RepeatButton:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Bg.Pressed}" />
+  </Style>
+  <Style Selector="Button:pressed, RepeatButton:pressed, ToggleButton:pressed">
+    <Setter Property="RenderTransform" Value="none" />
+  </Style>
+  <Style Selector="ToggleButton:checked /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Bg.Pressed}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Accent}" />
+    <Setter Property="Foreground" Value="{DynamicResource Fg.Primary}" />
+  </Style>
+
+  <!-- 枠なしのアイコンボタン (ツールバー・パネル内) -->
+  <Style Selector="Button.flat, ToggleButton.flat, RepeatButton.flat">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Padding" Value="4,2" />
+    <Setter Property="MinWidth" Value="24" />
+  </Style>
+  <Style Selector="Button.flat:disabled /template/ ContentPresenter#PART_ContentPresenter, RepeatButton.flat:disabled /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.accent">
+    <Setter Property="Background" Value="{DynamicResource Accent}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Accent}" />
+    <Setter Property="Foreground" Value="{DynamicResource Fg.OnAccent}" />
+  </Style>
+  <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Accent.Hover}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Accent.Hover}" />
+    <Setter Property="Foreground" Value="{DynamicResource Fg.OnAccent}" />
+  </Style>
+
+  <Style Selector="TextBox">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="MinHeight" Value="22" />
+    <Setter Property="Padding" Value="4,2" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Background" Value="{DynamicResource Bg.Input}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Border.Default}" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="TextBox.num">
+    <Setter Property="FontFamily" Value="{DynamicResource MonoFont}" />
+    <Setter Property="HorizontalContentAlignment" Value="Right" />
+    <Setter Property="Padding" Value="3,1" />
+    <Setter Property="MinWidth" Value="0" />
+  </Style>
+
+  <Style Selector="ComboBox">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="MinHeight" Value="22" />
+    <Setter Property="Padding" Value="6,1,0,1" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Background" Value="{DynamicResource Bg.Input}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Border.Default}" />
+  </Style>
+  <Style Selector="ComboBoxItem">
+    <Setter Property="Padding" Value="8,3" />
+    <Setter Property="FontSize" Value="12" />
+  </Style>
+  <Style Selector="CheckBox">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="MinHeight" Value="22" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Padding" Value="4,0,0,0" />
+  </Style>
+  <Style Selector="CheckBox /template/ Border#NormalRectangle">
+    <Setter Property="CornerRadius" Value="0" />
+  </Style>
+  <Style Selector="RadioButton">
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="MinHeight" Value="22" />
+  </Style>
+
+  <Style Selector="Menu">
+    <Setter Property="Height" Value="24" />
+    <Setter Property="Background" Value="{DynamicResource Bg.Panel}" />
+  </Style>
+  <Style Selector="MenuItem">
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Padding" Value="8,3" />
+    <Setter Property="CornerRadius" Value="0" />
+  </Style>
+  <Style Selector="Menu > MenuItem">
+    <Setter Property="Padding" Value="8,0" />
+    <Setter Property="Height" Value="24" />
+  </Style>
+  <Style Selector="MenuFlyoutPresenter">
+    <Setter Property="CornerRadius" Value="0" />
+  </Style>
+  <Style Selector="ContextMenu">
+    <Setter Property="CornerRadius" Value="0" />
+  </Style>
+  <Style Selector="FlyoutPresenter">
+    <Setter Property="CornerRadius" Value="0" />
+  </Style>
+  <Style Selector="ContextMenu, MenuFlyoutPresenter, FlyoutPresenter">
+    <Setter Property="Background" Value="{DynamicResource Bg.Elevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Border.Strong}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Padding" Value="0,2" />
+  </Style>
+  <Style Selector="FlyoutPresenter">
+    <Setter Property="Padding" Value="8" />
+  </Style>
+  <Style Selector="Separator">
+    <Setter Property="Background" Value="{DynamicResource Border.Default}" />
+    <Setter Property="Margin" Value="0,2" />
+    <Setter Property="Height" Value="1" />
+  </Style>
+  <Style Selector="ToolTip">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Padding" Value="6,3" />
+    <Setter Property="Background" Value="{DynamicResource Bg.Elevated}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Border.Strong}" />
+  </Style>
+  <Style Selector="ScrollBar">
+    <Setter Property="AllowAutoHide" Value="False" />
+  </Style>
+  <Style Selector="ScrollBar /template/ Thumb">
+    <Setter Property="CornerRadius" Value="0" />
+  </Style>
+  <Style Selector="ScrollBar Thumb /template/ Border">
+    <Setter Property="CornerRadius" Value="0" />
+  </Style>
+  <Style Selector="ProgressBar">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="MinHeight" Value="8" />
+    <Setter Property="Foreground" Value="{DynamicResource Accent}" />
+  </Style>
+  <Style Selector="ProgressBar /template/ Border">
+    <Setter Property="CornerRadius" Value="0" />
+  </Style>
+  <Style Selector="GridSplitter">
+    <Setter Property="Background" Value="{DynamicResource Border.Default}" />
+    <Setter Property="MinWidth" Value="1" />
+    <Setter Property="MinHeight" Value="1" />
+  </Style>
+
+  <Style Selector="TextBlock.secondary">
+    <Setter Property="Foreground" Value="{DynamicResource Fg.Secondary}" />
+  </Style>
+  <Style Selector="TextBlock.mono">
+    <Setter Property="FontFamily" Value="{DynamicResource MonoFont}" />
+  </Style>
+  <Style Selector="TextBlock.heading">
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <Style Selector="Border.panel">
+    <Setter Property="Background" Value="{DynamicResource Bg.Panel}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource Border.Default}" />
+  </Style>
+  <Style Selector="c|Icon">
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+</Styles>

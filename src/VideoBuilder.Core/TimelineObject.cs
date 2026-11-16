@@ -67,6 +67,15 @@ public sealed class TimelineObject
         return o;
     }
 
+    /// <summary>src の内容 (ID 以外) を写す。ドラッグ中に「元の状態からやり直す」ために使う。</summary>
+    public void RestoreFrom(TimelineObject src)
+    {
+        Layer = src.Layer; Start = src.Start; End = src.End; GroupId = src.GroupId; Enabled = src.Enabled;
+        SourceOffsetFrames = src.SourceOffsetFrames;
+        KeyFrames = new List<int>(src.KeyFrames);
+        Effects = src.Effects.Select(e => e.Clone()).ToList();
+    }
+
     /// <summary>位置と長さを変える。中間点は相対位置を保ったまま移動し、範囲外になったものは消す。</summary>
     public void SetRange(int start, int end)
     {
@@ -123,6 +132,18 @@ public sealed class TimelineObject
         int i = 0;
         while (i < KeyFrames.Count && frame >= KeyFrames[i]) i++;
         return i;
+    }
+
+    /// <summary>
+    /// frame の位置で値を書き換えるときに、Values のどの要素を変えるか。
+    /// 移動なしなら今の区間の値、移動ありなら区間の両端のうち近い方。
+    /// </summary>
+    public int ValueIndexAt(AnimatedValue value, int frame)
+    {
+        int section = SectionAt(Math.Clamp(frame, Start, End));
+        if (!value.IsMoving) return section;
+        var b = Bounds;
+        return frame - b[section] <= b[section + 1] - frame ? section : section + 1;
     }
 
     /// <summary>frame の位置で 2 つに分割し、後半の新しいオブジェクトを返す。</summary>

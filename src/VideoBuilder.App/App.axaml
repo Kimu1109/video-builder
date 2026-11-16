@@ -1,0 +1,32 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="VideoBuilder.App.App"
+             Name="video-builder"
+             RequestedThemeVariant="Default">
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceInclude Source="avares://video-builder/Themes/Icons.axaml" />
+        <ResourceInclude Source="avares://video-builder/Themes/Tokens.axaml" />
+      </ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+  <Application.Styles>
+    <FluentTheme DensityStyle="Compact">
+      <FluentTheme.Palettes>
+        <ColorPaletteResources x:Key="Dark" Accent="#2F80ED" RegionColor="#1E1E1E"
+                               AltHigh="#1A1A1A" AltMedium="#1A1A1A" AltMediumHigh="#1A1A1A" AltMediumLow="#1A1A1A" AltLow="#1A1A1A"
+                               ChromeLow="#252526" ChromeMediumLow="#2D2D30" ChromeMedium="#2D2D30" ChromeHigh="#5A5A60"
+                               BaseHigh="#E6E6E6" BaseMediumHigh="#C8C8C8" BaseMedium="#A0A0A0" BaseMediumLow="#5A5A60" BaseLow="#3A3A3D"
+                               ListLow="#3A3A3D" ListMedium="#45454A" ErrorText="#D9433A" />
+        <ColorPaletteResources x:Key="Light" Accent="#1F6FD9" RegionColor="#F3F3F3"
+                               AltHigh="#FFFFFF" AltMedium="#FFFFFF" AltMediumHigh="#FFFFFF" AltMediumLow="#FFFFFF" AltLow="#FFFFFF"
+                               ChromeLow="#FFFFFF" ChromeMediumLow="#FFFFFF" ChromeMedium="#FFFFFF" ChromeHigh="#A0A0A0"
+                               BaseHigh="#1E1E1E" BaseMediumHigh="#3A3A3A" BaseMedium="#5F5F5F" BaseMediumLow="#A0A0A0" BaseLow="#E5E5E5"
+                               ListLow="#E5E5E5" ListMedium="#D6D6D6" ErrorText="#C62828" />
+      </FluentTheme.Palettes>
+    </FluentTheme>
+    <StyleInclude Source="avares://Avalonia.Controls.ColorPicker/Themes/Fluent/Fluent.xaml" />
+    <StyleInclude Source="avares://video-builder/Themes/Base.axaml" />
+  </Application.Styles>
+</Application>

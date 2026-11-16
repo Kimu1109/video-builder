@@ -1,0 +1,239 @@
+using System.Data;
+using System.Globalization;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Media;
+using VideoBuilder.App.Services;
+
+namespace VideoBuilder.App.Controls;
+
+/// <summary>数値入力欄。式 ("100*2") も受け付け、ホイールと上下キーで増減できる。</summary>
+public sealed class NumberBox : TextBox
+{
+    private double _value;
+    private bool _editing;
+
+    protected override Type StyleKeyOverride => typeof(TextBox);
+
+    public double Minimum { get; set; } = double.MinValue;
+    public double Maximum { get; set; } = double.MaxValue;
+    public int Decimals { get; set; } = 1;
+    /// <summary>ユーザーが値を確定した。</summary>
+    public event Action<double>? Committed;
+
+    public NumberBox()
+    {
+        Classes.Add("num");
+        MinWidth = 0;
+    }
+
+    public double Value
+    {
+        get => _value;
+        set { _value = value; if (!_editing) Text = Format(value); }
+    }
+
+    private string Format(double v) => v.ToString("F" + Decimals, CultureInfo.InvariantCulture);
+
+    protected override void OnGotFocus(GotFocusEventArgs e)
+    {
+        base.OnGotFocus(e);
+        _editing = true;
+        SelectAll();
+    }
+
+    protected override void OnLostFocus(RoutedEventArgs e)
+    {
+        base.OnLostFocus(e);
+        Commit();
+        _editing = false;
+        Text = Format(_value);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        if (e.Key is Key.Enter or Key.Return) { Commit(); Text = Format(_value); SelectAll(); e.Handled = true; return; }
+        if (e.Key == Key.Escape) { Text = Format(_value); TopLevel.GetTopLevel(this)?.FocusManager?.ClearFocus(); e.Handled = true; return; }
+        if (e.Key is Key.Up or Key.Down)
+        {
+            Commit();
+            Step(e.Key == Key.Up ? 1 : -1, e.KeyModifiers);
+            Text = Format(_value);
+            e.Handled = true;
+            return;
+        }
+        base.OnKeyDown(e);
+    }
+
+    protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
+    {
+        if (!IsFocused) return;   // スクロール中に誤って値が変わらないよう、フォーカス中だけ反応する
+        Step(e.Delta.Y > 0 ? 1 : -1, e.KeyModifiers);
+        Text = Format(_value);
+        e.Handled = true;
+    }
+
+    /// <summary>Shift で 10 倍、Ctrl で 1/10。</summary>
+    public void Step(int direction, KeyModifiers modifiers)
+    {
+        double step = Math.Pow(10, -Decimals);
+        if (Decimals == 0 || !modifiers.HasFlag(KeyModifiers.Control)) step *= Decimals == 0 ? 1 : 10;
+        if (modifiers.HasFlag(KeyModifiers.Shift)) step *= 10;
+        Apply(_value + direction * step);
+    }
+
+    private void Commit()
+    {
+        var text = (Text ?? "").Trim();
+        if (text.Length == 0 || text == Format(_value)) return;
+        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var v))
+        {
+            try { v = Convert.ToDouble(new DataTable().Compute(text, null), CultureInfo.InvariantCulture); }
+            catch { return; }
+        }
+        if (double.IsNaN(v) || double.IsInfinity(v)) return;
+        Apply(v);
+    }
+
+    private void Apply(double v)
+    {
+        v = Math.Round(Math.Clamp(v, Minimum, Maximum), Decimals);
+        if (v == _value) return;
+        _value = v;
+        Committed?.Invoke(v);
+    }
+}
+
+/// <summary>角ばった小さなスライダー。ドラッグの開始と終了を通知する (Undo を 1 回にまとめるため)。</summary>
+public sealed class MiniSlider : Control
+{
+    private double _value;
+    private bool _dragging;
+    private double _dragStartX, _dragStartValue;
+
+    public double Minimum { get; set; }
+    public double Maximum { get; set; } = 100;
+    public event Action? DragStarted;
+    public event Action<double>? Changed;
+    public event Action? DragCompleted;
+
+    public MiniSlider()
+    {
+        Height = 20;
+        MinWidth = 24;
+        Cursor = new Cursor(StandardCursorType.Hand);
+        Svc.Theme.Changed += InvalidateVisual;
+    }
+
+    public double Value
+    {
+        get => _value;
+        set { if (_value == value) return; _value = value; InvalidateVisual(); }
+    }
+
+    private const double Thumb = 7;
+
+    private double Ratio => Maximum <= Minimum ? 0 : Math.Clamp((_value - Minimum) / (Maximum - Minimum), 0, 1);
+
+    public override void Render(DrawingContext ctx)
+    {
+        double w = Bounds.Width, h = Bounds.Height, mid = Math.Round(h / 2);
+        // 当たり判定のために全体を透明で塗る
+        ctx.FillRectangle(Brushes.Transparent, new Rect(0, 0, w, h));
+        bool on = IsEffectivelyEnabled;
+        ctx.FillRectangle(Svc.Brush("Border.Strong"), new Rect(0, mid - 1, w, 2));
+        double x = Math.Round(Ratio * (w - Thumb));
+        if (on) ctx.FillRectangle(Svc.Brush("Accent"), new Rect(0, mid - 1, x, 2));
+        ctx.FillRectangle(Svc.Brush(on ? "Accent" : "Fg.Disabled"), new Rect(x, mid - 7, Thumb, 14));
+    }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+        if (change.Property == IsEffectivelyEnabledProperty) InvalidateVisual();
+    }
+
+    protected override void OnPointerPressed(PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        _dragging = true;
+        e.Pointer.Capture(this);
+        DragStarted?.Invoke();
+        double x = e.GetPosition(this).X;
+        double thumbX = Ratio * (Bounds.Width - Thumb);
+        // つまみの外を押したら、その位置へ値を飛ばす
+        if (x < thumbX || x > thumbX + Thumb) SetFromX(x);
+        _dragStartX = x; _dragStartValue = _value;
+        e.Handled = true;
+    }
+
+    protected override void OnPointerMoved(PointerEventArgs e)
+    {
+        if (!_dragging) return;
+        double x = e.GetPosition(this).X;
+        double range = Maximum - Minimum, track = Math.Max(1, Bounds.Width - Thumb);
+        // Shift: 微調整 (1/10 の速さ)
+        double factor = e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? 0.1 : 1;
+        Set(_dragStartValue + (x - _dragStartX) / track * range * factor);
+    }
+
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
+    {
+        if (!_dragging) return;
+        _dragging = false;
+        e.Pointer.Capture(null);
+        DragCompleted?.Invoke();
+    }
+
+    protected override void OnPointerCaptureLost(PointerCaptureLostEventArgs e)
+    {
+        if (!_dragging) return;
+        _dragging = false;
+        DragCompleted?.Invoke();
+    }
+
+    private void SetFromX(double x)
+    {
+        double track = Math.Max(1, Bounds.Width - Thumb);
+        Set(Minimum + Math.Clamp((x - Thumb / 2) / track, 0, 1) * (Maximum - Minimum));
+    }
+
+    private void Set(double v)
+    {
+        v = Math.Clamp(v, Minimum, Maximum);
+        if (v == _value) return;
+        _value = v;
+        InvalidateVisual();
+        Changed?.Invoke(v);
+    }
+}
+
+/// <summary>メニュー項目を短く書くためのヘルパー。</summary>
+public static class Menus
+{
+    public static MenuItem Item(string header, string? icon, Action? action, string? gesture = null, bool enabled = true, bool? isChecked = null)
+    {
+        var item = new MenuItem { Header = header, IsEnabled = enabled };
+        if (icon != null) item.Icon = new Icon(icon);
+        if (isChecked != null)
+        {
+            item.ToggleType = MenuItemToggleType.CheckBox;
+            item.IsChecked = isChecked.Value;
+        }
+        if (gesture != null) item.InputGesture = KeyGesture.Parse(gesture);
+        if (action != null) item.Click += (_, _) => action();
+        return item;
+    }
+
+    public static MenuItem Sub(string header, string? icon, IEnumerable<object> items)
+    {
+        var item = new MenuItem { Header = header };
+        if (icon != null) item.Icon = new Icon(icon);
+        foreach (var i in items) item.Items.Add(i);
+        return item;
+    }
+
+    public static Separator Sep() => new();
+}

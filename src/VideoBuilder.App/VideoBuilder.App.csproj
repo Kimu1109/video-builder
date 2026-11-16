@@ -4,10 +4,12 @@
     <AssemblyName>video-builder</AssemblyName>
     <RootNamespace>VideoBuilder.App</RootNamespace>
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
   </PropertyGroup>
   <ItemGroup>
     <AvaloniaResource Include="Assets/**" />
+    <AvaloniaResource Include="Themes/**" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../VideoBuilder.Core/VideoBuilder.Core.csproj" />
@@ -18,6 +20,6 @@
     <PackageReference Include="Avalonia.Desktop" />
     <PackageReference Include="Avalonia.Themes.Fluent" />
     <PackageReference Include="Avalonia.Fonts.Inter" />
-    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="Avalonia.Controls.ColorPicker" />
   </ItemGroup>
 </Project>
