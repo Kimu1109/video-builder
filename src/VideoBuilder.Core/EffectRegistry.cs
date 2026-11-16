@@ -24,6 +24,7 @@ public static class EffectRegistry
     public const string Shape = "builtin.shape";
     public const string SceneRef = "builtin.scene";
     public const string GroupControl = "builtin.group";
+    public const string CameraControl = "builtin.camera";
     public const string StandardDraw = "builtin.draw";
     public const string StandardPlay = "builtin.play";
 
@@ -112,6 +113,21 @@ public static class EffectRegistry
             },
         });
 
+        Register(new EffectDefinition
+        {
+            Id = CameraControl, Name = "カメラ制御", Category = EffectCategory.Control, Icon = "Icon.Videocam", Color = "#704F60",
+            Params = new[]
+            {
+                T("x", "X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "Y", -99999.9, 99999.9, 0, 1, -2000, 2000),
+                T("z", "Z", -99999.9, 99999.9, -1024, 1, -4000, 0),
+                T("tx", "目標X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("ty", "目標Y", -99999.9, 99999.9, 0, 1, -2000, 2000),
+                T("tz", "目標Z", -99999.9, 99999.9, 0, 1, -2000, 2000),
+                T("roll", "傾き", -3600, 3600, 0, 2, -360, 360),
+                T("fov", "視野角", 0, 170, 0, 1),
+                T("layers", "対象レイヤー数", 0, 100, 0, 0),
+            },
+        });
+
         // ---- 標準描画 / 標準再生 ----
         Register(new EffectDefinition
         {
@@ -120,6 +136,7 @@ public static class EffectRegistry
             {
                 T("x", "X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "Y", -99999.9, 99999.9, 0, 1, -2000, 2000), T("z", "Z", -99999.9, 99999.9, 0, 1, -2000, 2000),
                 T("scale", "拡大率", 0, 5000, 100, 2, 0, 800), T("alpha", "透明度", 0, 100, 0), T("rotation", "回転", -3600, 3600, 0, 2, -360, 360),
+                T("rx", "X軸回転", -3600, 3600, 0, 2, -360, 360), T("ry", "Y軸回転", -3600, 3600, 0, 2, -360, 360),
                 new ParamDefinition { Key = "blend", Name = "合成モード", Kind = ParamKind.Choice, Choices = BlendModes },
             },
         });

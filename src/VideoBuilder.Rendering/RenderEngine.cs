@@ -1,3 +1,4 @@
+using System.Numerics;
 using SkiaSharp;
 using VideoBuilder.Core;
 
@@ -30,6 +31,34 @@ public sealed class RenderEngine : IDisposable
     public List<(string Id, SKPoint[] Quad)> LastQuads { get; } = new();
 
     private readonly record struct GroupState(int FromLayer, int ToLayer, float X, float Y, float Scale, float Rotation, float Alpha);
+
+    /// <summary>カメラ: ワールド座標 → カメラ座標 (X 右, Y 下, Z 奥) の変換と、焦点距離。</summary>
+    private readonly record struct CameraState(int FromLayer, int ToLayer, Matrix4x4 View, float Focal);
+
+    /// <summary>カメラ制御がないときの視点。Z = 0 の平面がちょうど等倍で映る。</summary>
+    public const float DefaultCameraDistance = 1024;
+
+    private static Matrix4x4 LookAt(Vector3 eye, Vector3 target, float rollDegrees)
+    {
+        var forward = target - eye;
+        if (forward.LengthSquared() < 1e-6f) forward = Vector3.UnitZ;
+        forward = Vector3.Normalize(forward);
+        // 真上・真下を向いたときは、基準にする「下」方向を切り替える
+        var downRef = Math.Abs(forward.Y) > 0.999f ? Vector3.UnitZ * -Math.Sign(forward.Y) : Vector3.UnitY;
+        var right = Vector3.Normalize(Vector3.Cross(downRef, forward));
+        var down = Vector3.Cross(forward, right);
+        if (rollDegrees != 0)
+        {
+            float r = rollDegrees * MathF.PI / 180f, c = MathF.Cos(r), sn = MathF.Sin(r);
+            (right, down) = (right * c + down * sn, down * c - right * sn);
+        }
+        var rot = new Matrix4x4(
+            right.X, down.X, forward.X, 0,
+            right.Y, down.Y, forward.Y, 0,
+            right.Z, down.Z, forward.Z, 0,
+            0, 0, 0, 1);
+        return Matrix4x4.CreateTranslation(-eye) * rot;
+    }
 
     /// <summary>surface いっぱいにフレームを描く。surface の大きさがプロジェクトより小さければ縮小して描く。</summary>
     public void Render(Project project, Scene scene, int frame, SKSurface surface)
@@ -91,6 +120,7 @@ public sealed class RenderEngine : IDisposable
         var canvas = surface.Canvas;
         int W = project.Settings.Width, H = project.Settings.Height;
         var groups = new List<GroupState>();
+        var cameras = new List<CameraState>();
 
         try
         {
@@ -112,6 +142,16 @@ public sealed class RenderEngine : IDisposable
                             1 - (float)main.Eval("alpha", bounds, frame) / 100f));
                         break;
                     }
+                    case EffectCategory.Control when def.Id == EffectRegistry.CameraControl:
+                    {
+                        float E(string k) => (float)main.Eval(k, bounds, frame);
+                        int n = (int)E("layers");
+                        float fov = E("fov");
+                        float focal = fov > 0.5f ? H / 2f / MathF.Tan(fov * MathF.PI / 360f) : DefaultCameraDistance;
+                        cameras.Add(new CameraState(obj.Layer + 1, n <= 0 ? int.MaxValue : obj.Layer + n,
+                            LookAt(new Vector3(E("x"), E("y"), E("z")), new Vector3(E("tx"), E("ty"), E("tz")), E("roll")), focal));
+                        break;
+                    }
                     case EffectCategory.Filter:
                         ApplyToFrameBuffer(ctx, obj, bounds, surface);
                         break;
@@ -128,7 +168,7 @@ public sealed class RenderEngine : IDisposable
                             if (fx != null)
                                 sprite = fx.Apply(sprite, new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx });
                         }
-                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, W, H, depth == 0 ? LastQuads : null);
+                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, cameras, W, H, depth == 0 ? LastQuads : null);
                         break;
                     }
                 }
@@ -140,41 +180,63 @@ public sealed class RenderEngine : IDisposable
         }
     }
 
-    private static void DrawSprite(SKCanvas canvas, Sprite sprite, TimelineObject obj, int[] bounds, int frame, List<GroupState> groups, int W, int H, List<(string, SKPoint[])>? quads)
+    private static void DrawSprite(SKCanvas canvas, Sprite sprite, TimelineObject obj, int[] bounds, int frame,
+        List<GroupState> groups, List<CameraState> cameras, int W, int H, List<(string, SKPoint[])>? quads)
     {
         var draw = obj.Draw;
-        float x = 0, y = 0, scale = 1, rot = 0, alpha = 1;
+        float x = 0, y = 0, z = 0, scale = 1, rot = 0, rx = 0, ry = 0, alpha = 1;
         int blend = 0;
         if (draw != null)
         {
-            x = (float)draw.Eval("x", bounds, frame); y = (float)draw.Eval("y", bounds, frame);
-            scale = (float)draw.Eval("scale", bounds, frame) / 100f;
-            rot = (float)draw.Eval("rotation", bounds, frame);
-            alpha = 1 - (float)draw.Eval("alpha", bounds, frame) / 100f;
+            float E(string k) => (float)draw.Eval(k, bounds, frame);
+            x = E("x"); y = E("y"); z = E("z");
+            scale = E("scale") / 100f;
+            rot = E("rotation"); rx = E("rx"); ry = E("ry");
+            alpha = 1 - E("alpha") / 100f;
             blend = draw.GetInt("blend");
         }
-        canvas.Save();
-        canvas.Translate(W / 2f, H / 2f);
-        foreach (var g in groups)
+        const float Rad = MathF.PI / 180f;
+        // オブジェクト自身の変形 (拡大 → 回転 → 移動)。そのあとにグループ制御を内側から順にかける
+        var model = Matrix4x4.CreateScale(scale, scale, 1) * Matrix4x4.CreateRotationZ(rot * Rad);
+        if (rx != 0) model *= Matrix4x4.CreateRotationX(rx * Rad);
+        if (ry != 0) model *= Matrix4x4.CreateRotationY(ry * Rad);
+        model *= Matrix4x4.CreateTranslation(x, y, z);
+        for (int i = groups.Count - 1; i >= 0; i--)
         {
+            var g = groups[i];
             if (obj.Layer < g.FromLayer || obj.Layer > g.ToLayer) continue;
-            canvas.Translate(g.X, g.Y);
-            canvas.RotateDegrees(g.Rotation);
-            canvas.Scale(g.Scale);
+            model *= Matrix4x4.CreateScale(g.Scale, g.Scale, 1) * Matrix4x4.CreateRotationZ(g.Rotation * Rad) * Matrix4x4.CreateTranslation(g.X, g.Y, 0);
             alpha *= g.Alpha;
         }
-        canvas.Translate(x, y);
-        canvas.RotateDegrees(rot);
-        canvas.Scale(scale);
+        // 対象レイヤーに入っている、いちばん下 (最後) のカメラ制御を使う
+        var view = Matrix4x4.CreateTranslation(0, 0, DefaultCameraDistance);
+        float focal = DefaultCameraDistance;
+        foreach (var c in cameras)
+            if (obj.Layer >= c.FromLayer && obj.Layer <= c.ToLayer) { view = c.View; focal = c.Focal; }
+        var m = model * view;
+
+        // オブジェクトは平面なので、(lx, ly, 1) → 画面座標の射影変換 (3x3) にまとめられる
+        float cx = W / 2f, cy = H / 2f;
+        var h = new SKMatrix
+        {
+            ScaleX = focal * m.M11 + cx * m.M13, SkewX = focal * m.M21 + cx * m.M23, TransX = focal * m.M41 + cx * m.M43,
+            SkewY = focal * m.M12 + cy * m.M13, ScaleY = focal * m.M22 + cy * m.M23, TransY = focal * m.M42 + cy * m.M43,
+            Persp0 = m.M13, Persp1 = m.M23, Persp2 = m.M43,
+        };
+        // 中心がカメラより後ろにあるものは描かない
+        if (m.M43 <= 1f) return;
+
+        canvas.Save();
+        canvas.Concat(ref h);
         alpha = Math.Clamp(alpha, 0, 1);
         if (quads != null)
         {
             // デバイス座標 → プロジェクト座標 (プレビューの縮小率を打ち消す)
             float k = W / (float)Math.Max(1, canvas.DeviceClipBounds.Width);
-            var m = canvas.TotalMatrix;
+            var total = canvas.TotalMatrix;
             var rect = SKRect.Create(-sprite.Cx, -sprite.Cy, sprite.Width, sprite.Height);
             var pts = new[] { new SKPoint(rect.Left, rect.Top), new SKPoint(rect.Right, rect.Top), new SKPoint(rect.Right, rect.Bottom), new SKPoint(rect.Left, rect.Bottom) };
-            for (int i = 0; i < 4; i++) { var q = m.MapPoint(pts[i]); pts[i] = new SKPoint(q.X * k, q.Y * k); }
+            for (int i = 0; i < 4; i++) { var q = total.MapPoint(pts[i]); pts[i] = new SKPoint(q.X * k, q.Y * k); }
             quads.Add((obj.Id, pts));
         }
         if (alpha > 0 && scale != 0)

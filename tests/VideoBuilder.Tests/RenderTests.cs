@@ -150,6 +150,61 @@ public class RenderTests
     }
 
     [Fact]
+    public void Z_and_axis_rotation_give_perspective()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FF0000");            // 100px → x = 110..210
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 115, 120));
+        o.Draw!.Tracks["z"] = new AnimatedValue(1024);  // 距離が 2 倍 → 半分の大きさ (135..185)
+        Assert.Equal(SKColors.Black, Pixel(p, 0, 125, 120));
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 140, 120));
+
+        o.Draw!.Tracks["z"] = new AnimatedValue(0);
+        o.Draw!.Tracks["ry"] = new AnimatedValue(60);   // Y 軸回転 60° → 幅がおよそ半分
+        Assert.Equal(SKColors.Black, Pixel(p, 0, 115, 120));
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 160, 120));
+        o.Draw!.Tracks["ry"] = new AnimatedValue(90);   // 真横: 何も見えない (例外にもならない)
+        Assert.Equal(SKColors.Black, Pixel(p, 0, 160, 120));
+    }
+
+    [Fact]
+    public void Camera_control_changes_the_view_of_lower_layers_only()
+    {
+        var p = Small();
+        AddShape(p, 0, "#0000FF", 20).Draw!.Tracks["x"] = new AnimatedValue(-120);   // カメラより上: 影響なし
+        var cam = ObjectFactory.Create(EffectRegistry.CameraControl, 1, 0, 60);
+        p.Root.Objects.Add(cam);
+        AddShape(p, 2, "#FF0000", 40);
+        // 既定のカメラは「カメラなし」と同じ絵
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 160, 120));
+
+        // カメラと目標を右へ 100 → 被写体は左へ 100
+        cam.Main.Tracks["x"] = new AnimatedValue(100); cam.Main.Tracks["tx"] = new AnimatedValue(100);
+        Assert.Equal(SKColors.Black, Pixel(p, 0, 160, 120));
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 60, 120));
+        Assert.Equal(new SKColor(0, 0, 255), Pixel(p, 0, 34, 120));
+
+        // カメラを半分の距離まで近づける → 2 倍に見える
+        cam.Main.Tracks["x"] = new AnimatedValue(0); cam.Main.Tracks["tx"] = new AnimatedValue(0);
+        cam.Main.Tracks["z"] = new AnimatedValue(-512);
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 125, 120));
+        // 被写体の後ろに回る → 映らない
+        cam.Main.Tracks["z"] = new AnimatedValue(500); cam.Main.Tracks["tz"] = new AnimatedValue(1000);
+        Assert.Equal(SKColors.Black, Pixel(p, 0, 160, 120));
+    }
+
+    [Fact]
+    public void Old_projects_get_newly_added_parameters_on_load()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FF0000");
+        o.AddKeyFrame(30);
+        o.Draw!.Tracks.Remove("rx");
+        var q = ProjectSerializer.FromJson(ProjectSerializer.ToJson(p));
+        Assert.Equal(3, q.Root.Objects[0].Draw!.Tracks["rx"].Values.Count);
+    }
+
+    [Fact]
     public void Text_produces_visible_pixels_including_japanese()
     {
         using var img = Generators.RenderText("あA", "", 64, SKColors.White, false, false, 0, 0, 0)!;

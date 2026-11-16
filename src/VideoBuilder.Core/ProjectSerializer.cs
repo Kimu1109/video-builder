@@ -32,8 +32,15 @@ public static class ProjectSerializer
         foreach (var s in p.Scenes)
         foreach (var o in s.Objects)
         foreach (var e in o.Effects)
-        foreach (var v in e.Tracks.Values)
-            v.EnsureSections(o.Sections);
+        {
+            // 新しいバージョンで増えたパラメータを、既定値で補う
+            if (EffectRegistry.Exists(e.DefinitionId))
+            {
+                foreach (var d in e.Definition.Params)
+                    if (d.Kind == ParamKind.Track && !e.Tracks.ContainsKey(d.Key)) e.Tracks[d.Key] = new AnimatedValue(d.Default, o.Sections);
+            }
+            foreach (var v in e.Tracks.Values) v.EnsureSections(o.Sections);
+        }
         return p;
     }
 
