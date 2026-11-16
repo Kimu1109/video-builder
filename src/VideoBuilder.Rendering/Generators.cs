@@ -11,6 +11,18 @@ public static class Generators
     private static readonly string[] DefaultFamilies = { "Noto Sans CJK JP", "Noto Sans JP", "IPAGothic", "Yu Gothic UI", "Hiragino Sans", "Meiryo" };
     private static string? _defaultFamily;
 
+    private static readonly Dictionary<string, (SKTypeface Regular, SKTypeface? Bold)> Bundled = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>アプリに同梱したフォントを登録する。最初に登録したものがテキストの既定フォントになる。</summary>
+    public static void RegisterBundledFont(SKTypeface regular, SKTypeface? bold)
+    {
+        lock (Bundled)
+        {
+            if (Bundled.Count == 0) _defaultFamily = regular.FamilyName;
+            Bundled[regular.FamilyName] = (regular, bold);
+        }
+    }
+
     public static string DefaultFontFamily
     {
         get
@@ -22,8 +34,16 @@ public static class Generators
         }
     }
 
-    public static IReadOnlyList<string> FontFamilies =>
-        SKFontManager.Default.FontFamilies.Distinct().OrderBy(f => f, StringComparer.CurrentCulture).ToList();
+    public static IReadOnlyList<string> FontFamilies
+    {
+        get
+        {
+            string[] bundled;
+            lock (Bundled) bundled = Bundled.Keys.ToArray();
+            return bundled.Concat(SKFontManager.Default.FontFamilies.Except(bundled, StringComparer.OrdinalIgnoreCase)
+                .Distinct().OrderBy(f => f, StringComparer.CurrentCulture)).ToList();
+        }
+    }
 
     private readonly record struct Run(string Text, SKTypeface Face, float Width);
 
@@ -33,7 +53,14 @@ public static class Generators
         if (string.IsNullOrWhiteSpace(family)) family = DefaultFontFamily;
         var style = new SKFontStyle(bold ? SKFontStyleWeight.Bold : SKFontStyleWeight.Normal, SKFontStyleWidth.Normal,
             italic ? SKFontStyleSlant.Italic : SKFontStyleSlant.Upright);
-        using var baseFace = SKTypeface.FromFamilyName(family, style) ?? SKTypeface.Default;
+        // 同梱フォントは使い回すので破棄しない
+        SKTypeface? bundledFace = null;
+        lock (Bundled)
+        {
+            if (Bundled.TryGetValue(family, out var b)) bundledFace = bold && b.Bold != null ? b.Bold : b.Regular;
+        }
+        using var ownedFace = bundledFace == null ? SKTypeface.FromFamilyName(family, style) ?? SKTypeface.Default : null;
+        var baseFace = bundledFace ?? ownedFace!;
         using var font = new SKFont(baseFace, size) { Subpixel = true, Edging = SKFontEdging.Antialias };
         // 指定スタイルの書体がないフォントは、疑似的に太字・斜体にする
         if (bold && !baseFace.IsBold) font.Embolden = true;

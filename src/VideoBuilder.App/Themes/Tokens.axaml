@@ -53,6 +53,7 @@
   <CornerRadius x:Key="ControlCornerRadius">0</CornerRadius>
   <CornerRadius x:Key="OverlayCornerRadius">0</CornerRadius>
   <x:Double x:Key="ControlContentThemeFontSize">12</x:Double>
-  <FontFamily x:Key="UiFont">Inter, Noto Sans CJK JP, Noto Sans JP, IPAGothic, Yu Gothic UI, Hiragino Sans, sans-serif</FontFamily>
+  <!-- 英数字は Inter、日本語は同梱の Noto Sans JP (Program.cs の FontFallbacks) -->
+  <FontFamily x:Key="UiFont">fonts:Inter#Inter</FontFamily>
   <FontFamily x:Key="MonoFont">JetBrains Mono, Noto Sans Mono, DejaVu Sans Mono, Consolas, Menlo, monospace</FontFamily>
 </ResourceDictionary>

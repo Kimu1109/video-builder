@@ -15,10 +15,32 @@ public static class Svc
     public static void Initialize(Application app)
     {
         Settings = AppSettings.Load();
+        RegisterBundledFonts();
         Session.History.Limit = Settings.UndoLimit;
         Theme = new ThemeService(app, Settings);
         Theme.Apply();
         Preview = new PreviewService(Session, Settings);
+    }
+
+    private static bool _fontsRegistered;
+
+    /// <summary>同梱の Noto Sans JP を、テキストオブジェクトの描画でも使えるようにする。</summary>
+    private static void RegisterBundledFonts()
+    {
+        if (_fontsRegistered) return;
+        _fontsRegistered = true;
+        try
+        {
+            SkiaSharp.SKTypeface? Load(string name)
+            {
+                using var stream = Avalonia.Platform.AssetLoader.Open(new Uri($"avares://video-builder/Assets/Fonts/{name}"));
+                using var data = SkiaSharp.SKData.Create(stream);
+                return SkiaSharp.SKTypeface.FromData(data);
+            }
+            var regular = Load("NotoSansJP-Regular.ttf");
+            if (regular != null) VideoBuilder.Rendering.Generators.RegisterBundledFont(regular, Load("NotoSansJP-Bold.ttf"));
+        }
+        catch { /* 読み込めなければシステムのフォントを使う */ }
     }
 
     /// <summary>テーマに応じたブラシを取り出す (コントロールの Render から使う)。</summary>
