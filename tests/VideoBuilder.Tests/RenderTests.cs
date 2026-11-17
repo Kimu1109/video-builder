@@ -589,3 +589,203 @@ public class ScriptAndPluginTests
     }
 }
 
+/// <summary>高速化のための近道が、元の処理と同じ絵を出すことを確かめる。</summary>
+public class OptimizationTests
+{
+    private static SKBitmap TestImage(int w = 640, int h = 360)
+    {
+        var bmp = new SKBitmap(new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Premul));
+        using var c = new SKCanvas(bmp);
+        c.Clear(SKColors.Transparent);
+        using var shader = SKShader.CreateLinearGradient(new SKPoint(0, 0), new SKPoint(w, h),
+            new[] { SKColors.Red, SKColors.Lime, SKColors.Blue, new SKColor(255, 255, 255, 40) }, null, SKShaderTileMode.Clamp);
+        using var p = new SKPaint { Shader = shader };
+        c.DrawRect(20, 20, w - 40, h - 40, p);                       // 周囲は透明、内側は半透明を含むグラデーション
+        return bmp;
+    }
+
+    private static (double Mean, int Max) Diff(SKBitmap a, SKBitmap b)
+    {
+        var pa = a.Bytes; var pb = b.Bytes;
+        Assert.Equal(pa.Length, pb.Length);
+        long total = 0; int max = 0;
+        for (int i = 0; i < pa.Length; i++) { int d = Math.Abs(pa[i] - pb[i]); total += d; max = Math.Max(max, d); }
+        return ((double)total / pa.Length, max);
+    }
+
+    [Theory]
+    [InlineData(new float[] { 1.3f, 0, 0, 0, -0.1f, 0, 0.8f, 0, 0, 0.05f, 0, 0, 1.1f, 0, 0, 0, 0, 0, 1, 0 })]                 // チャンネルが混ざらない (表引き)
+    [InlineData(new float[] { 0.6f, 0.3f, 0.1f, 0, 0, 0.2f, 0.7f, 0.1f, 0, 0.1f, 0.1f, 0.2f, 0.9f, 0, -0.05f, 0, 0, 0, 1, 0 })] // 混ざる (固定小数点)
+    public void Parallel_color_matrix_matches_skia(float[] m)
+    {
+        using var src = TestImage();
+        using var mine = src.Copy();
+        PixelOps.ColorMatrix(mine.GetPixels(), mine.Width, mine.Height, mine.RowBytes, m);
+
+        using var skia = new SKBitmap(src.Info);
+        using (var c = new SKCanvas(skia))
+        using (var cf = SKColorFilter.CreateColorMatrix(m))
+        using (var p = new SKPaint { ColorFilter = cf, BlendMode = SKBlendMode.Src })
+            c.DrawBitmap(src, 0, 0, p);
+        var (mean, max) = Diff(mine, skia);
+        Assert.True(mean < 0.5 && max <= 6, $"mean={mean:0.000} max={max}");
+    }
+
+    [Fact]
+    public void Band_parallel_drawing_matches_single_threaded_drawing()
+    {
+        using var src = TestImage(1280, 720);
+        using var image = SKImage.FromBitmap(src);
+        using var blur = SKImageFilter.CreateBlur(6, 6);
+        using var paint = new SKPaint { ImageFilter = blur };
+        using var parallel = PixelOps.DrawParallel(1280, 720, c => { c.RotateDegrees(3, 640, 360); c.DrawImage(image, 0, 0, paint); });
+        using var single = new SKBitmap(src.Info);
+        using (var c = new SKCanvas(single)) { c.Clear(SKColors.Transparent); c.RotateDegrees(3, 640, 360); c.DrawImage(image, 0, 0, paint); }
+        using var parallelBmp = SKBitmap.FromImage(parallel);
+        var (mean, max) = Diff(parallelBmp, single);
+        Assert.True(mean < 0.05 && max <= 3, $"帯の境目で絵が変わっている: mean={mean:0.000} max={max}");
+    }
+
+    private static Project Small()
+    {
+        var p = new Project();
+        p.Settings.Width = 640; p.Settings.Height = 360;
+        return p;
+    }
+
+    [Fact]
+    public void Downscaled_blur_is_close_to_exact_blur()
+    {
+        using var src = TestImage();
+        using var image = SKImage.FromBitmap(src);
+        var p = Small();
+        var o = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 10);
+        var fx = ObjectFactory.AddFilter(o, "filter.blur");
+        // 余白を広げる場合 (サイズ固定なし): 結果は元より大きくなり、中心は同じ位置に残る
+        foreach (var radius in new[] { 12f, 30f })
+        {
+            fx.Tracks["radius"] = new AnimatedValue(radius);
+            fx.Values["fixed"] = "0";
+            var ctx = new RenderContext { Project = p, Frame = 0 };
+            var result = Effects.Find("filter.blur")!.Apply(Sprite.Centered(image), new EffectArgs { Effect = fx, Object = o, Bounds = o.Bounds, Context = ctx });
+            int pad = (int)MathF.Ceiling(radius * 1.5f);
+            Assert.Equal((src.Width + pad * 2, src.Height + pad * 2), (result.Width, result.Height));
+            Assert.Equal((src.Width / 2f + pad, src.Height / 2f + pad), (result.Cx, result.Cy));
+            using var fast = SKBitmap.FromImage(result.Image);
+            using var exact = new SKBitmap(new SKImageInfo(result.Width, result.Height, SKColorType.Bgra8888, SKAlphaType.Premul));
+            using (var c = new SKCanvas(exact))
+            using (var f = SKImageFilter.CreateBlur(radius / 2, radius / 2))
+            using (var paint = new SKPaint { ImageFilter = f })
+            { c.Clear(SKColors.Transparent); c.DrawImage(image, pad, pad, paint); }
+            var (mean, max) = Diff(fast, exact);
+            ctx.DisposeTemporaries();
+            Assert.True(mean < 1.5 && max < 40, $"余白あり radius={radius}: mean={mean:0.00} max={max}");
+        }
+        foreach (var radius in new[] { 8f, 24f, 60f })
+        {
+            fx.Tracks["radius"] = new AnimatedValue(radius);
+            fx.Values["fixed"] = "1";
+            var ctx = new RenderContext { Project = p, Frame = 0 };
+            var result = Effects.Find("filter.blur")!.Apply(Sprite.Centered(image), new EffectArgs { Effect = fx, Object = o, Bounds = o.Bounds, Context = ctx });
+            using var fast = SKBitmap.FromImage(result.Image);
+            using var exact = new SKBitmap(src.Info);
+            using (var c = new SKCanvas(exact))
+            using (var f = SKImageFilter.CreateBlur(radius / 2, radius / 2))
+            using (var paint = new SKPaint { ImageFilter = f })
+            { c.Clear(SKColors.Transparent); c.DrawImage(image, 0, 0, paint); }
+            var (mean, max) = Diff(fast, exact);
+            ctx.DisposeTemporaries();
+            Assert.True(mean < 1.5 && max < 40, $"radius={radius}: mean={mean:0.00} max={max}");
+        }
+    }
+
+    [Fact]
+    public void Filter_cache_is_reused_while_moving_and_rebuilt_when_parameters_change()
+    {
+        var p = Small();
+        var o = ObjectFactory.Create(EffectRegistry.Text, 0, 0, 60);
+        var border = ObjectFactory.AddFilter(o, "filter.border");
+        ObjectFactory.AddFilter(o, "filter.fade").Tracks["in"] = new AnimatedValue(0);   // 時刻で変わる効果: キャッシュの対象外
+        var x = o.Draw!.Tracks["x"]; x.Mode = MovementMode.Linear; x.Values[0] = -100; x.Values[1] = 100;
+        p.Root.Objects.Add(o);
+
+        using var cached = new RenderEngine();
+        using var bmp = new SKBitmap(new SKImageInfo(640, 360, SKColorType.Bgra8888, SKAlphaType.Premul));
+        for (int f = 0; f < 10; f++) cached.RenderToBitmap(p, p.Root, f, bmp);
+        Assert.Equal((9L, 1L), cached.FilterCacheStats);        // 動いているだけなら、縁取りは最初の 1 回しか計算しない
+
+        // キャッシュを使った絵は、毎回作り直した絵と同じ
+        using var fresh = new RenderEngine();
+        using var expected = new SKBitmap(bmp.Info);
+        fresh.RenderToBitmap(p, p.Root, 9, expected);
+        Assert.Equal(expected.Bytes, bmp.Bytes);
+
+        // パラメータ・文字を変えたら作り直す
+        border.Tracks["size"] = new AnimatedValue(9);
+        cached.RenderToBitmap(p, p.Root, 9, bmp);
+        Assert.Equal(2L, cached.FilterCacheStats.Misses);
+        o.Main.Values["text"] = "別の文字";
+        cached.RenderToBitmap(p, p.Root, 9, bmp);
+        Assert.Equal(3L, cached.FilterCacheStats.Misses);
+        using var fresh2 = new RenderEngine();
+        fresh2.RenderToBitmap(p, p.Root, 9, expected);
+        Assert.Equal(expected.Bytes, bmp.Bytes);
+
+        // 中間点でパラメータが動いている間は毎フレーム作り直す
+        var size = border.Tracks["size"]; size.Mode = MovementMode.Linear; size.Values[0] = 1; size.Values[1] = 10;
+        long before = cached.FilterCacheStats.Misses;
+        for (int f = 0; f < 30; f += 10) cached.RenderToBitmap(p, p.Root, f, bmp);
+        Assert.Equal(before + 3, cached.FilterCacheStats.Misses);
+    }
+
+    [Fact]
+    public void In_place_frame_filter_matches_the_generic_path()
+    {
+        var p = Small();
+        var bg = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 10); bg.Main.Values["type"] = "0"; bg.Main.Values["color"] = "#3A6EA5";
+        var t = ObjectFactory.Create(EffectRegistry.Text, 1, 0, 10);
+        var f = ObjectFactory.Create("filter.color", 2, 0, 10);
+        f.Main.Tracks["contrast"] = new AnimatedValue(130); f.Main.Tracks["saturation"] = new AnimatedValue(60); f.Main.Tracks["hue"] = new AnimatedValue(25);
+        ObjectFactory.AddFilter(f, "filter.blur").Tracks["radius"] = new AnimatedValue(3);     // その場で処理できない効果が続く場合
+        ObjectFactory.AddFilter(f, "filter.mono").Tracks["strength"] = new AnimatedValue(40);
+        p.Root.Objects.AddRange(new[] { bg, t, f });
+
+        using var cpu = new RenderEngine();
+        using var a = new SKBitmap(new SKImageInfo(640, 360, SKColorType.Bgra8888, SKAlphaType.Premul));
+        cpu.RenderToBitmap(p, p.Root, 0, a);
+        // 比較相手: フィルタオブジェクトを外した絵
+        using var b = new SKBitmap(a.Info);
+        var q = p.Clone(); q.Root.Objects.RemoveAt(2);
+        cpu.RenderToBitmap(q, q.Root, 0, b);
+        // 厳密な再計算の代わりに、性質を確かめる: 彩度を下げてモノクロを混ぜたので、色の差が元より小さい
+        var before = b.GetPixel(10, 10); var after = a.GetPixel(10, 10);
+        int Spread(SKColor c) => Math.Max(c.Red, Math.Max(c.Green, c.Blue)) - Math.Min(c.Red, Math.Min(c.Green, c.Blue));
+        Assert.True(Spread(after) < Spread(before), $"{before} → {after}");
+        Assert.Equal(255, after.Alpha);
+
+        // GPU でも同じ絵になる (GPU 側はその場処理を使わない別経路)
+        using var gpu = GpuContext.TryCreate(out _);
+        if (gpu == null) return;
+        using var gpuEngine = new RenderEngine(gpu);
+        using var g = new SKBitmap(a.Info);
+        gpuEngine.RenderToBitmap(p, p.Root, 0, g);
+        var (mean, _) = Diff(a, g);
+        Assert.True(mean < 1.0, $"CPU と GPU の差が大きい: {mean:0.00}");
+    }
+
+    [Fact]
+    public void Fast_chroma_key_for_preview_is_close_to_the_exact_one()
+    {
+        using var src = TestImage();
+        using var exact = src.Copy(); using var fast = src.Copy();
+        PixelOps.ChromaKey(exact.GetPixels(), exact.Width, exact.Height, exact.RowBytes, 120, 100, 17, 37, 0.1f);
+        PixelOps.ChromaKeyFast(fast.GetPixels(), fast.Width, fast.Height, fast.RowBytes, 120, 100, 17, 37, 0.1f);
+        var (mean, _) = Diff(exact, fast);
+        Assert.True(mean < 1.0, $"mean={mean:0.00}");
+        // 緑の部分は両方とも抜けている
+        int removed = 0;
+        for (int x = 0; x < src.Width; x += 4) if (fast.GetPixel(x, 180).Alpha < src.GetPixel(x, 180).Alpha) removed++;
+        Assert.True(removed > 5);
+    }
+}
+

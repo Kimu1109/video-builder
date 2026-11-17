@@ -18,6 +18,13 @@ public static class Effects
     public static void RegisterSource(string definitionId, VideoBuilder.Plugins.IVideoSource source) { lock (Sources) Sources[definitionId] = source; }
     public static VideoBuilder.Plugins.IVideoSource? FindSource(string id) { lock (Sources) return Sources.GetValueOrDefault(id); }
 
+    /// <summary>色の変換だけを行う効果。画面全体にかけるとき、複製を作らずその場で処理できる。</summary>
+    internal interface IMatrixEffect
+    {
+        /// <summary>今のフレームでのカラーマトリクス。その場で処理できないときは null。</summary>
+        float[]? Matrix(EffectArgs args);
+    }
+
     public static void Register(IVideoEffect effect) => Map[effect.Id] = effect;
     public static IVideoEffect? Find(string id) => Map.TryGetValue(id, out var e) ? e : null;
 
@@ -29,6 +36,12 @@ public static class Effects
     {
         // 極端なサイズでメモリを使い切らないようにする
         int w = Math.Min(s.Width + padL + padR, 16384), h = Math.Min(s.Height + padT + padB, 16384);
+        if (a.Context.Gpu == null)
+        {
+            // CPU 描画: 横帯に分けて複数スレッドで描く
+            var parallel = a.Context.Own(PixelOps.DrawParallel(w, h, c => draw(c, padL, padT)));
+            return new Sprite(parallel, s.Cx + padL, s.Cy + padT);
+        }
         using var surface = a.Context.CreateSurface(w, h);
         if (surface == null) return s;
         surface.Canvas.Clear(SKColors.Transparent);
@@ -39,6 +52,40 @@ public static class Effects
 
     internal static Sprite WithPaint(Sprite s, EffectArgs a, SKPaint paint, int pad = 0) =>
         Redraw(s, a, pad, pad, pad, pad, (c, x, y) => c.DrawImage(s.Image, x, y, paint));
+
+    /// <summary>
+    /// CPU 描画のとき: 画像を複製して、ピクセルを直接書き換える (PixelOps は複数スレッドで動く)。
+    /// GPU 描画中や形式が合わないときは null を返すので、呼び出し側は Skia の描画で処理する。
+    /// </summary>
+    internal static Sprite? WithPixels(Sprite s, EffectArgs a, Action<IntPtr, int, int, int> op)
+    {
+        if (a.Context.Gpu != null) return null;
+        var bmp = new SKBitmap(Info(s.Width, s.Height));
+        if (!s.Image.ReadPixels(bmp.Info, bmp.GetPixels(), bmp.RowBytes, 0, 0)) { bmp.Dispose(); return null; }
+        op(bmp.GetPixels(), bmp.Width, bmp.Height, bmp.RowBytes);
+        bmp.SetImmutable();   // これ以降は書き換えないので、SKImage が複製せずに中身を共有できる
+        var img = a.Context.Own(SKImage.FromBitmap(bmp));
+        bmp.Dispose();
+        return new Sprite(img, s.Cx, s.Cy);
+    }
+
+    /// <summary>カラーマトリクスをかける。CPU 描画では PixelOps、GPU 描画では Skia のカラーフィルタを使う。</summary>
+    internal static Sprite ApplyMatrix(Sprite s, EffectArgs a, float[] m)
+    {
+        if (PixelOps.CanApply(m) && WithPixels(s, a, (px, w, h, rb) => PixelOps.ColorMatrix(px, w, h, rb, m)) is { } fast) return fast;
+        using var cf = SKColorFilter.CreateColorMatrix(m);
+        using var paint = new SKPaint { ColorFilter = cf };
+        return WithPaint(s, a, paint);
+    }
+
+    /// <summary>ぼかしを何分の 1 の大きさで計算するか。大きくぼかすときは縮小してから計算しても見分けがつかない。</summary>
+    internal static int BlurDownscale(float sigma)
+    {
+        int k = 1;
+        // 縮小後のぼかしの強さ (sigma / k) が 3 以上残る範囲でだけ縮小する。これより粗くすると差が見えてくる
+        while (k < 8 && sigma / (k * 2) >= 3f) k *= 2;
+        return k;
+    }
 
     // 4x5 のカラーマトリクス (平行移動は 0..1)
     internal static float[] Identity() => new float[] { 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0 };
@@ -85,7 +132,7 @@ public static class Effects
         };
     }
 
-    private sealed class ColorCorrect : IVideoEffect
+    private sealed class ColorCorrect : IVideoEffect, IMatrixEffect
     {
         public string Id => "filter.color";
         public Sprite Apply(Sprite s, EffectArgs a)
@@ -101,9 +148,20 @@ public static class Effects
             m = Concat(new float[] { gain, 0, 0, 0, 0, 0, gain, 0, 0, 0, 0, 0, gain, 0, 0, 0, 0, 0, 1, 0 }, m);
             if (Math.Abs(sat - 1) > 1e-4) m = Concat(Saturation(sat), m);
             if (Math.Abs(hue) > 1e-4) m = Concat(HueRotate(hue), m);
-            using var cf = SKColorFilter.CreateColorMatrix(m);
-            using var paint = new SKPaint { ColorFilter = cf };
-            return WithPaint(s, a, paint);
+            return ApplyMatrix(s, a, m);
+        }
+
+        public float[]? Matrix(EffectArgs a)
+        {
+            float brightness = (a.Track("brightness") - 100) / 100f, contrast = a.Track("contrast") / 100f;
+            float gain = a.Track("luminance") / 100f, sat = a.Track("saturation") / 100f, hue = a.Track("hue");
+            var m = Identity();
+            float off = 0.5f * (1 - contrast) + brightness;
+            m = Concat(new float[] { contrast, 0, 0, 0, off, 0, contrast, 0, 0, off, 0, 0, contrast, 0, off, 0, 0, 0, 1, 0 }, m);
+            m = Concat(new float[] { gain, 0, 0, 0, 0, 0, gain, 0, 0, 0, 0, 0, gain, 0, 0, 0, 0, 0, 1, 0 }, m);
+            if (Math.Abs(sat - 1) > 1e-4) m = Concat(Saturation(sat), m);
+            if (Math.Abs(hue) > 1e-4) m = Concat(HueRotate(hue), m);
+            return m;
         }
     }
 
@@ -116,6 +174,41 @@ public static class Effects
             if (radius <= 0) return s;
             float sigma = radius / 2f;
             int pad = a.Check("fixed") || a.IsFrameBuffer ? 0 : (int)MathF.Ceiling(radius * 1.5f);
+            int k = BlurDownscale(sigma);
+            if (k > 1)
+            {
+                // 縮小 → ぼかし → 拡大。計算するピクセル数が 1/k² になる
+                int pw = s.Width + pad * 2, ph = s.Height + pad * 2;
+                int sw = Math.Max(1, (pw + k - 1) / k), sh = Math.Max(1, (ph + k - 1) / k);
+                float ss = sigma / k;
+                using var sf = a.IsFrameBuffer ? SKImageFilter.CreateBlur(ss, ss, SKShaderTileMode.Clamp) : SKImageFilter.CreateBlur(ss, ss);
+                using var down = new SKPaint { FilterQuality = SKFilterQuality.Medium };
+                using var bp = new SKPaint { ImageFilter = sf };
+                if (a.Context.Gpu == null)
+                {
+                    // 1. 縮小  2. 縮小した絵をぼかす  3. 元の大きさに戻す (どれも帯に分けて並列に描く)
+                    using var smallCpu = PixelOps.DrawParallel(sw, sh, c => { c.Scale(1f / k); c.DrawImage(s.Image, pad, pad, down); });
+                    using var blurredCpu = PixelOps.DrawParallel(sw, sh, c => c.DrawImage(smallCpu, 0, 0, bp));
+                    using var upCpu = new SKPaint { FilterQuality = SKFilterQuality.Low, BlendMode = SKBlendMode.Src };
+                    return Redraw(s, a, pad, pad, pad, pad, (c, _, _) => c.DrawImage(blurredCpu, SKRect.Create(sw, sh), SKRect.Create(0, 0, sw * k, sh * k), upCpu));
+                }
+                using var small = a.Context.CreateSurface(sw, sh);
+                using var blurred = a.Context.CreateSurface(sw, sh);
+                if (small != null && blurred != null)
+                {
+                    var sc = small.Canvas;
+                    sc.Clear(SKColors.Transparent);
+                    sc.Scale(1f / k);
+                    sc.DrawImage(s.Image, pad, pad, down);
+                    using var smallImage = small.Snapshot();
+                    blurred.Canvas.Clear(SKColors.Transparent);
+                    blurred.Canvas.DrawImage(smallImage, 0, 0, bp);
+                    using var blurredImage = blurred.Snapshot();
+                    // 3. 元の大きさに戻す
+                    using var up = new SKPaint { FilterQuality = SKFilterQuality.Low, BlendMode = SKBlendMode.Src };
+                    return Redraw(s, a, pad, pad, pad, pad, (c, _, _) => c.DrawImage(blurredImage, SKRect.Create(sw, sh), SKRect.Create(0, 0, sw * k, sh * k), up));
+                }
+            }
             using var f = a.IsFrameBuffer
                 ? SKImageFilter.CreateBlur(sigma, sigma, SKShaderTileMode.Clamp)
                 : SKImageFilter.CreateBlur(sigma, sigma);
@@ -224,42 +317,19 @@ public static class Effects
 
             var bmp = new SKBitmap(Info(s.Width, s.Height));
             if (!s.Image.ReadPixels(bmp.Info, bmp.GetPixels(), bmp.RowBytes, 0, 0)) { bmp.Dispose(); return s; }
-            byte* p = (byte*)bmp.GetPixels();
-            int count = s.Width * s.Height;
-            for (int i = 0; i < count; i++, p += 4)
-            {
-                byte al = p[3];
-                if (al == 0) continue;
-                // 乗算済みアルファを戻してから色を調べる
-                float inv = 255f / al;
-                float b = Math.Min(255, p[0] * inv), g = Math.Min(255, p[1] * inv), r = Math.Min(255, p[2] * inv);
-                float max = Math.Max(r, Math.Max(g, b)), min = Math.Min(r, Math.Min(g, b)), d = max - min;
-                float sat = max <= 0 ? 0 : d / max * 100f;
-                float hue;
-                if (d <= 0) hue = 0;
-                else if (max == r) hue = 60 * (((g - b) / d) % 6);
-                else if (max == g) hue = 60 * ((b - r) / d + 2);
-                else hue = 60 * ((r - g) / d + 4);
-                if (hue < 0) hue += 360;
-                float dh = Math.Abs(hue - kh); if (dh > 180) dh = 360 - dh;
-                float ds = Math.Abs(sat - ks);
-                // 0 = キー色そのもの, 1 以上 = 範囲外
-                float dist = Math.Max(hueRange <= 0 ? (dh > 0 ? 2 : 0) : dh / hueRange, satRange <= 0 ? (ds > 0 ? 2 : 0) : ds / satRange);
-                float keep = Math.Clamp((dist - 1) / edge + 1, 0, 1);
-                if (keep >= 1) continue;
-                p[0] = (byte)(p[0] * keep); p[1] = (byte)(p[1] * keep); p[2] = (byte)(p[2] * keep); p[3] = (byte)(al * keep);
-            }
+            if (a.Context.Draft) PixelOps.ChromaKeyFast(bmp.GetPixels(), bmp.Width, bmp.Height, bmp.RowBytes, kh, ks, hueRange, satRange, edge);
+            else PixelOps.ChromaKey(bmp.GetPixels(), bmp.Width, bmp.Height, bmp.RowBytes, kh, ks, hueRange, satRange, edge);
             bmp.SetImmutable();
             var img = a.Context.Own(SKImage.FromBitmap(bmp));
-            a.Context.Own(bmp);
+            bmp.Dispose();
             return new Sprite(img, s.Cx, s.Cy);
         }
     }
 
-    private sealed class Mono : IVideoEffect
+    private sealed class Mono : IVideoEffect, IMatrixEffect
     {
         public string Id => "filter.mono";
-        public Sprite Apply(Sprite s, EffectArgs a)
+        public float[]? Matrix(EffectArgs a)
         {
             float t = Math.Clamp(a.Track("strength") / 100f, 0, 1);
             var c = a.Color("color");
@@ -271,10 +341,10 @@ public static class Effects
             var id = Identity();
             var m = new float[20];
             for (int i = 0; i < 20; i++) m[i] = id[i] + (target[i] - id[i]) * t;
-            using var cf = SKColorFilter.CreateColorMatrix(m);
-            using var paint = new SKPaint { ColorFilter = cf };
-            return WithPaint(s, a, paint);
+            return m;
         }
+
+        public Sprite Apply(Sprite s, EffectArgs a) => ApplyMatrix(s, a, Matrix(a)!);
     }
 
     private sealed class Flip : IVideoEffect

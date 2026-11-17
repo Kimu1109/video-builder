@@ -16,6 +16,8 @@ public sealed class RenderContext
 {
     public required Project Project { get; init; }
     public required int Frame { get; init; }
+    /// <summary>プレビュー用の描画か。true のとき、効果は見た目がほぼ変わらない範囲で速い近似を使ってよい。</summary>
+    public bool Draft { get; init; }
     /// <summary>GPU で描くときの Skia コンテキスト。null なら CPU で描く。</summary>
     public GRContext? Gpu { get; init; }
 

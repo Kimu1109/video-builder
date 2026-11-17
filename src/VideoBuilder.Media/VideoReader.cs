@@ -21,7 +21,10 @@ public sealed unsafe class VideoReader : IDisposable
     private bool _converted;
     private bool _draining;
     private bool _eof;
-    private byte[] _buffer = Array.Empty<byte>();
+    private byte* _native;          // 変換済みフレーム (BGRA)。アンマネージドなので GC で動かない
+    private int _nativeSize;
+    private bool _nativeValid;
+    private byte[] _managed = Array.Empty<byte>();
 
     public string Path { get; }
     public int Width { get; }
@@ -71,7 +74,20 @@ public sealed unsafe class VideoReader : IDisposable
     /// </summary>
     public byte[]? GetFrame(double seconds)
     {
-        if (_dec == null) return null;
+        var p = GetFramePointer(seconds);
+        if (p == IntPtr.Zero) return null;
+        if (_managed.Length != _nativeSize) _managed = new byte[_nativeSize];
+        System.Runtime.InteropServices.Marshal.Copy(p, _managed, 0, _nativeSize);
+        return _managed;
+    }
+
+    /// <summary>
+    /// seconds の位置のフレーム (BGRA, 1 行 Width*4 バイト) を指すポインタを返す。複製しないので速い。
+    /// 中身は次に別のフレームを取り出すと書き換わる。取り出せなければ IntPtr.Zero。
+    /// </summary>
+    public IntPtr GetFramePointer(double seconds)
+    {
+        if (_dec == null) return IntPtr.Zero;
         long target = _startPts + (long)Math.Floor(Math.Max(0, seconds) / ffmpeg.av_q2d(_tb) + 0.5 * 1e-6);
         long seekAhead = (long)(2.0 / ffmpeg.av_q2d(_tb));
 
@@ -82,12 +98,15 @@ public sealed unsafe class VideoReader : IDisposable
                 Seek(target);
             while (!(_hasFrame && target < _curPts + _curDur))
             {
+                // 末尾が近いときは、今のフレームを先に変換しておく (末尾に達するとデコーダ側のフレームが消えるため)
+                if (_draining && _hasFrame && !_converted) Convert();
                 if (!DecodeNext()) break;   // 末尾: 最後のフレームをそのまま使う
             }
         }
-        if (!_hasFrame) return null;
+        if (!_hasFrame) return IntPtr.Zero;
         if (!_converted) Convert();
-        return _buffer;
+        // 変換できなかった場合 (末尾を過ぎた後など) は、最後に変換できたフレームを返す
+        return _nativeValid ? (IntPtr)_native : IntPtr.Zero;
     }
 
     private void Seek(long target)
@@ -136,14 +155,18 @@ public sealed unsafe class VideoReader : IDisposable
             AVPixelFormat.AV_PIX_FMT_BGRA, ffmpeg.SWS_BILINEAR, null, null, null);
         if (_sws == null) return;
         int size = Width * Height * 4;
-        if (_buffer.Length != size) _buffer = new byte[size];
-        fixed (byte* p = _buffer)
+        if (_native == null || _nativeSize != size)
         {
-            var dst = new byte*[4] { p, null, null, null };
-            var stride = new int[4] { Width * 4, 0, 0, 0 };
-            ffmpeg.sws_scale(_sws, _frame->data, _frame->linesize, 0, h, dst, stride);
+            if (_native != null) System.Runtime.InteropServices.NativeMemory.Free(_native);
+            _native = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc((nuint)size);
+            _nativeSize = size;
+            _nativeValid = false;
         }
+        var dst = new byte*[4] { _native, null, null, null };
+        var stride = new int[4] { Width * 4, 0, 0, 0 };
+        ffmpeg.sws_scale(_sws, _frame->data, _frame->linesize, 0, h, dst, stride);
         _converted = true;
+        _nativeValid = true;
     }
 
     public void Dispose()
@@ -153,5 +176,6 @@ public sealed unsafe class VideoReader : IDisposable
         if (_sws != null) { ffmpeg.sws_freeContext(_sws); _sws = null; }
         if (_dec != null) { var d = _dec; ffmpeg.avcodec_free_context(&d); _dec = null; }
         if (_fmt != null) { var f = _fmt; ffmpeg.avformat_close_input(&f); _fmt = null; }
+        if (_native != null) { System.Runtime.InteropServices.NativeMemory.Free(_native); _native = null; }
     }
 }

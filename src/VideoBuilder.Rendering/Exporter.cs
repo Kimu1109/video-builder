@@ -56,37 +56,87 @@ public static class Exporter
         s.Width = w; s.Height = h; s.Fps = project.Settings.Fps; s.SampleRate = project.Settings.SampleRate;
         using var mixer = new AudioMixer();
         using var writer = new MediaWriter(s);
-        var audio = Array.Empty<float>();
+        bool hasVideo = writer.HasVideo, hasAudio = writer.HasAudio;
+
+        // 描画 (このスレッド) とエンコード (別スレッド) を同時に進める。
+        // 描いたフレームは数枚ぶんだけ待ち行列に置き、エンコードが追いつかなければ描画側が待つ
+        const int QueueSize = 3;
+        var pool = new System.Collections.Concurrent.ConcurrentBag<SKBitmap>();
+        var queue = new System.Collections.Concurrent.BlockingCollection<(SKBitmap? Frame, float[]? Audio)>(QueueSize);
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        Exception? encodeError = null;
+        var encoder = Task.Run(() =>
+        {
+            try
+            {
+                int done = 0;
+                foreach (var (frame, audio) in queue.GetConsumingEnumerable())
+                {
+                    if (frame != null)
+                    {
+                        unsafe
+                        {
+                            writer.WriteVideoFrame(new ReadOnlySpan<byte>((void*)frame.GetPixels(), frame.RowBytes * h), frame.RowBytes);
+                        }
+                        pool.Add(frame);
+                    }
+                    if (audio != null) writer.WriteAudio(audio);
+                    progress?.Report((++done, total));
+                }
+                writer.Finish();
+            }
+            catch (Exception ex)
+            {
+                encodeError = ex;
+                stop.Cancel();   // 描画側を止める
+            }
+        });
+
         bool ok = false;
         try
         {
-            for (int i = 0; i < total; i++)
+            try
             {
-                cancel.ThrowIfCancellationRequested();
-                int frame = req.StartFrame + i;
-                if (writer.HasVideo)
+                for (int i = 0; i < total; i++)
                 {
-                    engine.RenderToBitmap(project, scene, frame, bitmap);
-                    unsafe
+                    stop.Token.ThrowIfCancellationRequested();
+                    int frame = req.StartFrame + i;
+                    SKBitmap? target = null;
+                    if (hasVideo)
                     {
-                        writer.WriteVideoFrame(new ReadOnlySpan<byte>((void*)bitmap.GetPixels(), bitmap.RowBytes * h), bitmap.RowBytes);
+                        if (!pool.TryTake(out target)) target = new SKBitmap(Effects.Info(w, h));
+                        engine.RenderToBitmap(project, scene, frame, target);
                     }
+                    float[]? audio = null;
+                    if (hasAudio)
+                    {
+                        long from = project.FrameToSample(frame), to = project.FrameToSample(frame + 1);
+                        audio = new float[(int)(to - from) * 2];
+                        mixer.Mix(project, scene, from, audio);
+                    }
+                    queue.Add((target, audio), stop.Token);
                 }
-                if (writer.HasAudio)
-                {
-                    long from = project.FrameToSample(frame), to = project.FrameToSample(frame + 1);
-                    int n = (int)(to - from) * 2;
-                    if (audio.Length != n) audio = new float[n];
-                    mixer.Mix(project, scene, from, audio);
-                    writer.WriteAudio(audio);
-                }
-                progress?.Report((i + 1, total));
             }
-            writer.Finish();
+            finally
+            {
+                queue.CompleteAdding();
+                // エラーや中止のときも、エンコード側が終わるのを待ってから片付ける
+                if (stop.IsCancellationRequested) while (queue.TryTake(out var rest)) rest.Frame?.Dispose();
+                encoder.Wait();
+            }
+            if (encodeError != null) throw encodeError;
+            cancel.ThrowIfCancellationRequested();
             ok = true;
+        }
+        catch (OperationCanceledException) when (encodeError != null)
+        {
+            throw encodeError;
         }
         finally
         {
+            foreach (var b in pool) b.Dispose();
+            while (queue.TryTake(out var rest)) rest.Frame?.Dispose();
+            queue.Dispose();
             if (!ok)
             {
                 writer.Dispose();

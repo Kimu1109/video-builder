@@ -12,12 +12,20 @@ public sealed class RenderEngine : IDisposable
 {
     private const int MaxSceneDepth = 4;
 
-    public MediaCache Media { get; } = new();
+    public MediaCache Media { get; }
     /// <summary>GPU 描画に使うコンテキスト。null なら CPU 描画。</summary>
     public GpuContext? Gpu { get; }
     private SKSurface? _gpuSurface;
 
-    public RenderEngine(GpuContext? gpu = null) => Gpu = gpu;
+    public RenderEngine(GpuContext? gpu = null)
+    {
+        Gpu = gpu;
+        // CPU 描画では動画フレームを複製せずに使う。GPU 描画は描画が後回しになることがあるので複製する
+        Media = new MediaCache(zeroCopy: gpu == null);
+    }
+
+    /// <summary>プレビュー用の軽い描画にする (拡大縮小の補間を簡略化)。出力では false のままにする。</summary>
+    public bool Draft { get; set; }
 
     // テキスト・図形は、パラメータが同じ間は作り直さない
     private readonly Dictionary<string, SKImage?> _generated = new();
@@ -63,7 +71,7 @@ public sealed class RenderEngine : IDisposable
     /// <summary>surface いっぱいにフレームを描く。surface の大きさがプロジェクトより小さければ縮小して描く。</summary>
     public void Render(Project project, Scene scene, int frame, SKSurface surface)
     {
-        var ctx = new RenderContext { Project = project, Frame = frame, Gpu = _gpuSurface != null && ReferenceEquals(surface, _gpuSurface) ? Gpu?.Context : null };
+        var ctx = new RenderContext { Project = project, Frame = frame, Draft = Draft, Gpu = _gpuSurface != null && ReferenceEquals(surface, _gpuSurface) ? Gpu?.Context : null };
         try
         {
             var canvas = surface.Canvas;
@@ -116,7 +124,7 @@ public sealed class RenderEngine : IDisposable
     private void RenderScene(RenderContext root, Scene scene, int frame, SKSurface surface, int depth)
     {
         var project = root.Project;
-        var ctx = depth == 0 ? root : new RenderContext { Project = project, Frame = frame, Gpu = root.Gpu };
+        var ctx = depth == 0 ? root : new RenderContext { Project = project, Frame = frame, Draft = root.Draft, Gpu = root.Gpu };
         var canvas = surface.Canvas;
         int W = project.Settings.Width, H = project.Settings.Height;
         var groups = new List<GroupState>();
@@ -161,7 +169,8 @@ public sealed class RenderEngine : IDisposable
                         if (src == null) break;
                         var sprite = Sprite.Centered(src);
                         ctx.Modifiers = DrawModifiers.None;
-                        for (int i = 1; i < obj.Effects.Count; i++)
+                        int next = ApplyCachedFilters(ctx, obj, bounds, frame, depth, ref sprite);
+                        for (int i = next; i < obj.Effects.Count; i++)
                         {
                             var e = obj.Effects[i];
                             if (!e.Enabled || e.Definition.Category != EffectCategory.Filter) continue;
@@ -169,7 +178,7 @@ public sealed class RenderEngine : IDisposable
                             if (fx != null)
                                 sprite = fx.Apply(sprite, new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx });
                         }
-                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, cameras, W, H, depth == 0 ? LastQuads : null, ctx.Modifiers);
+                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, cameras, W, H, depth == 0 ? LastQuads : null, ctx.Modifiers, Draft);
                         break;
                     }
                 }
@@ -182,7 +191,7 @@ public sealed class RenderEngine : IDisposable
     }
 
     private static void DrawSprite(SKCanvas canvas, Sprite sprite, TimelineObject obj, int[] bounds, int frame,
-        List<GroupState> groups, List<CameraState> cameras, int W, int H, List<(string, SKPoint[])>? quads, DrawModifiers mod)
+        List<GroupState> groups, List<CameraState> cameras, int W, int H, List<(string, SKPoint[])>? quads, DrawModifiers mod, bool draft)
     {
         var draw = obj.Draw;
         float x = 0, y = 0, z = 0, scale = 1, rot = 0, rx = 0, ry = 0, alpha = 1;
@@ -248,7 +257,7 @@ public sealed class RenderEngine : IDisposable
             using var paint = new SKPaint
             {
                 Color = SKColors.White.WithAlpha((byte)MathF.Round(alpha * 255)),
-                FilterQuality = SKFilterQuality.High,
+                FilterQuality = QualityFor(canvas.TotalMatrix, draft),
                 IsAntialias = true,
             };
             if (blend == 2)
@@ -267,6 +276,126 @@ public sealed class RenderEngine : IDisposable
             }
         }
         canvas.Restore();
+    }
+
+    /// <summary>
+    /// 拡大縮小の補間方法を選ぶ。等倍で動かすだけなら補間は不要。プレビューでは軽い方法を使い、
+    /// 出力では常に高品質にする。
+    /// </summary>
+    private static SKFilterQuality QualityFor(SKMatrix m, bool draft)
+    {
+        bool flat = m.Persp0 == 0 && m.Persp1 == 0 && m.SkewX == 0 && m.SkewY == 0;
+        if (flat && Math.Abs(m.ScaleX - 1) < 1e-4f && Math.Abs(m.ScaleY - 1) < 1e-4f)
+        {
+            bool aligned = Math.Abs(m.TransX - MathF.Round(m.TransX)) < 1e-3f && Math.Abs(m.TransY - MathF.Round(m.TransY)) < 1e-3f;
+            return aligned ? SKFilterQuality.None : SKFilterQuality.Low;
+        }
+        if (!draft) return SKFilterQuality.High;
+        // 半分より小さくするときだけ、縮小用の中間画像 (ミップマップ) を使う
+        float sx = MathF.Sqrt(m.ScaleX * m.ScaleX + m.SkewY * m.SkewY), sy = MathF.Sqrt(m.ScaleY * m.ScaleY + m.SkewX * m.SkewX);
+        return Math.Min(sx, sy) < 0.5f ? SKFilterQuality.Medium : SKFilterQuality.Low;
+    }
+
+    // ---------------- フィルタ結果のキャッシュ ----------------
+
+    /// <summary>入力とパラメータだけで結果が決まる (時刻やほかの状態に左右されない) 組み込みフィルタ。</summary>
+    private static readonly HashSet<string> PureFilters = new()
+    {
+        "filter.color", "filter.blur", "filter.border", "filter.shadow", "filter.clip", "filter.mosaic", "filter.chromakey", "filter.mono", "filter.flip",
+    };
+
+    private sealed class FilterCacheEntry
+    {
+        public string Signature = "";
+        public Sprite Sprite;
+        public long LastUsed;
+    }
+
+    private readonly Dictionary<string, FilterCacheEntry> _filterCache = new();
+    private readonly System.Text.StringBuilder _signature = new();
+    private const int MaxFilterCacheEntries = 48;
+
+    /// <summary>フィルタ結果のキャッシュを使った回数 / 作り直した回数 (計測用)。</summary>
+    public (long Hits, long Misses) FilterCacheStats { get; private set; }
+
+    /// <summary>
+    /// オブジェクトの先頭から続く「結果が入力だけで決まるフィルタ」をまとめて処理する。
+    /// 元の絵とパラメータが前のフレームと同じなら、前回の結果をそのまま使う (動かないテロップの縁取りなどを毎フレーム計算しない)。
+    /// 戻り値は、まだ処理していない最初の効果の番号。
+    /// </summary>
+    private int ApplyCachedFilters(RenderContext ctx, TimelineObject obj, int[] bounds, int frame, int depth, ref Sprite sprite)
+    {
+        int end = 1;
+        bool any = false;
+        while (end < obj.Effects.Count)
+        {
+            var e = obj.Effects[end];
+            if (e.Definition.Category != EffectCategory.Filter) break;
+            if (e.Enabled)
+            {
+                if (!PureFilters.Contains(e.DefinitionId)) break;
+                any = true;
+            }
+            end++;
+        }
+        if (!any) return 1;
+
+        // 署名: 元の絵 + 各フィルタのパラメータの今の値
+        var sb = _signature.Clear();
+        sb.Append(sprite.Image.UniqueId).Append('|').Append(sprite.Width).Append('x').Append(sprite.Height);
+        for (int i = 1; i < end; i++)
+        {
+            var e = obj.Effects[i];
+            if (!e.Enabled) continue;
+            sb.Append('|').Append(e.DefinitionId);
+            foreach (var d in e.Definition.Params)
+            {
+                sb.Append(';');
+                if (d.Kind == ParamKind.Track) sb.Append(e.Eval(d.Key, bounds, frame).ToString("R", System.Globalization.CultureInfo.InvariantCulture));
+                else sb.Append(e.GetString(d.Key));
+            }
+        }
+        string signature = sb.ToString();
+        string key = depth == 0 ? obj.Id : obj.Id + "@" + depth;
+        _tick++;
+        if (_filterCache.TryGetValue(key, out var entry) && entry.Signature == signature)
+        {
+            entry.LastUsed = _tick;
+            sprite = entry.Sprite;
+            FilterCacheStats = (FilterCacheStats.Hits + 1, FilterCacheStats.Misses);
+            return end;
+        }
+
+        var source = sprite;
+        for (int i = 1; i < end; i++)
+        {
+            var e = obj.Effects[i];
+            if (!e.Enabled) continue;
+            var fx = Effects.Find(e.DefinitionId);
+            if (fx != null) sprite = fx.Apply(sprite, new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx });
+        }
+        FilterCacheStats = (FilterCacheStats.Hits, FilterCacheStats.Misses + 1);
+        if (ReferenceEquals(sprite.Image, source.Image)) return end;   // 何も変わらなかった (強さ 0 など)
+
+        // 結果の画像を「このフレームで捨てるもの」から外して、キャッシュの持ち物にする
+        if (!ctx.Temporaries.Remove(sprite.Image)) return end;
+        if (entry != null) entry.Sprite.Image.Dispose();
+        else
+        {
+            if (_filterCache.Count >= MaxFilterCacheEntries) TrimFilterCache();
+            _filterCache[key] = entry = new FilterCacheEntry();
+        }
+        entry.Signature = signature; entry.Sprite = sprite; entry.LastUsed = _tick;
+        return end;
+    }
+
+    private void TrimFilterCache()
+    {
+        foreach (var k in _filterCache.OrderBy(kv => kv.Value.LastUsed).Take(MaxFilterCacheEntries / 2).Select(kv => kv.Key).ToList())
+        {
+            _filterCache[k].Sprite.Image.Dispose();
+            _filterCache.Remove(k);
+        }
     }
 
     private static SKBlendMode BlendModeOf(int index) => index switch
@@ -288,22 +417,51 @@ public sealed class RenderEngine : IDisposable
     /// <summary>フィルタオブジェクト: それまでに描いた画面全体に効果をかける。</summary>
     private static void ApplyToFrameBuffer(RenderContext ctx, TimelineObject obj, int[] bounds, SKSurface surface)
     {
-        var sprite = Sprite.Centered(ctx.Own(surface.Snapshot()));
-        var original = sprite;
+        var canvas = surface.Canvas;
+        // pending: 効果をかけている途中の画面。null のときは、画面 (surface) そのものが最新
+        Sprite? pending = null;
+        float originX = 0, originY = 0;
+
+        void WriteBack()
+        {
+            if (pending is not { } p) return;
+            canvas.Save();
+            canvas.ResetMatrix();
+            using var paint = new SKPaint { BlendMode = SKBlendMode.Src };
+            canvas.DrawImage(p.Image, originX - p.Cx, originY - p.Cy, paint);
+            canvas.Restore();
+            pending = null;
+        }
+
         foreach (var e in obj.Effects)
         {
             if (!e.Enabled || e.Definition.Category != EffectCategory.Filter) continue;
             var fx = Effects.Find(e.DefinitionId);
-            if (fx != null)
-                sprite = fx.Apply(sprite, new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx, IsFrameBuffer = true });
+            if (fx == null) continue;
+            var args = new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx, IsFrameBuffer = true };
+
+            // 色の変換だけの効果は、CPU 描画なら画面のピクセルをその場で書き換える (複製も描き戻しも不要)
+            if (ctx.Gpu == null && fx is Effects.IMatrixEffect matrixEffect && matrixEffect.Matrix(args) is { } m && PixelOps.CanApply(m))
+            {
+                WriteBack();
+                using var pixmap = surface.PeekPixels();
+                if (pixmap != null && pixmap.ColorType == SKColorType.Bgra8888)
+                {
+                    PixelOps.ColorMatrix(pixmap.GetPixels(), pixmap.Width, pixmap.Height, pixmap.RowBytes, m);
+                    continue;
+                }
+            }
+            if (pending == null)
+            {
+                var snap = Sprite.Centered(ctx.Own(surface.Snapshot()));
+                originX = snap.Cx; originY = snap.Cy;
+                pending = snap;
+            }
+            var before = pending.Value;
+            var after = fx.Apply(before, args);
+            pending = after;
         }
-        if (ReferenceEquals(sprite.Image, original.Image)) return;
-        var canvas = surface.Canvas;
-        canvas.Save();
-        canvas.ResetMatrix();
-        using var paint = new SKPaint { BlendMode = SKBlendMode.Src };
-        canvas.DrawImage(sprite.Image, original.Cx - sprite.Cx, original.Cy - sprite.Cy, paint);
-        canvas.Restore();
+        WriteBack();
     }
 
     private SKImage? GetSource(RenderContext ctx, TimelineObject obj, int[] bounds, int frame, int depth)
@@ -386,6 +544,8 @@ public sealed class RenderEngine : IDisposable
     public void Dispose()
     {
         Gpu?.MakeCurrent();
+        foreach (var e in _filterCache.Values) e.Sprite.Image.Dispose();
+        _filterCache.Clear();
         _gpuSurface?.Dispose();
         _gpuSurface = null;
         foreach (var img in _generated.Values) img?.Dispose();

@@ -83,7 +83,7 @@ public sealed class PreviewService : IDisposable
             }
             else description = $"GPU ({gpu.Renderer})";
         }
-        _engine = new RenderEngine(gpu);
+        _engine = new RenderEngine(gpu) { Draft = true };
         IsGpuActive = gpu != null;
         BackendDescription = description;
         Dispatcher.UIThread.Post(() => BackendChanged?.Invoke());
