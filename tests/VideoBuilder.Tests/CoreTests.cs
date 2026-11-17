@@ -355,3 +355,67 @@ public class AliasAndRangeTests
     }
 }
 
+public class SnapshotReuseTests
+{
+    [Fact]
+    public void Read_snapshot_is_shared_until_something_changes_and_is_never_the_live_project()
+    {
+        var s = new EditorSession();
+        var o = s.AddObject(EffectRegistry.Shape, 0, 0, 30)!;
+        var a = s.SnapshotForRead();
+        Assert.NotSame(s.Project, a);
+        Assert.Same(a, s.SnapshotForRead());                     // 変更がなければ複製し直さない
+
+        // 編集しても、渡し済みの複製は変わらない
+        s.Edit("move", () => s.Scene.Find(o.Id)!.SetRange(10, 39));
+        Assert.Equal(0, a.Root.Objects[0].Start);
+        var b = s.SnapshotForRead();
+        Assert.NotSame(a, b);
+        Assert.Equal(10, b.Root.Objects[0].Start);
+
+        // 編集の途中は、その時点の内容を返す
+        s.BeginEdit("drag");
+        s.Scene.Find(o.Id)!.SetRange(20, 49);
+        Assert.Equal(20, s.SnapshotForRead().Root.Objects[0].Start);
+        s.CancelEdit();
+        Assert.Equal(10, s.Scene.Find(o.Id)!.Start);
+        Assert.Equal(10, s.SnapshotForRead().Root.Objects[0].Start);
+
+        // 履歴に残さない変更 (NotifyChanged) のあとは作り直す
+        s.Scene.Find(o.Id)!.Enabled = false;
+        s.NotifyChanged();
+        Assert.False(s.SnapshotForRead().Root.Objects[0].Enabled);
+    }
+
+    [Fact]
+    public void Undo_chain_stays_correct_when_snapshots_are_reused_between_edits()
+    {
+        var s = new EditorSession();
+        var o = s.AddObject(EffectRegistry.Shape, 0, 0, 30)!;
+        for (int i = 1; i <= 5; i++) { int start = i * 10; s.Edit("move", () => s.Scene.Find(o.Id)!.SetRange(start, start + 29)); }
+        s.SnapshotForRead();
+        s.BeginEdit("cancelled"); s.Scene.Find(o.Id)!.SetRange(500, 529); s.CancelEdit();
+        s.Edit("after cancel", () => s.Scene.Find(o.Id)!.SetRange(60, 89));
+        var seen = new List<int>();
+        while (s.History.CanUndo) { s.Undo(); if (s.Scene.Objects.Count > 0) seen.Add(s.Scene.Objects[0].Start); }
+        Assert.Equal(new[] { 50, 40, 30, 20, 10, 0 }, seen);
+        for (int i = 0; i < 7; i++) s.Redo();
+        Assert.Equal(60, s.Scene.Objects[0].Start);
+        s.Undo();
+        s.Edit("branch", () => s.Scene.Objects[0].SetRange(77, 106));   // やり直しを捨てて別の編集
+        s.Undo();
+        Assert.Equal(50, s.Scene.Objects[0].Start);
+    }
+
+    [Fact]
+    public void Grid_changes_are_undoable()
+    {
+        var s = new EditorSession();
+        s.Edit("grid", () => s.Project.Grid = new GridSettings { Mode = GridMode.Bpm, Bpm = 150 });
+        s.Undo();
+        Assert.Equal(GridMode.Time, s.Project.Grid.Mode);
+        s.Redo();
+        Assert.Equal(150, s.Project.Grid.Bpm);
+    }
+}
+

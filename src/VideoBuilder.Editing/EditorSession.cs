@@ -71,6 +71,7 @@ public sealed class EditorSession
 
     private void ResetState()
     {
+        _clean = null;
         History.Clear();
         _sceneId = Project.Root.Id;
         _frame = 0;
@@ -158,21 +159,42 @@ public sealed class EditorSession
     public void BeginEdit(string description)
     {
         if (_editBefore != null) return;
-        _editBefore = Project.Clone();
+        // 直前の編集の「編集後」の複製が今の状態と同じなら、それを「編集前」として使い回す (複製を 1 回減らす)
+        _editBefore = _clean ?? Project.Clone();
+        _clean = null;
         _editDescription = description;
+    }
+
+    // 今のプロジェクトと同じ内容の、書き換えない複製。編集のたびに作り直さずに済むよう覚えておく
+    private Project? _clean;
+
+    /// <summary>
+    /// 今の状態を読むだけの用途 (プレビューの描画など) に渡す複製を返す。
+    /// 返したものは書き換えないこと (取り消し履歴と共有している)。
+    /// </summary>
+    public Project SnapshotForRead()
+    {
+        if (_editBefore != null) return Project.Clone();   // 編集の途中は毎回作る
+        return _clean ??= Project.Clone();
     }
 
     public bool IsEditing => _editBefore != null;
 
     /// <summary>BeginEdit 中にモデルを書き換えたあと、画面を更新させる。</summary>
-    public void NotifyChanged() => ProjectChanged?.Invoke();
+    public void NotifyChanged()
+    {
+        if (_editBefore == null) _clean = null;   // 履歴に残さない変更があったので、覚えていた複製は使えない
+        ProjectChanged?.Invoke();
+    }
 
     public void CommitEdit(string? mergeKey = null)
     {
         if (_editBefore == null) return;
         var before = _editBefore;
         _editBefore = null;
-        History.Push(new SnapshotCommand(_editDescription, before, Project.Clone(), mergeKey));
+        var after = Project.Clone();
+        History.Push(new SnapshotCommand(_editDescription, before, after, mergeKey));
+        _clean = after;
         PruneSelection();
         ProjectChanged?.Invoke();
     }
@@ -182,8 +204,8 @@ public sealed class EditorSession
         if (_editBefore == null) return;
         var before = _editBefore;
         _editBefore = null;
-        Project.Settings = before.Settings;
-        Project.Scenes = before.Scenes;
+        SnapshotCommand.Restore(Project, before);
+        _clean = before;
         PruneSelection();
         ProjectChanged?.Invoke();
     }
@@ -211,6 +233,7 @@ public sealed class EditorSession
 
     private void AfterHistoryMove()
     {
+        _clean = null;
         if (Project.FindScene(_sceneId) == null) { _sceneId = Project.Root.Id; SceneChanged?.Invoke(); }
         PruneSelection();
         ProjectChanged?.Invoke();

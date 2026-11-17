@@ -37,11 +37,14 @@ public sealed class SnapshotCommand : IEditCommand
         return true;
     }
 
-    private static void Restore(Project target, Project source)
+    /// <summary>source の内容を target に写す。source 自体は書き換えられないよう、複製を入れる。</summary>
+    public static void Restore(Project target, Project source)
     {
         var copy = source.Clone();
         target.Settings = copy.Settings;
         target.Scenes = copy.Scenes;
+        target.Grid = copy.Grid;
+        target.MediaPaths = copy.MediaPaths;
     }
 }
 

@@ -92,7 +92,7 @@ public sealed class PreviewService : IDisposable
     public PreviewService(EditorSession session, AppSettings settings)
     {
         _session = session; _settings = settings;
-        session.ProjectChanged += () => { _snapshot = null; Request(); };
+        session.ProjectChanged += () => { _snapshot = null; RequestSoon(); };
         session.FrameChanged += Request;
         session.SceneChanged += () => { _snapshot = null; Request(); };
         _timer = new DispatcherTimer(TimeSpan.FromMilliseconds(8), DispatcherPriority.Render, (_, _) => Tick());
@@ -104,8 +104,21 @@ public sealed class PreviewService : IDisposable
     private Snapshot Current()
     {
         var s = _snapshot;
-        if (s == null) _snapshot = s = new Snapshot(_session.Project.Clone(), _session.Scene.Id);
+        if (s == null) _snapshot = s = new Snapshot(_session.SnapshotForRead(), _session.Scene.Id);
         return s;
+    }
+
+    private bool _requestPosted;
+
+    /// <summary>
+    /// プロジェクトが変わったときの描き直し。ドラッグ中などに続けて何度も変わっても、
+    /// 画面の更新 1 回につき 1 度だけ複製して描く。
+    /// </summary>
+    private void RequestSoon()
+    {
+        if (_requestPosted) return;
+        _requestPosted = true;
+        Dispatcher.UIThread.Post(() => { _requestPosted = false; Request(); }, DispatcherPriority.Render);
     }
 
     /// <summary>今の状態でプレビューを描き直す。</summary>
