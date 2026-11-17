@@ -261,3 +261,116 @@ public class HardwareEncoderTests
     }
 }
 
+
+[CollectionDefinition("HardwareDecoding", DisableParallelization = true)]
+public class HardwareDecodingCollection { }
+
+/// <summary>
+/// ハードウェアデコード。テスト環境には GPU がないので、「使えない環境ではソフトウェアと同じ結果になること」と
+/// 「途中で失敗したときにソフトウェアへ戻って同じ絵を返すこと」を確かめる。
+/// 設定 (静的な値) を書き換えるので、ほかのテストと同時には動かさない。
+/// </summary>
+[Collection("HardwareDecoding")]
+public class HardwareDecodingTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), $"vb-hwdec-{Guid.NewGuid():N}");
+    private readonly string _clip;
+    private readonly bool _ready;
+
+    public HardwareDecodingTests()
+    {
+        Directory.CreateDirectory(_dir);
+        _clip = Path.Combine(_dir, "clip.mp4");
+        _ready = FFmpegLoader.EnsureLoaded() && MediaTests.RunFfmpeg(
+            $"-f lavfi -i testsrc=size=320x240:rate=30:duration=2 -c:v libx264 -pix_fmt yuv420p -g 15 \"{_clip}\"");
+    }
+
+    public void Dispose()
+    {
+        HardwareDecoding.Mode = HardwareDecodeMode.Auto;
+        HardwareDecoding.TestPretendHardware = false;
+        HardwareDecoding.TestFailAfterFrames = -1;
+        HardwareDecoding.PreferredDevice = null;
+        try { Directory.Delete(_dir, true); } catch { }
+    }
+
+    private static readonly double[] Times = { 0, 0.1, 0.5, 1.0, 1.9, 0.2, 1.5, 0.0 };   // 前へ・後ろへのシークを含む
+
+    private List<byte[]> ReadAll(HardwareDecodeMode mode, out VideoReader reader)
+    {
+        HardwareDecoding.Mode = mode;
+        reader = new VideoReader(_clip);
+        var frames = new List<byte[]>();
+        foreach (var t in Times) frames.Add(reader.GetFrame(t)!.ToArray());
+        return frames;
+    }
+
+    [Fact]
+    public void Without_a_gpu_auto_mode_decodes_in_software_with_identical_frames()
+    {
+        if (!_ready) return;
+        var software = ReadAll(HardwareDecodeMode.Off, out var off);
+        var auto = ReadAll(HardwareDecodeMode.Auto, out var r);
+        using (off) using (r)
+        {
+            Console.WriteLine($"BENCH hwdec here: {r.DecoderName} ({r.HardwareError ?? "-"})");
+            Assert.Equal("ソフトウェア", off.DecoderName);
+            Assert.Null(off.HardwareError);                           // 使わない設定なら試してもいない
+            if (!r.IsHardware) Assert.False(string.IsNullOrEmpty(r.HardwareError));
+            for (int i = 0; i < Times.Length; i++) Assert.Equal(software[i], auto[i]);
+        }
+    }
+
+    [Fact]
+    public void Failure_in_the_middle_falls_back_to_software_and_returns_the_same_frames()
+    {
+        if (!_ready) return;
+        var software = ReadAll(HardwareDecodeMode.Off, out var off);
+        off.Dispose();
+        HardwareDecoding.TestPretendHardware = true;
+        HardwareDecoding.TestFailAfterFrames = 3;                       // 4 枚目を取り出すときに失敗させる
+        var mixed = ReadAll(HardwareDecodeMode.Auto, out var r);
+        using (r)
+        {
+            Assert.False(r.IsHardware);
+            Assert.Equal("ソフトウェア", r.DecoderName);
+            Assert.Equal("テスト用の失敗", r.HardwareError);
+            for (int i = 0; i < Times.Length; i++) Assert.Equal(software[i], mixed[i]);
+        }
+    }
+
+    [Fact]
+    public void Format_choice_prefers_the_gpu_format_and_otherwise_a_software_one()
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        var vaapi = FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_VAAPI;
+        var cuda = FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_CUDA;
+        var yuv = FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUV420P;
+        var nv12 = FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_NV12;
+        Assert.Equal(vaapi, HardwareDecoding.ChooseFormat(new[] { vaapi, yuv }, vaapi));
+        Assert.Equal(yuv, HardwareDecoding.ChooseFormat(new[] { vaapi, yuv }, cuda));      // 望みの形式がない → ソフトウェア
+        Assert.Equal(nv12, HardwareDecoding.ChooseFormat(new[] { cuda, nv12 }, FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_NONE));
+    }
+
+    [Fact]
+    public unsafe void Device_failures_are_remembered_and_unknown_devices_are_skipped()
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        foreach (var type in HardwareDecoding.DeviceOrder())
+        {
+            var first = HardwareDecoding.SharedDevice(type, out var e1);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var second = HardwareDecoding.SharedDevice(type, out var e2);
+            Assert.True(first == second);
+            Assert.Equal(e1, e2);
+            Assert.True(sw.ElapsedMilliseconds < 50, "2 回目は覚えている結果を返す");
+        }
+        HardwareDecoding.PreferredDevice = "no-such-device";
+        Assert.Empty(HardwareDecoding.DeviceOrder());
+        if (!_ready) return;
+        HardwareDecoding.Mode = HardwareDecodeMode.Auto;
+        using var r = new VideoReader(_clip);
+        Assert.False(r.IsHardware);
+        Assert.NotNull(r.GetFrame(0.5));
+    }
+}

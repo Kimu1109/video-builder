@@ -19,6 +19,7 @@ public static class Svc
     {
         Settings = AppSettings.Load();
         Aliases = new AliasStore(AppPaths.AliasDir);
+        VideoBuilder.Media.HardwareDecoding.Mode = Settings.HardwareDecode;
         L.Initialize(LanguageOverride ?? Settings.Language);
         RegisterBundledFonts();
         if (!_pluginsLoaded) { _pluginsLoaded = true; VideoBuilder.Rendering.PluginLoader.LoadAll(AppPaths.PluginDir); }

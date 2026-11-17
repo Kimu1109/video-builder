@@ -18,6 +18,8 @@ public sealed class AppSettings
     public string CustomAccent { get; set; } = "#2F80ED";
     public WindowMode WindowMode { get; set; } = WindowMode.Auto;
     public RenderBackend RenderBackend { get; set; } = RenderBackend.Auto;
+    /// <summary>動画のデコードに GPU を使うか (Auto: 使えれば使う)。</summary>
+    public VideoBuilder.Media.HardwareDecodeMode HardwareDecode { get; set; } = VideoBuilder.Media.HardwareDecodeMode.Auto;
     public int LayerHeight { get; set; } = 24;
     public bool Snap { get; set; } = true;
     public bool AutoSave { get; set; } = true;

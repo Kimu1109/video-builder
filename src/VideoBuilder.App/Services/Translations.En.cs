@@ -392,5 +392,13 @@ internal static class TranslationsEn
         ("自動", "Auto"),
         ("言語の変更は、次回起動時に反映されます。", "The language change takes effect after restart."),
         ("MP4 ({0} + AAC) - ハードウェア ({1})", "MP4 ({0} + AAC) - hardware ({1})"),
+        ("動画のデコード", "Video decoding"),
+        ("ソフトウェアのみ", "Software only"),
+        ("確認中...", "Checking..."),
+        ("使わない", "Not used"),
+        ("使えるデバイスがありません", "No usable device"),
+        ("{0}: 使用可能", "{0}: available"),
+        ("{0}: 使用不可", "{0}: unavailable"),
+        ("{0} のデバイスを開けません: {1}", "Cannot open the {0} device: {1}"),
     };
 }

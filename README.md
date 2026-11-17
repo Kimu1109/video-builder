@@ -65,6 +65,7 @@ CI では `VB_REQUIRE_FFMPEG=1` を付けて、FFmpeg がない場合に失敗�
 - 素材の付け替え・収集、ショートカットのカスタマイズ、日本語 / 英語
 - GPU 描画 (Linux)、プラグイン (`samples/SamplePlugin` が見本。設計書 22.6)
 - ハードウェアエンコード (NVENC / Quick Sync / VAAPI など。使える環境では出力ダイアログの形式に自動で出る。設計書 22.11)
+- ハードウェアデコード (NVDEC / VAAPI / VideoToolbox など。使えなければ自動でソフトウェアに戻る。設計書 22.12)
 
 ## 配布用のビルド
 

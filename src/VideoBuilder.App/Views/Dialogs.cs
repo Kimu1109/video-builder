@@ -190,6 +190,23 @@ public sealed class PreferencesDialog : DialogBase
         })));
         ShowBackend();
         Body.Children.Add(backend);
+        var decodeInfo = new TextBlock { TextWrapping = TextWrapping.Wrap, Text = "確認中..." };
+        decodeInfo.Classes.Add("secondary");
+        async void ShowDecode()
+        {
+            // デバイスを開いて確かめるので、少し時間がかかることがある
+            var text = await Task.Run(VideoBuilder.Media.HardwareDecoding.Describe);
+            decodeInfo.Text = text;
+        }
+        Body.Children.Add(Row("動画のデコード", Combo(new[] { "自動 (GPU があれば使う)", "ソフトウェアのみ" }, s.HardwareDecode == VideoBuilder.Media.HardwareDecodeMode.Auto ? 0 : 1, i =>
+        {
+            s.HardwareDecode = i == 0 ? VideoBuilder.Media.HardwareDecodeMode.Auto : VideoBuilder.Media.HardwareDecodeMode.Off;
+            VideoBuilder.Media.HardwareDecoding.Mode = s.HardwareDecode;
+            Svc.Preview.ReloadBackend();     // 開いている動画を閉じて、新しい設定で開き直す
+            ShowDecode();
+        })));
+        Body.Children.Add(decodeInfo);
+        ShowDecode();
 
         Body.Children.Add(Heading("編集"));
         Body.Children.Add(Row("プレビュー品質", Combo(new[] { "フル", "1/2", "1/4" }, s.PreviewDivisor >= 4 ? 2 : s.PreviewDivisor >= 2 ? 1 : 0, i =>
