@@ -183,7 +183,8 @@ public sealed class RenderEngine : IDisposable
                             if (fx != null)
                                 sprite = fx.Apply(sprite, new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx });
                         }
-                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, cameras, W, H, depth == 0 ? LastQuads : null, ctx.Modifiers, Draft, target);
+                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, cameras, W, H, depth == 0 ? LastQuads : null, ctx.Modifiers, Draft, target,
+                            changesEveryFrame: def.Id is EffectRegistry.Video or EffectRegistry.SceneRef);
                         break;
                     }
                 }
@@ -196,7 +197,7 @@ public sealed class RenderEngine : IDisposable
     }
 
     private static void DrawSprite(SKCanvas canvas, Sprite sprite, TimelineObject obj, int[] bounds, int frame,
-        List<GroupState> groups, List<CameraState> cameras, int W, int H, List<(string, SKPoint[])>? quads, DrawModifiers mod, bool draft, SKPixmap? target)
+        List<GroupState> groups, List<CameraState> cameras, int W, int H, List<(string, SKPoint[])>? quads, DrawModifiers mod, bool draft, SKPixmap? target, bool changesEveryFrame = false)
     {
         var draw = obj.Draw;
         float x = 0, y = 0, z = 0, scale = 1, rot = 0, rx = 0, ry = 0, alpha = 1;
@@ -263,6 +264,35 @@ public sealed class RenderEngine : IDisposable
             for (int i = 0; i < 4; i++) { var q = total.MapPoint(pts[i]); pts[i] = new SKPoint(q.X * k, q.Y * k); }
             quads.Add((obj.Id, pts));
         }
+        // 毎フレーム変わる絵 (動画など) を半分より小さくするときは、先に半分ずつ縮めておく。
+        // そのまま描くと、Skia が縮小用の中間画像を毎フレーム 1 スレッドで作り直してしまう
+        SKImage? prescaled = null;
+        if (changesEveryFrame && target != null && alpha > 0 && (long)sprite.Width * sprite.Height >= 200_000)
+        {
+            var tm = canvas.TotalMatrix;
+            if (tm.Persp0 == 0 && tm.Persp1 == 0)
+            {
+                float sx = MathF.Sqrt(tm.ScaleX * tm.ScaleX + tm.SkewY * tm.SkewY), sy = MathF.Sqrt(tm.ScaleY * tm.ScaleY + tm.SkewX * tm.SkewX);
+                float min = Math.Min(sx, sy);
+                int factor = 1;
+                var current = sprite.Image;
+                while (min * factor < 0.5f && factor < 16 && current.Width > 8 && current.Height > 8)
+                {
+                    var next = PixelOps.Halve(current, current.Width, current.Height);
+                    prescaled?.Dispose();
+                    prescaled = current = next;
+                    factor *= 2;
+                }
+                if (prescaled != null)
+                {
+                    // 縮めたぶんだけ拡大して描けば、位置と大きさは元と同じになる
+                    canvas.Scale(sprite.Width / (float)prescaled.Width, sprite.Height / (float)prescaled.Height);
+                    float kx = prescaled.Width / (float)sprite.Width, ky = prescaled.Height / (float)sprite.Height;
+                    sprite = new Sprite(prescaled, sprite.Cx * kx, sprite.Cy * ky);
+                }
+            }
+        }
+        using var prescaledOwner = prescaled;
         if (alpha > 0 && scale != 0)
         {
             using var paint = new SKPaint
@@ -549,7 +579,14 @@ public sealed class RenderEngine : IDisposable
             }
             if (pending == null)
             {
-                var snap = Sprite.Centered(ctx.Own(surface.Snapshot()));
+                // 今の画面を写し取る。CPU 描画では使い回しのバッファに写す (毎回新しく確保するより速い)
+                SKImage? copied = null;
+                if (ctx.Gpu == null)
+                {
+                    using var current = surface.PeekPixels();
+                    if (current != null) copied = PixelPool.CopyOf(current);
+                }
+                var snap = Sprite.Centered(ctx.Own(copied ?? surface.Snapshot()));
                 originX = snap.Cx; originY = snap.Cy;
                 pending = snap;
             }

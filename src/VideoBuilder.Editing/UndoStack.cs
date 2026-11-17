@@ -62,8 +62,12 @@ public sealed class UndoStack
     public bool IsAtSavedState => (_undo.Count > 0 ? _undo[^1] : null) == _savedMarker;
 
     /// <summary>実行済みのコマンドを履歴に積む。</summary>
+    /// <summary>履歴が動くたびに増える番号。「前回から何か変わったか」を安く調べるのに使う。</summary>
+    public long Version { get; private set; }
+
     public void Push(IEditCommand command)
     {
+        Version++;
         _redo.Clear();
         if (_undo.Count > 0 && _undo[^1] != _savedMarker && _undo[^1].TryMerge(command)) return;
         _undo.Add(command);
@@ -73,6 +77,7 @@ public sealed class UndoStack
     public bool Undo(Project project)
     {
         if (_undo.Count == 0) return false;
+        Version++;
         var c = _undo[^1]; _undo.RemoveAt(_undo.Count - 1);
         c.Undo(project); _redo.Add(c);
         return true;
@@ -81,6 +86,7 @@ public sealed class UndoStack
     public bool Redo(Project project)
     {
         if (_redo.Count == 0) return false;
+        Version++;
         var c = _redo[^1]; _redo.RemoveAt(_redo.Count - 1);
         c.Execute(project); _undo.Add(c);
         return true;
@@ -90,6 +96,7 @@ public sealed class UndoStack
 
     public void Clear()
     {
+        Version++;
         _undo.Clear(); _redo.Clear(); _savedMarker = null;
     }
 }

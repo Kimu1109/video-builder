@@ -25,7 +25,7 @@ rm -rf "$appdir"
 mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" "$appdir/usr/share/icons/hicolor/scalable/apps"
 
 dotnet publish "$root/src/VideoBuilder.App" -c Release -r "linux-$arch" --self-contained true \
-  -p:DebugType=none -p:PublishSingleFile=false -o "$appdir/usr/bin"
+  -p:DebugType=none -p:PublishSingleFile=false -p:PublishReadyToRun=true -o "$appdir/usr/bin"
 
 cp "$root/packaging/video-builder.desktop" "$appdir/usr/share/applications/"
 cp "$root/packaging/video-builder.desktop" "$appdir/"

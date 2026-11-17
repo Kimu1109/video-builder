@@ -68,13 +68,22 @@ public static class Effects
     internal static Sprite? WithPixels(Sprite s, EffectArgs a, Action<IntPtr, int, int, int> op, bool alsoOnGpu = false)
     {
         if (a.Context.Gpu != null && !alsoOnGpu) return null;
-        var bmp = new SKBitmap(Info(s.Width, s.Height));
-        if (!s.Image.ReadPixels(bmp.Info, bmp.GetPixels(), bmp.RowBytes, 0, 0)) { bmp.Dispose(); return null; }
-        op(bmp.GetPixels(), bmp.Width, bmp.Height, bmp.RowBytes);
-        bmp.SetImmutable();   // これ以降は書き換えないので、SKImage が複製せずに中身を共有できる
-        var img = a.Context.Own(SKImage.FromBitmap(bmp));
-        bmp.Dispose();
+        if (CopyPixels(s) is not { } copy) return null;
+        op(copy.Buffer, s.Width, s.Height, copy.RowBytes);
+        var img = a.Context.Own(PixelPool.ToImage(copy.Buffer, Info(s.Width, s.Height), copy.RowBytes));
         return new Sprite(img, s.Cx, s.Cy);
+    }
+
+    /// <summary>画像の中身を、使い回しのバッファ (BGRA) に写す。失敗したら null。</summary>
+    internal static (IntPtr Buffer, int RowBytes)? CopyPixels(Sprite s)
+    {
+        var info = Info(s.Width, s.Height);
+        int rowBytes = info.Width * 4;
+        long bytes = (long)rowBytes * info.Height;
+        var buffer = PixelPool.Rent(bytes);
+        if (s.Image.ReadPixels(info, buffer, rowBytes, 0, 0)) return (buffer, rowBytes);
+        PixelPool.Return(buffer, bytes);
+        return null;
     }
 
     /// <summary>カラーマトリクスをかける。CPU 描画では PixelOps、GPU 描画では Skia のカラーフィルタを使う。</summary>
@@ -90,7 +99,9 @@ public static class Effects
     internal static int BlurDownscale(float sigma)
     {
         int k = 1;
-        // 縮小後のぼかしの強さ (sigma / k) が 3 以上残る範囲でだけ縮小する。これより粗くすると差が見えてくる
+        // 半分への縮小は、ぼかしの強さ (sigma) が 3 以上あれば見分けがつかない。
+        // それ以上の縮小は、縮小後の強さ (sigma / k) が 3 以上残る範囲に限る (粗くしすぎると差が見えてくる)
+        if (sigma >= 3f) k = 2;
         while (k < 8 && sigma / (k * 2) >= 3f) k *= 2;
         return k;
     }
@@ -195,7 +206,16 @@ public static class Effects
                 if (a.Context.Gpu == null)
                 {
                     // 1. 縮小  2. 縮小した絵をぼかす  3. 元の大きさに戻す (どれも帯に分けて並列に描く)
-                    using var smallCpu = PixelOps.DrawParallel(sw, sh, c => { c.Scale(1f / k); c.DrawImage(s.Image, pad, pad, down); });
+                    // 半分ずつ縮める (ミップマップを作らせない)。余白は最初の 1 回で付ける
+                    var smallCpu = PixelOps.Halve(s.Image, pw, ph, pad, pad);
+                    for (int step = 2, cw = (pw + 1) / 2, ch = (ph + 1) / 2; step < k; step *= 2, cw = (cw + 1) / 2, ch = (ch + 1) / 2)
+                    {
+                        var next = PixelOps.Halve(smallCpu, cw, ch);
+                        smallCpu.Dispose();
+                        smallCpu = next;
+                    }
+                    using var smallOwner = smallCpu;
+                    sw = smallCpu.Width; sh = smallCpu.Height;
                     using var blurredCpu = PixelOps.DrawParallel(sw, sh, c => c.DrawImage(smallCpu, 0, 0, bp));
                     using var upCpu = new SKPaint { FilterQuality = SKFilterQuality.Low, BlendMode = SKBlendMode.Src };
                     return Redraw(s, a, pad, pad, pad, pad, (c, _, _) => c.DrawImage(blurredCpu, SKRect.Create(sw, sh), SKRect.Create(0, 0, sw * k, sh * k), upCpu));
@@ -333,13 +353,10 @@ public static class Effects
             float satRange = a.Track("saturation") / 256f * 100f;
             float edge = Math.Max(0.001f, a.Track("edge") / 100f);
 
-            var bmp = new SKBitmap(Info(s.Width, s.Height));
-            if (!s.Image.ReadPixels(bmp.Info, bmp.GetPixels(), bmp.RowBytes, 0, 0)) { bmp.Dispose(); return s; }
-            if (a.Context.Draft) PixelOps.ChromaKeyFast(bmp.GetPixels(), bmp.Width, bmp.Height, bmp.RowBytes, kh, ks, hueRange, satRange, edge);
-            else PixelOps.ChromaKey(bmp.GetPixels(), bmp.Width, bmp.Height, bmp.RowBytes, kh, ks, hueRange, satRange, edge);
-            bmp.SetImmutable();
-            var img = a.Context.Own(SKImage.FromBitmap(bmp));
-            bmp.Dispose();
+            if (CopyPixels(s) is not { } copy) return s;
+            if (a.Context.Draft) PixelOps.ChromaKeyFast(copy.Buffer, s.Width, s.Height, copy.RowBytes, kh, ks, hueRange, satRange, edge);
+            else PixelOps.ChromaKey(copy.Buffer, s.Width, s.Height, copy.RowBytes, kh, ks, hueRange, satRange, edge);
+            var img = a.Context.Own(PixelPool.ToImage(copy.Buffer, Info(s.Width, s.Height), copy.RowBytes));
             return new Sprite(img, s.Cx, s.Cy);
         }
     }

@@ -189,6 +189,9 @@ public static unsafe class PixelOps
                 float b = Math.Min(255, p[0] * inv), g = Math.Min(255, p[1] * inv), r = Math.Min(255, p[2] * inv);
                 float max = Math.Max(r, Math.Max(g, b)), min = Math.Min(r, Math.Min(g, b)), d = max - min;
                 float sat = max <= 0 ? 0 : d / max * 100f;
+                // 彩度だけで範囲外と分かるピクセルは、ここで終わり (結果は変わらず、色相の計算を省ける)
+                float dsEarly = Math.Abs(sat - keySat);
+                if (satRange > 0 ? dsEarly >= satRange : dsEarly > 0) continue;
                 float hue;
                 if (d <= 0) hue = 0;
                 else if (max == r) hue = 60 * (((g - b) / d) % 6);
@@ -244,14 +247,30 @@ public static unsafe class PixelOps
     }
 
     /// <summary>
+    /// 画像を縦横半分にする (2x2 の平均)。複数スレッドで描く。
+    /// 毎フレーム変わる画像を大きく縮小するとき、Skia に縮小用の中間画像 (ミップマップ) を
+    /// 1 スレッドで作らせるより、これを繰り返す方がずっと速い。
+    /// </summary>
+    /// <param name="offsetX">元の画像を置く位置 (縮小前の座標)。余白を付けたいときに使う。</param>
+    public static SKImage Halve(SKImage image, int width, int height, float offsetX = 0, float offsetY = 0)
+    {
+        using var paint = new SKPaint { FilterQuality = SKFilterQuality.Low };
+        return DrawParallel((width + 1) / 2, (height + 1) / 2, c =>
+        {
+            c.Scale(0.5f);
+            c.DrawImage(image, offsetX, offsetY, paint);
+        });
+    }
+
+    /// <summary>
     /// Skia の描画を横帯に分けて、複数スレッドで同時に行う (Skia の CPU 描画は 1 回の描画が 1 スレッドでしか動かないため)。
     /// draw は帯ごとに別々の SKCanvas で呼ばれるので、共有するのは読み取り専用のもの (SKImage・SKPaint・フィルタ) だけにする。
     /// </summary>
     public static SKImage DrawParallel(int width, int height, Action<SKCanvas> draw)
     {
-        var bmp = new SKBitmap(new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Premul));
-        IntPtr pixels = bmp.GetPixels();
-        int rowBytes = bmp.RowBytes;
+        var info = new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Premul);
+        int rowBytes = width * 4;
+        IntPtr pixels = PixelPool.Rent((long)rowBytes * height);   // 使い回しのバッファ。帯ごとに最初に透明で塗る
         int cores = Environment.ProcessorCount;
         int bands = (long)width * height < 256 * 1024 || cores == 1 ? 1 : Math.Min(cores, Math.Max(1, height / 64));
         void Band(int b)
@@ -265,10 +284,15 @@ public static unsafe class PixelOps
             draw(canvas);
             canvas.Flush();
         }
-        if (bands == 1) Band(0); else Parallel.For(0, bands, Band);
-        bmp.SetImmutable();
-        var image = SKImage.FromBitmap(bmp);   // 中身は共有されるので、ここで bmp を手放してよい
-        bmp.Dispose();
-        return image;
+        try
+        {
+            if (bands == 1) Band(0); else Parallel.For(0, bands, Band);
+        }
+        catch
+        {
+            PixelPool.Return(pixels, (long)rowBytes * height);
+            throw;
+        }
+        return PixelPool.ToImage(pixels, info, rowBytes);
     }
 }

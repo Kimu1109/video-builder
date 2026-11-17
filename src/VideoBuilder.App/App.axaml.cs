@@ -21,9 +21,13 @@ public partial class App : Application
             int lang = Array.IndexOf(args, "--lang");
             if (lang >= 0 && lang + 1 < args.Length)
                 Svc.LanguageOverride = args[lang + 1].ToLowerInvariant() switch { "en" => Language.English, "ja" => Language.Japanese, _ => null };
+            var phase = System.Diagnostics.Stopwatch.StartNew();
+            double sinceStart = (DateTime.Now - System.Diagnostics.Process.GetCurrentProcess().StartTime).TotalMilliseconds;
             Svc.Initialize(this);
+            double initMs = phase.Elapsed.TotalMilliseconds; phase.Restart();
             ApplyOverrides(args);
             var main = new MainWindow();
+            double windowMs = phase.Elapsed.TotalMilliseconds;
             desktop.MainWindow = main;
             EditorCommands.StartAutoSave();
 
@@ -31,6 +35,17 @@ public partial class App : Application
             if (project != null) main.Opened += async (_, _) => await EditorCommands.OpenPathAsync(project);
             else if (args.Contains("--demo")) DemoProject.Load(Svc.Session);
 
+            if (args.Contains("--startup-time"))
+            {
+                // 起動にかかった時間 (プロセス開始 → ウィンドウ表示) を出力して終了する (計測用)
+                main.Opened += (_, _) => Dispatcher.UIThread.Post(() =>
+                {
+                    var elapsed = DateTime.Now - System.Diagnostics.Process.GetCurrentProcess().StartTime;
+                    Console.WriteLine($"startup: {elapsed.TotalMilliseconds:0} ms (ランタイムと Avalonia の起動 {sinceStart:0} / 初期化 {initMs:0} / ウィンドウ作成 {windowMs:0} / 表示まで {elapsed.TotalMilliseconds - sinceStart - initMs - windowMs:0})");
+                    Svc.Session.History.MarkSaved();
+                    desktop.Shutdown();
+                }, DispatcherPriority.Background);
+            }
             int shot = Array.IndexOf(args, "--screenshot");
             if (shot >= 0 && shot + 1 < args.Length) main.Opened += (_, _) => ScreenshotAndExit(desktop, main, args[shot + 1]);
         }

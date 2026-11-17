@@ -662,7 +662,7 @@ public class OptimizationTests
         var o = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 10);
         var fx = ObjectFactory.AddFilter(o, "filter.blur");
         // 余白を広げる場合 (サイズ固定なし): 結果は元より大きくなり、中心は同じ位置に残る
-        foreach (var radius in new[] { 12f, 30f })
+        foreach (var radius in new[] { 6f, 12f, 30f })
         {
             fx.Tracks["radius"] = new AnimatedValue(radius);
             fx.Values["fixed"] = "0";
@@ -681,7 +681,7 @@ public class OptimizationTests
             ctx.DisposeTemporaries();
             Assert.True(mean < 1.5 && max < 40, $"余白あり radius={radius}: mean={mean:0.00} max={max}");
         }
-        foreach (var radius in new[] { 8f, 24f, 60f })
+        foreach (var radius in new[] { 6f, 8f, 11f, 24f, 60f })
         {
             fx.Tracks["radius"] = new AnimatedValue(radius);
             fx.Values["fixed"] = "1";
@@ -888,6 +888,69 @@ public class OptimizationTests
         gpuEngine.RenderToBitmap(p, p.Root, 0, g);
         var (mean, _) = Diff(a, g);
         Assert.True(mean < 0.8, $"CPU (並列) と GPU の差が大きい: {mean:0.00}");
+    }
+
+    [Fact]
+    public void Pixel_pool_reuses_returned_buffers_and_images_return_them_on_dispose()
+    {
+        // ほかのテストと取り合いにならないよう、まず使われない半端な大きさで試す (幅 1237 x 高さ 2503)
+        const int W = 1237, H = 2503, RowBytes = W * 4;
+        long bytes = (long)RowBytes * H;
+        var a = PixelPool.Rent(bytes);
+        PixelPool.Return(a, bytes);
+        var b = PixelPool.Rent(bytes - 100);         // 同じ大きさの区分なら同じバッファが返る
+        Assert.Equal(a, b);
+        var image = PixelPool.ToImage(b, new SKImageInfo(W, H, SKColorType.Bgra8888, SKAlphaType.Premul), RowBytes);
+        image.Dispose();                             // 画像を捨てるとバッファが戻る
+        var c = PixelPool.Rent(bytes);
+        Assert.Equal(a, c);
+        PixelPool.Return(c, bytes);
+    }
+
+    [Fact]
+    public void Pooled_buffers_do_not_leak_old_pixels_into_new_images()
+    {
+        // 1 回目: 全面を赤で描いた画像を作って捨てる → 同じバッファで、何も描かない画像を作る
+        using (var red = PixelOps.DrawParallel(300, 300, c => c.Clear(SKColors.Red))) { }
+        using var empty = PixelOps.DrawParallel(300, 300, _ => { });
+        using var bmp = SKBitmap.FromImage(empty);
+        Assert.Equal(0, bmp.GetPixel(150, 150).Alpha);
+        Assert.Equal(0, bmp.GetPixel(0, 299).Alpha);
+    }
+
+    [Fact]
+    public void Strongly_downscaled_scene_object_matches_gpu_and_stays_in_place()
+    {
+        // シーンオブジェクトは「毎フレーム変わる絵」として、半分ずつ縮めてから描く経路を通る
+        var p = new Project();
+        var sub = new Scene { Id = "s1", Name = "Sub" };
+        var inner = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 10); inner.Main.Values["type"] = "0"; inner.Main.Values["color"] = "#00C000";
+        var mark = ObjectFactory.Create(EffectRegistry.Shape, 1, 0, 10); mark.Main.Tracks["size"] = new AnimatedValue(600); mark.Main.Values["color"] = "#FF0000";
+        sub.Objects.AddRange(new[] { inner, mark });
+        p.Scenes.Add(sub);
+        var so = ObjectFactory.Create(EffectRegistry.SceneRef, 0, 0, 10);
+        so.Main.Values["scene"] = "s1";
+        so.Draw!.Tracks["scale"] = new AnimatedValue(22);       // 1/4 にしてから少し縮める
+        so.Draw!.Tracks["x"] = new AnimatedValue(300);
+        p.Root.Objects.Add(so);
+
+        using var cpu = new RenderEngine();
+        using var a = new SKBitmap(new SKImageInfo(1920, 1080, SKColorType.Bgra8888, SKAlphaType.Premul));
+        cpu.RenderToBitmap(p, p.Root, 0, a);
+        // 縮小後の大きさ 422x238、中心 (1260, 540)
+        Assert.Equal(new SKColor(255, 0, 0), a.GetPixel(1260, 540));
+        Assert.Equal(new SKColor(0, 0xC0, 0), a.GetPixel(1260 - 200, 540));
+        Assert.Equal(SKColors.Black, a.GetPixel(1260 - 216, 540));
+        Assert.Equal(SKColors.Black, a.GetPixel(1260, 540 - 124));
+        Assert.Equal(new SKColor(0, 0xC0, 0), a.GetPixel(1260, 540 - 114));
+
+        using var gpu = GpuContext.TryCreate(out _);
+        if (gpu == null) return;
+        using var gpuEngine = new RenderEngine(gpu);
+        using var g = new SKBitmap(a.Info);
+        gpuEngine.RenderToBitmap(p, p.Root, 0, g);
+        var (mean, _) = Diff(a, g);
+        Assert.True(mean < 0.5, $"CPU と GPU の差が大きい: {mean:0.00}");
     }
 }
 

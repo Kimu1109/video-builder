@@ -544,4 +544,30 @@ public class UiTests
         Console.WriteLine($"BENCH ui per frame: update={update:0.00} ms, update+draw={total:0.00} ms, timeline redraw={timelineOnly:0.00} ms, capture only={idle:0.00} ms");
         Assert.True(total > 0);
     }
+
+    [AvaloniaFact]
+    public async Task Autosave_writes_only_when_something_changed_and_restores_the_same_content()
+    {
+        Open();
+        var s = Svc.Session;
+        Svc.Settings.AutoSave = true;
+        var dir = AppPaths.AutoSaveDir;
+        if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        await EditorCommands.AutoSaveNow();
+        Assert.False(Directory.Exists(dir) && Directory.GetFiles(dir).Length > 0);     // 変更がなければ書かない
+
+        var o = s.AddObject(EffectRegistry.Text, 2, 30, 60)!;
+        o.Main.Values["text"] = "自動保存";
+        s.NotifyChanged();
+        await EditorCommands.AutoSaveNow();
+        var files = Directory.GetFiles(dir);
+        Assert.Single(files);
+        var saved = ProjectSerializer.Load(files[0]);
+        Assert.Equal("自動保存", saved.Root.Objects.Single().Main.GetString("text"));
+        Assert.Empty(s.Project.MediaPaths);                 // 編集中のプロジェクト側は書き換えない
+
+        await EditorCommands.AutoSaveNow();                 // 変更なし → 増えない
+        Assert.Single(Directory.GetFiles(dir));
+    }
 }
+

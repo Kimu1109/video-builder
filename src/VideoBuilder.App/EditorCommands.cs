@@ -294,30 +294,42 @@ public static class EditorCommands
 
     public static void StartAutoSave()
     {
-        _autoSave = new DispatcherTimer(TimeSpan.FromMinutes(Math.Max(1, Svc.Settings.AutoSaveMinutes)), DispatcherPriority.Background, (_, _) => AutoSaveNow());
+        _autoSave = new DispatcherTimer(TimeSpan.FromMinutes(Math.Max(1, Svc.Settings.AutoSaveMinutes)), DispatcherPriority.Background, (_, _) => _ = AutoSaveNow());
         _autoSave.Start();
     }
 
-    private static int _lastAutoSaved = -1;
+    private static long _lastAutoSavedVersion = -1;
+    private static bool _autoSaving;
 
-    public static void AutoSaveNow()
+    /// <summary>
+    /// 前回の自動保存から変更があれば、別スレッドで保存する。
+    /// 画面側では「今の状態の複製」を受け取るだけなので、大きなプロジェクトでも操作が止まらない。
+    /// </summary>
+    public static Task AutoSaveNow()
     {
-        if (!Svc.Settings.AutoSave || !Session.IsDirty || Session.IsEditing) return;
-        try
+        if (!Svc.Settings.AutoSave || !Session.IsDirty || Session.IsEditing || _autoSaving) return Task.CompletedTask;
+        long version = Session.History.Version;
+        if (version == _lastAutoSavedVersion) return Task.CompletedTask;
+        var snapshot = Session.SnapshotForRead();
+        // 保存処理は素材の相対パス表を書き換えるので、中身 (シーンなど) だけを共有する別の入れ物を渡す
+        var copy = new Project { FormatVersion = snapshot.FormatVersion, Settings = snapshot.Settings, Scenes = snapshot.Scenes, Grid = snapshot.Grid };
+        string name = Session.FilePath != null ? Path.GetFileNameWithoutExtension(Session.FilePath) : "untitled";
+        string dir = AppPaths.AutoSaveDir;
+        _autoSaving = true;
+        return Task.Run(() =>
         {
-            // 同じ内容を何度も書かないよう、内容のハッシュで判定する
-            int hash = ProjectSerializer.ToJson(Session.Project).GetHashCode();
-            if (hash == _lastAutoSaved) return;
-            Directory.CreateDirectory(AppPaths.AutoSaveDir);
-            string name = Session.FilePath != null ? Path.GetFileNameWithoutExtension(Session.FilePath) : "untitled";
-            string path = Path.Combine(AppPaths.AutoSaveDir, $"{name}_{DateTime.Now:yyyyMMdd_HHmmss}{ProjectSerializer.Extension}");
-            ProjectSerializer.Save(Session.Project, path);
-            _lastAutoSaved = hash;
-            // 10 世代だけ残す
-            foreach (var old in new DirectoryInfo(AppPaths.AutoSaveDir).GetFiles("*" + ProjectSerializer.Extension).OrderByDescending(f => f.LastWriteTimeUtc).Skip(10))
-                old.Delete();
-        }
-        catch { /* 自動保存の失敗で編集を止めない */ }
+            try
+            {
+                Directory.CreateDirectory(dir);
+                ProjectSerializer.Save(copy, Path.Combine(dir, $"{name}_{DateTime.Now:yyyyMMdd_HHmmss}{ProjectSerializer.Extension}"));
+                _lastAutoSavedVersion = version;
+                // 10 世代だけ残す
+                foreach (var old in new DirectoryInfo(dir).GetFiles("*" + ProjectSerializer.Extension).OrderByDescending(f => f.LastWriteTimeUtc).Skip(10))
+                    old.Delete();
+            }
+            catch { /* 自動保存の失敗で編集を止めない */ }
+            finally { _autoSaving = false; }
+        });
     }
 
     public static async Task OpenAutoSaveAsync()
