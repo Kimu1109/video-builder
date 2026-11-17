@@ -45,6 +45,8 @@ public static class MediaImport
                 : session.AddMediaFile(path, layer, frame, len, info.HasAudio);
             if (created == null) error = "空いているレイヤーがありません";
         });
+        // 重い動画 (4K・H.265 など) は、裏でプロキシを作っておく
+        if (error == null && defId == EffectRegistry.Video && Svc.Settings.AutoProxy && ProxyStore.IsHeavy(info)) Svc.Proxies.Enqueue(path);
         return error;
     }
 }

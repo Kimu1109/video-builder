@@ -20,6 +20,12 @@ public sealed class AppSettings
     public RenderBackend RenderBackend { get; set; } = RenderBackend.Auto;
     /// <summary>動画のデコードに GPU を使うか (Auto: 使えれば使う)。</summary>
     public VideoBuilder.Media.HardwareDecodeMode HardwareDecode { get; set; } = VideoBuilder.Media.HardwareDecodeMode.Auto;
+    /// <summary>プレビューでプロキシを使う。</summary>
+    public bool UseProxies { get; set; } = true;
+    /// <summary>重い動画 (4K・H.265 など) を読み込んだとき、自動でプロキシを作る。</summary>
+    public bool AutoProxy { get; set; } = true;
+    /// <summary>プロキシの縮小率の分母 (2 または 4)。</summary>
+    public int ProxyDivisor { get; set; } = 2;
     public int LayerHeight { get; set; } = 24;
     public bool Snap { get; set; } = true;
     public bool AutoSave { get; set; } = true;

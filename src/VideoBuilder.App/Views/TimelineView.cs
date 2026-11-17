@@ -172,6 +172,14 @@ public sealed class TimelineView : UserControl
         menu.Items.Add(Menus.Item("コピー", "Copy", _session.CopySelected, Shortcuts.First("edit.copy")));
         menu.Items.Add(Menus.Item("削除", "Delete", _session.DeleteSelected, Shortcuts.First("edit.delete")));
         menu.Items.Add(Menus.Item("エイリアスを作成...", "Layers", () => _ = EditorCommands.CreateAliasAsync()));
+        if (o.Main.DefinitionId == EffectRegistry.Video)
+        {
+            var file = o.Main.GetString("file");
+            if (VideoBuilder.Media.ProxyStore.Exists(file))
+                menu.Items.Add(Menus.Item("プロキシを削除", "Delete", () => VideoBuilder.Media.ProxyStore.Delete(file)));
+            else
+                menu.Items.Add(Menus.Item(Svc.Proxies.IsQueued(file) ? "プロキシを作成中..." : "プロキシを作成", "Movie", () => Svc.Proxies.Enqueue(file), null, !Svc.Proxies.IsQueued(file)));
+        }
         menu.Items.Add(Menus.Sep());
         menu.Items.Add(Menus.Sub("フィルタ効果の追加", "AddBox",
             EffectRegistry.Filters.Select(f => (object)Menus.Item(f.Name, f.Icon, () => _session.AddFilter(o, f.Id)))));

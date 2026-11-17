@@ -55,6 +55,7 @@ public static class EditorCommands
             Session.Load(path);
             Svc.Settings.AddRecent(path);
             await CheckMissingFilesAsync();
+            if (Svc.Settings.AutoProxy) Svc.Proxies.EnqueueProject(Session.Project, heavyOnly: true);
         }
         catch (Exception ex)
         {

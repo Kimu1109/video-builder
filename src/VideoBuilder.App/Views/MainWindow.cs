@@ -45,6 +45,7 @@ public sealed class MainWindow : Window
     private readonly TextBlock _time = new() { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0) };
     private readonly TextBlock _frameText = new() { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0), MinWidth = 64, TextAlignment = TextAlignment.Right };
     private readonly TextBlock _projectInfo = new() { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0) };
+    private readonly TextBlock _proxyStatus = new() { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0) };
     private readonly MiniSlider _seek = new() { Margin = new Thickness(4, 0) };
     private readonly IconButton _play;
     private readonly List<(Control Control, Func<bool> Enabled)> _enablers = new();
@@ -93,8 +94,14 @@ public sealed class MainWindow : Window
         UpdateState();
         UpdateThemeIcon();
         Closing += OnClosing;
+        Svc.Proxies.Changed += () =>
+        {
+            _proxyStatus.Text = Svc.Proxies.Status;
+            ToolTip.SetTip(_proxyStatus, Svc.Proxies.LastError);
+        };
         Closed += (_, _) =>
         {
+            Svc.Proxies.CancelAll();
             foreach (var w in new[] { _timelineWindow, _settingsWindow }) { if (w != null) { w.AllowClose = true; w.Close(); } }
             Svc.Preview.Dispose();
         };
@@ -220,6 +227,18 @@ public sealed class MainWindow : Window
             Menus.Item("自動保存から復元...", "Reset", () => _ = EditorCommands.OpenAutoSaveAsync()),
             Menus.Item("素材を収集して保存...", "FolderOpen", () => _ = EditorCommands.CollectAndSaveAsync()),
             Menus.Item("素材の付け替え...", "Link", () => _ = EditorCommands.CheckMissingFilesAsync(always: true)),
+            Menus.Sub("プロキシ", "Movie", new object[]
+            {
+                Menus.Item("すべての動画のプロキシを作成", null, () => Svc.Proxies.EnqueueProject(_session.Project, heavyOnly: false)),
+                Menus.Item("プロキシの作成を中止", null, () => Svc.Proxies.CancelAll()),
+                Menus.Item("プレビューでプロキシを使う", null, () =>
+                {
+                    Svc.Settings.UseProxies = !Svc.Settings.UseProxies;
+                    VideoBuilder.Media.ProxyStore.Enabled = Svc.Settings.UseProxies;
+                    Svc.Settings.Save();
+                    Svc.Preview.Request();
+                }, isChecked: Svc.Settings.UseProxies),
+            }),
             Menus.Sep(),
             Menus.Item("メディアファイルを読み込む...", "Movie", () => _ = EditorCommands.ImportFilesAsync(Timeline.LastLayer, _session.CurrentFrame)),
             Menus.Item("動画の出力...", "Output", () => _ = EditorCommands.ExportAsync(), Shortcuts.First("file.export")),
@@ -332,6 +351,8 @@ public sealed class MainWindow : Window
 
         _projectInfo.Classes.Add("secondary"); _projectInfo.Classes.Add("mono");
         var right = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(4, 0) };
+        _proxyStatus.Classes.Add("secondary");
+        right.Children.Add(_proxyStatus);
         right.Children.Add(_projectInfo);
         right.Children.Add(_themeButton);
         right.Children.Add(new IconButton("Settings", "環境設定", () => _ = EditorCommands.PreferencesAsync()));

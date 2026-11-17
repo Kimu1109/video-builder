@@ -208,6 +208,30 @@ public sealed class PreferencesDialog : DialogBase
         Body.Children.Add(decodeInfo);
         ShowDecode();
 
+        Body.Children.Add(Heading("プロキシ"));
+        var useProxy = new CheckBox { Content = "プレビューでプロキシを使う (出力には使わない)", IsChecked = s.UseProxies };
+        useProxy.IsCheckedChanged += (_, _) =>
+        {
+            s.UseProxies = useProxy.IsChecked == true; VideoBuilder.Media.ProxyStore.Enabled = s.UseProxies; s.Save(); Svc.Preview.Request();
+        };
+        Body.Children.Add(useProxy);
+        var autoProxy = new CheckBox { Content = "重い動画 (4K・H.265 など) は自動でプロキシを作る", IsChecked = s.AutoProxy };
+        autoProxy.IsCheckedChanged += (_, _) => { s.AutoProxy = autoProxy.IsChecked == true; s.Save(); };
+        Body.Children.Add(autoProxy);
+        Body.Children.Add(Row("プロキシの大きさ", Combo(new[] { "縦横 1/2", "縦横 1/4" }, s.ProxyDivisor == 4 ? 1 : 0, i =>
+        {
+            s.ProxyDivisor = i == 1 ? 4 : 2;
+            VideoBuilder.Media.ProxyStore.Divisor = s.ProxyDivisor;
+            VideoBuilder.Media.ProxyStore.NotifyChanged();
+        })));
+        var proxySize = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        proxySize.Classes.Add("secondary");
+        void ShowProxySize() => proxySize.Text = $"使用中の容量: {VideoBuilder.Media.ProxyStore.TotalSize() / 1048576.0:0.0} MB";
+        var clearProxies = new Button { Content = "すべてのプロキシを削除", HorizontalAlignment = HorizontalAlignment.Left };
+        clearProxies.Click += (_, _) => { Svc.Proxies.CancelAll(); VideoBuilder.Media.ProxyStore.Clear(); ShowProxySize(); };
+        ShowProxySize();
+        Body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { clearProxies, proxySize } });
+
         Body.Children.Add(Heading("編集"));
         Body.Children.Add(Row("プレビュー品質", Combo(new[] { "フル", "1/2", "1/4" }, s.PreviewDivisor >= 4 ? 2 : s.PreviewDivisor >= 2 ? 1 : 0, i =>
         {

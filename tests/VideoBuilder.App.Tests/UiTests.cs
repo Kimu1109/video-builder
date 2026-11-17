@@ -569,5 +569,46 @@ public class UiTests
         await EditorCommands.AutoSaveNow();                 // 変更なし → 増えない
         Assert.Single(Directory.GetFiles(dir));
     }
+
+    [AvaloniaFact]
+    public async Task Importing_a_heavy_video_creates_a_proxy_in_the_background()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        if (!VideoBuilder.Media.FFmpegLoader.EnsureLoaded()) return;
+        var dir = Path.Combine(Path.GetTempPath(), "vb-ui-proxy-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var clip = Path.Combine(dir, "big.mp4");
+            using (var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ffmpeg",
+                $"-y -loglevel error -f lavfi -i testsrc2=size=2560x1440:rate=10:duration=1 -c:v libx264 -preset ultrafast -pix_fmt yuv420p \"{clip}\"")))
+            {
+                proc!.WaitForExit(60000);
+                if (proc.ExitCode != 0) return;
+            }
+            Svc.Settings.AutoProxy = true;
+            Assert.Null(MediaImport.AddFile(clip, 0, 0));       // 2560x1440 は「重い動画」→ 自動でプロキシを作る
+            string? statusSeen = null;
+            for (int i = 0; i < 500 && !VideoBuilder.Media.ProxyStore.Exists(clip); i++)
+            {
+                await Task.Delay(20);
+                Pump();
+                if (Svc.Proxies.Status.Length > 0) statusSeen = Svc.Proxies.Status;
+            }
+            Assert.True(VideoBuilder.Media.ProxyStore.Exists(clip), Svc.Proxies.LastError ?? "プロキシができない");
+            Assert.Contains("big.mp4", statusSeen ?? "big.mp4");
+            Assert.Equal(0, Svc.Proxies.Pending);
+            var info = VideoBuilder.Media.MediaInfo.Probe(VideoBuilder.Media.ProxyStore.FindReady(clip)!)!;
+            Assert.Equal(1280, info.Width);
+            VideoBuilder.Media.ProxyStore.Delete(clip);
+            Assert.False(VideoBuilder.Media.ProxyStore.Exists(clip));
+        }
+        finally
+        {
+            s.NewProject(new ProjectSettings());
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
 }
 
