@@ -36,6 +36,8 @@ public sealed unsafe class MediaWriter : IDisposable
     private float[] _audioQueue = new float[1 << 15];
     private int _audioQueued;   // フレーム数
     private bool _headerWritten, _finished;
+    private AVBufferRef* _hwDevice;
+    private bool _uploadToHardware;
 
     public bool HasVideo => _venc != null;
     public bool HasAudio => _aenc != null;
@@ -65,59 +67,23 @@ public sealed unsafe class MediaWriter : IDisposable
 
     private void OpenVideo(ExportSettings s, bool globalHeader)
     {
-        var codec = ffmpeg.avcodec_find_encoder_by_name(s.VideoCodec);
-        if (codec == null) throw new InvalidOperationException($"エンコーダ {s.VideoCodec} が使えません");
         _vst = ffmpeg.avformat_new_stream(_oc, null);
-        _venc = ffmpeg.avcodec_alloc_context3(codec);
-        _venc->width = _width & ~1;
-        _venc->height = _height & ~1;
-        _venc->time_base = new AVRational { num = (int)s.Fps.Den, den = (int)s.Fps.Num };
-        _venc->framerate = new AVRational { num = (int)s.Fps.Num, den = (int)s.Fps.Den };
-        _venc->gop_size = (int)Math.Max(1, Math.Round(s.Fps.Value * 2));
-        _venc->pix_fmt = PickPixelFormat(codec);
-        _venc->thread_count = 0;
-        if (globalHeader) _venc->flags |= ffmpeg.AV_CODEC_FLAG_GLOBAL_HEADER;
-
-        AVDictionary* opts = null;
-        string name = s.VideoCodec;
-        if (name is "libx264" or "libx265")
-        {
-            ffmpeg.av_dict_set(&opts, "crf", s.Crf.ToString(), 0);
-            ffmpeg.av_dict_set(&opts, "preset", s.Preset, 0);
-        }
-        else if (name == "libvpx-vp9")
-        {
-            ffmpeg.av_dict_set(&opts, "crf", Math.Clamp(s.Crf + 10, 0, 63).ToString(), 0);
-            ffmpeg.av_dict_set(&opts, "b", "0", 0);
-            ffmpeg.av_dict_set(&opts, "row-mt", "1", 0);
-            ffmpeg.av_dict_set(&opts, "cpu-used", "4", 0);
-        }
-        else if (name == "libsvtav1")
-        {
-            ffmpeg.av_dict_set(&opts, "crf", Math.Clamp(s.Crf + 10, 0, 63).ToString(), 0);
-            ffmpeg.av_dict_set(&opts, "preset", "8", 0);
-        }
-        else if (name == "prores_ks")
-        {
-            ffmpeg.av_dict_set(&opts, "profile", "3", 0);
-        }
-        else
-        {
-            _venc->bit_rate = (long)_width * _height * 4;
-        }
-        int ret = ffmpeg.avcodec_open2(_venc, codec, &opts);
-        ffmpeg.av_dict_free(&opts);
-        FFmpegLoader.Check(ret, $"映像エンコーダ {name} を開けません");
+        AVBufferRef* device;
+        _venc = VideoEncoderSetup.Open(s, _width, _height, globalHeader, out device, out var softwareFormat);
+        _hwDevice = device;
+        _uploadToHardware = _venc->hw_frames_ctx != null;
         FFmpegLoader.Check(ffmpeg.avcodec_parameters_from_context(_vst->codecpar, _venc), "映像ストリームの設定に失敗");
         _vst->time_base = _venc->time_base;
         _vst->avg_frame_rate = _venc->framerate;
 
+        // BGRA から変換した結果を入れるフレーム (ハードウェアへ送る場合も、まずここに作る)
         _vframe = ffmpeg.av_frame_alloc();
-        _vframe->format = (int)_venc->pix_fmt;
+        _vframe->format = (int)softwareFormat;
         _vframe->width = _venc->width; _vframe->height = _venc->height;
         FFmpegLoader.Check(ffmpeg.av_frame_get_buffer(_vframe, 0), "フレームの確保に失敗");
-        _sws = ffmpeg.sws_getContext(_width, _height, AVPixelFormat.AV_PIX_FMT_BGRA, _venc->width, _venc->height, _venc->pix_fmt,
+        _sws = ffmpeg.sws_getContext(_width, _height, AVPixelFormat.AV_PIX_FMT_BGRA, _venc->width, _venc->height, softwareFormat,
             ffmpeg.SWS_BICUBIC, null, null, null);
+        if (_sws == null) throw new InvalidOperationException("色変換の準備に失敗");
         // BT.709 で変換する (HD 以上の標準)
         if (_height >= 720)
         {
@@ -125,15 +91,6 @@ public sealed unsafe class MediaWriter : IDisposable
             var arr = new int_array4(); for (uint i = 0; i < 4; i++) arr[i] = coef[i];
             ffmpeg.sws_setColorspaceDetails(_sws, arr, 1, arr, 0, 0, 1 << 16, 1 << 16);
         }
-    }
-
-    private static AVPixelFormat PickPixelFormat(AVCodec* codec)
-    {
-        if (codec->pix_fmts == null) return AVPixelFormat.AV_PIX_FMT_YUV420P;
-        AVPixelFormat first = codec->pix_fmts[0];
-        for (var p = codec->pix_fmts; *p != AVPixelFormat.AV_PIX_FMT_NONE; p++)
-            if (*p == AVPixelFormat.AV_PIX_FMT_YUV420P) return *p;
-        return first;
     }
 
     private void OpenAudio(ExportSettings s, bool globalHeader)
@@ -179,7 +136,18 @@ public sealed unsafe class MediaWriter : IDisposable
             ffmpeg.sws_scale(_sws, src, strides, 0, _height, _vframe->data, _vframe->linesize);
         }
         _vframe->pts = _videoPts++;
-        Encode(_venc, _vst, _vframe);
+        if (!_uploadToHardware) { Encode(_venc, _vst, _vframe); return; }
+
+        // VAAPI など: メモリ上のフレームを GPU 側のフレームへ送ってから、エンコーダに渡す
+        var hw = ffmpeg.av_frame_alloc();
+        try
+        {
+            FFmpegLoader.Check(ffmpeg.av_hwframe_get_buffer(_venc->hw_frames_ctx, hw, 0), "GPU 側のフレームを確保できません");
+            FFmpegLoader.Check(ffmpeg.av_hwframe_transfer_data(hw, _vframe, 0), "GPU へフレームを送れません");
+            hw->pts = _vframe->pts;
+            Encode(_venc, _vst, hw);
+        }
+        finally { ffmpeg.av_frame_free(&hw); }
     }
 
     /// <summary>インターリーブのステレオ float を追記する。</summary>
@@ -266,6 +234,7 @@ public sealed unsafe class MediaWriter : IDisposable
         if (_sws != null) { ffmpeg.sws_freeContext(_sws); _sws = null; }
         if (_swr != null) { var s = _swr; ffmpeg.swr_free(&s); _swr = null; }
         if (_venc != null) { var c = _venc; ffmpeg.avcodec_free_context(&c); _venc = null; }
+        if (_hwDevice != null) { var d = _hwDevice; ffmpeg.av_buffer_unref(&d); _hwDevice = null; }
         if (_aenc != null) { var c = _aenc; ffmpeg.avcodec_free_context(&c); _aenc = null; }
         if (_oc != null)
         {

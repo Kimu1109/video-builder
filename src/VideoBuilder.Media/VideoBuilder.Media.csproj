@@ -3,5 +3,6 @@
     <ProjectReference Include="../VideoBuilder.Core/VideoBuilder.Core.csproj" />
     <PackageReference Include="FFmpeg.AutoGen" />
     <PackageReference Include="Silk.NET.OpenAL" />
+    <InternalsVisibleTo Include="VideoBuilder.Tests" />
   </ItemGroup>
 </Project>

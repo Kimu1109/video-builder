@@ -391,5 +391,6 @@ internal static class TranslationsEn
         ("言語", "Language"),
         ("自動", "Auto"),
         ("言語の変更は、次回起動時に反映されます。", "The language change takes effect after restart."),
+        ("MP4 ({0} + AAC) - ハードウェア ({1})", "MP4 ({0} + AAC) - hardware ({1})"),
     };
 }

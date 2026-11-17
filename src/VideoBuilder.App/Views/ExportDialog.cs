@@ -45,7 +45,9 @@ public sealed class ExportDialog : DialogBase
         _formats = AllFormats.Where(f => f.Sequence ||
             (f.VideoCodec == "" || MediaWriter.IsEncoderAvailable(f.VideoCodec)) && (f.AudioCodec == "" || MediaWriter.IsEncoderAvailable(f.AudioCodec))).ToList();
         _format = new ComboBox { ItemsSource = _formats.Select(f => f.Name).ToList(), SelectedIndex = 0, HorizontalAlignment = HorizontalAlignment.Stretch };
-        _format.SelectionChanged += (_, _) => { FixExtension(); UpdateOptions(); };
+        _format.SelectionChanged += (_, _) => { if (_format.SelectedIndex >= 0) { FixExtension(); UpdateOptions(); } };
+        // このマシンで使えるハードウェアエンコーダを裏で調べて、見つかったら選択肢に足す
+        _ = AddHardwareFormatsAsync();
 
         var browse = new IconButton("FolderOpen", "出力先を選ぶ", flat: false) { Margin = new Thickness(4, 0, 0, 0) };
         browse.Click += async (_, _) => await Browse();
@@ -86,13 +88,28 @@ public sealed class ExportDialog : DialogBase
         Closing += (_, e) => { if (_cancel != null) { e.Cancel = true; _cancel.Cancel(); } };
     }
 
-    private Format Current => _formats[Math.Max(0, _format.SelectedIndex)];
+    private Format Current => _formats[Math.Clamp(_format.SelectedIndex, 0, _formats.Count - 1)];
+
+    private async Task AddHardwareFormatsAsync()
+    {
+        List<HardwareEncoder> found;
+        try { found = await Task.Run(HardwareEncoders.FindAvailable); }
+        catch { return; }
+        if (found.Count == 0 || !MediaWriter.IsEncoderAvailable("aac")) return;
+        var selected = Current;
+        // ソフトウェアの映像形式のすぐ後ろ (連番 PNG・音声のみの前) に並べる
+        int at = _formats.FindIndex(f => f.Sequence || f.VideoCodec == "");
+        if (at < 0) at = _formats.Count;
+        _formats.InsertRange(at, found.Select(h => new Format($"MP4 ({h.Codec} + AAC) - ハードウェア ({h.Api})", "mp4", h.Encoder, "aac")));
+        _format.ItemsSource = _formats.Select(f => f.Name).ToList();
+        _format.SelectedIndex = _formats.IndexOf(selected);
+    }
 
     private void UpdateOptions()
     {
-        bool x26x = Current.VideoCodec is "libx264" or "libx265";
-        _crf.IsEnabled = Current.VideoCodec is "libx264" or "libx265" or "libvpx-vp9" or "libsvtav1";
-        _preset.IsEnabled = x26x;
+        string codec = Current.VideoCodec, family = HardwareEncoders.FamilyOf(codec);
+        _crf.IsEnabled = family.Length > 0 || codec is "libx264" or "libx265" or "libvpx-vp9" or "libsvtav1";
+        _preset.IsEnabled = codec is "libx264" or "libx265" || family is "nvenc" or "qsv" or "amf";
     }
 
     private void FixExtension()

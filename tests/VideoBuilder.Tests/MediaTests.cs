@@ -147,3 +147,117 @@ public class AudioOutputTests
         Assert.True(pos >= 1000);
     }
 }
+
+/// <summary>
+/// ハードウェアエンコード。テスト環境には GPU がないので、「使えない環境で安全に失敗すること」と
+/// 「エンコーダごとの設定の組み立て」を確かめる (実際のエンコード結果は GPU のある環境でしか確認できない)。
+/// </summary>
+public class HardwareEncoderTests
+{
+    [Fact]
+    public void Family_is_recognized_from_the_encoder_name()
+    {
+        Assert.Equal("nvenc", HardwareEncoders.FamilyOf("hevc_nvenc"));
+        Assert.Equal("vaapi", HardwareEncoders.FamilyOf("h264_vaapi"));
+        Assert.Equal("", HardwareEncoders.FamilyOf("libx264"));
+        Assert.False(HardwareEncoders.IsHardware("libsvtav1"));
+        Assert.All(HardwareEncoders.Candidates, c => Assert.True(HardwareEncoders.IsHardware(c.Encoder)));
+        Assert.Equal(HardwareEncoders.Candidates.Length, HardwareEncoders.Candidates.Select(c => c.Encoder).Distinct().Count());
+    }
+
+    [Fact]
+    public void Quality_and_speed_are_translated_for_each_encoder_family()
+    {
+        var nv = VideoEncoderSetup.OptionsFor("h264_nvenc", 20, "slow");
+        Assert.Equal(("vbr", "20", "p5"), (nv["rc"], nv["cq"], nv["preset"]));
+        Assert.Equal("1", VideoEncoderSetup.OptionsFor("h264_nvenc", 0, "medium")["cq"]);      // 0 は「自動」なので避ける
+        Assert.Equal("p4", VideoEncoderSetup.OptionsFor("hevc_nvenc", 20, "unknown")["preset"]);
+
+        var va = VideoEncoderSetup.OptionsFor("h264_vaapi", 22, "medium");
+        Assert.Equal(("CQP", "22"), (va["rc_mode"], va["qp"]));
+        Assert.Equal("110", VideoEncoderSetup.OptionsFor("av1_vaapi", 22, "medium")["qp"]);    // AV1 は 0〜255 の目盛り
+
+        Assert.Equal("veryfast", VideoEncoderSetup.OptionsFor("h264_qsv", 20, "ultrafast")["preset"]);
+        var amf = VideoEncoderSetup.OptionsFor("h264_amf", 18, "veryslow");
+        Assert.Equal(("cqp", "18", "quality"), (amf["rc"], amf["qp_p"], amf["quality"]));
+        Assert.Empty(VideoEncoderSetup.OptionsFor("h264_videotoolbox", 20, "medium"));           // ビットレートで指定
+
+        // ソフトウェアエンコーダの設定は従来どおり
+        var x264 = VideoEncoderSetup.OptionsFor("libx264", 20, "fast");
+        Assert.Equal(("20", "fast"), (x264["crf"], x264["preset"]));
+    }
+
+    [Fact]
+    public void Bitrate_estimate_doubles_every_six_quality_steps()
+    {
+        long a = VideoEncoderSetup.EstimateBitrate(1920, 1080, 30, 23), b = VideoEncoderSetup.EstimateBitrate(1920, 1080, 30, 17);
+        Assert.InRange(a, 6_000_000, 6_500_000);
+        Assert.InRange((double)b / a, 1.99, 2.01);
+    }
+
+    [Fact]
+    public void Probing_never_throws_and_reports_why_an_encoder_is_unusable()
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        Assert.False(HardwareEncoders.Probe("no_such_encoder", out var missing));
+        Assert.NotNull(missing);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var available = HardwareEncoders.FindAvailable();
+        Console.WriteLine($"BENCH hardware encoders usable here: {(available.Count == 0 ? "(none)" : string.Join(", ", available.Select(a => a.Encoder)))} (probe {sw.ElapsedMilliseconds} ms)");
+        foreach (var c in HardwareEncoders.Candidates)
+        {
+            bool ok = HardwareEncoders.Probe(c.Encoder, out var error);     // 2 回目は覚えている結果を返す
+            Assert.Equal(available.Contains(c), ok);
+            if (!ok) Assert.False(string.IsNullOrEmpty(error));
+        }
+    }
+
+    [Fact]
+    public void Export_with_an_unusable_hardware_encoder_fails_cleanly()
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        // この環境で使えないものを 1 つ選ぶ (全部使える環境ではテストしない)
+        var unusable = HardwareEncoders.Candidates.FirstOrDefault(c => MediaWriter.IsEncoderAvailable(c.Encoder) && !HardwareEncoders.Probe(c.Encoder, out _));
+        if (unusable == null) return;
+        var path = Path.Combine(Path.GetTempPath(), $"vb-hw-{Guid.NewGuid():N}.mp4");
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var w = new MediaWriter(new ExportSettings { Path = path, Width = 320, Height = 240, VideoCodec = unusable.Encoder, AudioCodec = "" });
+        });
+        Assert.False(string.IsNullOrEmpty(ex.Message));
+        try { File.Delete(path); } catch { }
+    }
+
+    [Fact]
+    public void Usable_hardware_encoders_produce_a_readable_file()
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        // GPU のある環境でだけ実行される
+        foreach (var h in HardwareEncoders.FindAvailable())
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"vb-hw-{h.Encoder}-{Guid.NewGuid():N}.mp4");
+            try
+            {
+                using (var w = new MediaWriter(new ExportSettings { Path = path, Width = 640, Height = 360, Fps = new Rational(30, 1), VideoCodec = h.Encoder, AudioCodec = "aac" }))
+                {
+                    var frame = new byte[640 * 360 * 4];
+                    var audio = new float[1600 * 2];
+                    for (int f = 0; f < 30; f++)
+                    {
+                        Array.Fill(frame, (byte)(f * 8));
+                        w.WriteVideoFrame(frame, 640 * 4);
+                        w.WriteAudio(audio);
+                    }
+                    w.Finish();
+                }
+                var info = MediaInfo.Probe(path)!;
+                Assert.True(info.HasVideo, h.Encoder);
+                Assert.Equal(640, info.Width);
+                using var r = new VideoReader(path);
+                Assert.InRange(r.GetFrame(0.5)![0], 90, 150);      // 15 フレーム目 = 120 付近のグレー
+            }
+            finally { try { File.Delete(path); } catch { } }
+        }
+    }
+}
+
