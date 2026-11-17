@@ -3,9 +3,15 @@ using VideoBuilder.Core;
 
 namespace VideoBuilder.Rendering;
 
-/// <summary>オブジェクト 1 つ分の絵。(Cx, Cy) は画像の中でオブジェクトの中心にあたる位置。</summary>
-public readonly record struct Sprite(SKImage Image, float Cx, float Cy)
+/// <summary>
+/// オブジェクト 1 つ分の絵。(Cx, Cy) は画像の中でオブジェクトの中心にあたる位置。
+/// Scale は「画像の 1 ピクセルが何ピクセルぶんにあたるか」(プロキシなど、小さく作った絵を元の大きさで描くときに 1 より大きくなる)。
+/// </summary>
+public readonly record struct Sprite(SKImage Image, float Cx, float Cy, float Scale)
 {
+    /// <summary>倍率 1 の絵。(以前からあるコンストラクタ。作成済みのプラグインがそのまま動くよう残している)</summary>
+    public Sprite(SKImage image, float cx, float cy) : this(image, cx, cy, 1) { }
+
     public static Sprite Centered(SKImage image) => new(image, image.Width / 2f, image.Height / 2f);
     public int Width => Image.Width;
     public int Height => Image.Height;

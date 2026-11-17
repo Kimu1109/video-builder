@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using VideoBuilder.Core;
+using SkiaSharp;
 using VideoBuilder.Media;
+using VideoBuilder.Rendering;
 
 namespace VideoBuilder.Tests;
 
@@ -372,5 +374,175 @@ public class HardwareDecodingTests : IDisposable
         using var r = new VideoReader(_clip);
         Assert.False(r.IsHardware);
         Assert.NotNull(r.GetFrame(0.5));
+    }
+}
+
+/// <summary>プロキシの生成と、プレビューでの差し替え。ProxyStore の設定 (静的な値) を書き換えるので、ほかと同時には動かさない。</summary>
+[Collection("HardwareDecoding")]
+public class ProxyTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), $"vb-proxy-{Guid.NewGuid():N}");
+    private readonly string _clip;
+    private readonly bool _ready;
+    private readonly string _oldDirectory = ProxyStore.Directory;
+
+    public ProxyTests()
+    {
+        Directory.CreateDirectory(_dir);
+        ProxyStore.Directory = Path.Combine(_dir, "proxies");
+        ProxyStore.Divisor = 2;
+        ProxyStore.Enabled = true;
+        _clip = Path.Combine(_dir, "clip.mp4");
+        // 色が帯状に並ぶ 640x360 の動画 (フレームごとに模様が動く)
+        _ready = FFmpegLoader.EnsureLoaded() && MediaTests.RunFfmpeg(
+            $"-f lavfi -i testsrc2=size=640x360:rate=30:duration=2 -f lavfi -i sine=frequency=440:duration=2 -c:v libx264 -pix_fmt yuv420p -g 30 -c:a aac -shortest \"{_clip}\"");
+    }
+
+    public void Dispose()
+    {
+        ProxyStore.Directory = _oldDirectory;
+        ProxyStore.Divisor = 2;
+        ProxyStore.Enabled = true;
+        ProxyStore.NotifyChanged();
+        try { Directory.Delete(_dir, true); } catch { }
+    }
+
+    private string MakeProxy(int divisor = 2)
+    {
+        ProxyStore.Divisor = divisor;
+        var path = ProxyStore.PathFor(_clip)!;
+        ProxyGenerator.Create(_clip, path, divisor, null, CancellationToken.None);
+        return path;
+    }
+
+    private static double MeanDiff(byte[] a, byte[] b)
+    {
+        long t = 0;
+        for (int i = 0; i < a.Length; i++) t += Math.Abs(a[i] - b[i]);
+        return (double)t / a.Length;
+    }
+
+    [Fact]
+    public void Proxy_is_half_size_and_its_frames_line_up_with_the_original()
+    {
+        if (!_ready) return;
+        var reported = new List<double>();
+        ProxyStore.Divisor = 2;
+        var path = ProxyStore.PathFor(_clip)!;
+        Assert.Null(ProxyStore.FindReady(_clip));
+        ProxyGenerator.Create(_clip, path, 2, new SyncProgress(reported.Add), CancellationToken.None);
+        Assert.Equal(path, ProxyStore.FindReady(_clip));
+        Assert.Equal(1.0, reported[^1]);
+        Assert.False(File.Exists(path + ".part"));
+
+        var info = MediaInfo.Probe(path)!;
+        Assert.Equal((320, 180, "mjpeg"), (info.Width, info.Height, info.VideoCodec));
+        Assert.False(info.HasAudio);
+        Assert.InRange(info.Duration, 1.9, 2.1);
+
+        // 同じ時刻のフレームが、元の動画を縮小したものとほぼ同じ (別の時刻のフレームとは違う)
+        using var original = new VideoReader(_clip);
+        using var proxy = new VideoReader(path);
+        byte[] Shrunk(double t)
+        {
+            using var src = new SKBitmap(new SKImageInfo(640, 360, SKColorType.Bgra8888, SKAlphaType.Opaque));
+            System.Runtime.InteropServices.Marshal.Copy(original.GetFrame(t)!, 0, src.GetPixels(), 640 * 360 * 4);
+            using var small = src.Resize(new SKImageInfo(320, 180, SKColorType.Bgra8888, SKAlphaType.Opaque), SKFilterQuality.Medium)!;
+            return small.Bytes;
+        }
+        foreach (var t in new[] { 0.0, 0.5, 1.23, 1.9, 0.3 })
+        {
+            var expected = Shrunk(t);
+            var fromProxy = proxy.GetFrame(t)!.ToArray();
+            double same = MeanDiff(expected, fromProxy);
+            Assert.True(same < 6, $"t={t}: 差が大きい {same:0.0}");
+            // 1 秒ずれたフレームとは、同じ時刻のフレームよりはっきり違う (時刻の対応が合っている)
+            double shifted = MeanDiff(Shrunk((t + 1) % 2), fromProxy);
+            Assert.True(shifted > same * 2, $"t={t}: 同じ時刻 {same:0.00} / 1 秒ずれ {shifted:0.00}");
+        }
+    }
+
+    [Fact]
+    public void Cancelling_leaves_no_files_and_changed_sources_get_a_new_proxy_path()
+    {
+        if (!_ready) return;
+        var path = ProxyStore.PathFor(_clip)!;
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        Assert.ThrowsAny<OperationCanceledException>(() => ProxyGenerator.Create(_clip, path, 2, null, cts.Token));
+        Assert.False(File.Exists(path));
+        Assert.False(File.Exists(path + ".part"));
+
+        MakeProxy();
+        Assert.NotNull(ProxyStore.FindReady(_clip));
+        File.SetLastWriteTimeUtc(_clip, DateTime.UtcNow.AddMinutes(1));     // 元の動画が書き換えられた
+        ProxyStore.NotifyChanged();
+        Assert.NotEqual(path, ProxyStore.PathFor(_clip));
+        Assert.Null(ProxyStore.FindReady(_clip));                          // 古いプロキシは使わない
+
+        MakeProxy();
+        Assert.Equal(1, ProxyStore.Delete(_clip));
+        Assert.Null(ProxyStore.FindReady(_clip));
+    }
+
+    [Fact]
+    public void Preview_uses_the_proxy_at_the_original_size_and_export_never_does()
+    {
+        if (!_ready) return;
+        // 目印として、プロキシの代わりに「真っ赤な動画」をプロキシの場所に置く
+        ProxyStore.Divisor = 2;
+        var proxyPath = ProxyStore.PathFor(_clip)!;
+        Directory.CreateDirectory(ProxyStore.Directory);
+        Assert.True(MediaTests.RunFfmpeg($"-f lavfi -i color=c=red:size=320x180:rate=30:duration=2 -c:v mjpeg -pix_fmt yuvj420p \"{proxyPath}\""));
+        ProxyStore.NotifyChanged();
+
+        var p = new Project();
+        p.Settings.Width = 1280; p.Settings.Height = 720;
+        var v = ObjectFactory.Create(EffectRegistry.Video, 0, 0, 60);
+        v.Main.Values["file"] = _clip;
+        p.Root.Objects.Add(v);
+
+        SKColor Render(bool draft, int x, int y, out SKPoint[] quad)
+        {
+            using var e = new RenderEngine { Draft = draft };
+            using var bmp = new SKBitmap(new SKImageInfo(1280, 720, SKColorType.Bgra8888, SKAlphaType.Premul));
+            e.RenderToBitmap(p, p.Root, 10, bmp);
+            quad = e.LastQuads.Single().Quad;
+            return bmp.GetPixel(x, y);
+        }
+
+        var preview = Render(true, 640, 360, out var previewQuad);
+        var final = Render(false, 640, 360, out var finalQuad);
+        Assert.True(preview.Red > 200 && preview.Green < 60, $"プレビューはプロキシ (赤) を使う: {preview}");
+        Assert.False(final.Red > 200 && final.Green < 60 && final.Blue < 60, "出力は元の動画を使う");
+        // 小さいプロキシでも、画面上の大きさ・位置は元の動画と同じ (640x360 を中心に置く)
+        Assert.Equal(finalQuad.Select(q => (Math.Round(q.X), Math.Round(q.Y))), previewQuad.Select(q => (Math.Round(q.X), Math.Round(q.Y))));
+        Assert.Equal(new SKColor(0, 0, 0), Render(true, 310, 360, out _));      // 動画の外 (左端 320 より左) は黒のまま
+        Assert.True(Render(true, 330, 360, out _).Red > 200);                    // 動画の左端の内側は赤
+
+        // フィルタがあるときも同じ大きさ (元の大きさに戻してからフィルタをかける)
+        ObjectFactory.AddFilter(v, "filter.border").Tracks["size"] = new AnimatedValue(10);
+        Render(true, 640, 360, out var filtered);
+        Render(false, 640, 360, out var filteredFinal);
+        Assert.Equal(filteredFinal.Select(q => Math.Round(q.X)), filtered.Select(q => Math.Round(q.X)));
+
+        // プロキシを使わない設定なら、プレビューも元の動画
+        ProxyStore.Enabled = false;
+        var off = Render(true, 640, 360, out _);
+        Assert.False(off.Red > 200 && off.Green < 60 && off.Blue < 60);
+    }
+
+    [Fact]
+    public void Heavy_videos_are_recognized_for_automatic_proxies()
+    {
+        Assert.True(ProxyStore.IsHeavy(new MediaInfo(true, true, 3840, 2160, 30, 10) { VideoCodec = "h264" }));
+        Assert.True(ProxyStore.IsHeavy(new MediaInfo(true, true, 1920, 1080, 30, 10) { VideoCodec = "hevc" }));
+        Assert.False(ProxyStore.IsHeavy(new MediaInfo(true, true, 1920, 1080, 30, 10) { VideoCodec = "h264" }));
+        Assert.False(ProxyStore.IsHeavy(new MediaInfo(false, true, 0, 0, 0, 10)));
+    }
+
+    private sealed class SyncProgress(Action<double> onReport) : IProgress<double>
+    {
+        public void Report(double value) => onReport(value);
     }
 }

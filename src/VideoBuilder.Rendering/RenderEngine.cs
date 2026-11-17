@@ -24,8 +24,16 @@ public sealed class RenderEngine : IDisposable
         Media = new MediaCache(zeroCopy: gpu == null);
     }
 
-    /// <summary>プレビュー用の軽い描画にする (拡大縮小の補間を簡略化)。出力では false のままにする。</summary>
-    public bool Draft { get; set; }
+    /// <summary>
+    /// プレビュー用の軽い描画にする (拡大縮小の補間を簡略化し、動画はプロキシがあればプロキシを使う)。
+    /// 出力では false のままにする。
+    /// </summary>
+    public bool Draft
+    {
+        get => _draft;
+        set { _draft = value; Media.UseProxies = value; }
+    }
+    private bool _draft;
 
     // テキスト・図形は、パラメータが同じ間は作り直さない
     private readonly Dictionary<string, SKImage?> _generated = new();
@@ -170,9 +178,17 @@ public sealed class RenderEngine : IDisposable
                         break;
                     case EffectCategory.VideoSource:
                     {
+                        _sourceScale = 1;
                         var src = GetSource(ctx, obj, bounds, frame, depth);
                         if (src == null) break;
                         var sprite = Sprite.Centered(src);
+                        if (_sourceScale != 1)
+                        {
+                            // プロキシ (小さく作った動画) の絵。フィルタはピクセル単位の大きさ (ぼかしの範囲など) で動くので、
+                            // フィルタがあるときだけ元の大きさに戻してからかける。なければ縮んだまま描いて、描くときに拡大する
+                            bool hasFilter = obj.Effects.Skip(1).Any(e => e.Enabled && e.Definition.Category == EffectCategory.Filter);
+                            sprite = hasFilter ? Upscale(ctx, sprite, _sourceScale) : sprite with { Scale = _sourceScale };
+                        }
                         ctx.Modifiers = DrawModifiers.None;
                         int next = ApplyCachedFilters(ctx, obj, bounds, frame, depth, ref sprite);
                         for (int i = next; i < obj.Effects.Count; i++)
@@ -253,6 +269,7 @@ public sealed class RenderEngine : IDisposable
 
         canvas.Save();
         canvas.Concat(ref h);
+        if (sprite.Scale != 1) canvas.Scale(sprite.Scale);   // 小さく作った絵 (プロキシ) を元の大きさで描く
         alpha = Math.Clamp(alpha, 0, 1);
         if (quads != null)
         {
@@ -597,6 +614,27 @@ public sealed class RenderEngine : IDisposable
         WriteBack();
     }
 
+    /// <summary>直前の GetSource が返した絵の倍率 (プロキシのとき 1 より大きい)。</summary>
+    private float _sourceScale = 1;
+
+    /// <summary>小さく作った絵を、元の大きさの絵にする。</summary>
+    private static Sprite Upscale(RenderContext ctx, Sprite s, float scale)
+    {
+        int w = (int)MathF.Round(s.Width * scale), h = (int)MathF.Round(s.Height * scale);
+        using var paint = new SKPaint { FilterQuality = SKFilterQuality.Low, BlendMode = SKBlendMode.Src };
+        SKImage image;
+        if (ctx.Gpu == null)
+            image = PixelOps.DrawParallel(w, h, c => c.DrawImage(s.Image, SKRect.Create(s.Width, s.Height), SKRect.Create(w, h), paint));
+        else
+        {
+            using var surface = ctx.CreateSurface(w, h);
+            if (surface == null) return s with { Scale = scale };
+            surface.Canvas.DrawImage(s.Image, SKRect.Create(s.Width, s.Height), SKRect.Create(w, h), paint);
+            image = surface.Snapshot();
+        }
+        return new Sprite(ctx.Own(image), w / 2f, h / 2f);
+    }
+
     private SKImage? GetSource(RenderContext ctx, TimelineObject obj, int[] bounds, int frame, int depth)
     {
         var p = ctx.Project;
@@ -606,7 +644,9 @@ public sealed class RenderEngine : IDisposable
             case EffectRegistry.Video:
             {
                 double t = SourceTime(p, obj, bounds, frame);
-                return Media.GetVideoFrame(obj.Id, main.GetString("file"), t, main.GetBool("loop"));
+                var image = Media.GetVideoFrame(obj.Id, main.GetString("file"), t, main.GetBool("loop"), out var scale);
+                _sourceScale = scale;
+                return image;
             }
             case EffectRegistry.Image:
                 return Media.GetImage(main.GetString("file"));

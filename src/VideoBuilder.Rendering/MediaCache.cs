@@ -13,6 +13,8 @@ public sealed class MediaCache : IDisposable
         public long FrameId = long.MinValue;
         public string Path = "";
         public long LastUsed;
+        /// <summary>プロキシを読んでいるときの、元の動画の幅 (元の動画を読んでいるときは 0)。</summary>
+        public int SourceWidth;
     }
 
     private readonly Dictionary<string, VideoEntry> _videos = new();
@@ -28,11 +30,25 @@ public sealed class MediaCache : IDisposable
     public MediaCache(bool zeroCopy = false) => _zeroCopy = zeroCopy;
 
     /// <summary>key ごとにデコーダを持つ (同じファイルを別オブジェクトで使ってもシークが競合しない)。</summary>
-    public SKImage? GetVideoFrame(string key, string path, double seconds, bool loop)
+    /// <summary>プレビュー用: プロキシがあれば元の動画の代わりに使う。</summary>
+    public bool UseProxies { get; set; }
+
+    public SKImage? GetVideoFrame(string key, string path, double seconds, bool loop) =>
+        GetVideoFrame(key, path, seconds, loop, out _);
+
+    /// <param name="scale">返した画像の 1 ピクセルが、元の動画の何ピクセルにあたるか (プロキシなら 2 や 4)。</param>
+    public SKImage? GetVideoFrame(string key, string path, double seconds, bool loop, out float scale)
     {
-        var e = Ensure(key, path);
-        return e == null ? null : Decode(e, seconds, loop);
+        scale = 1;
+        var e = Ensure(key, EffectivePath(path), path);
+        var image = e == null ? null : Decode(e, seconds, loop);
+        if (image != null && e!.Path != path && e.SourceWidth > 0) scale = e.SourceWidth / (float)image.Width;
+        return image;
     }
+
+    /// <summary>実際に読むファイル (プロキシを使う設定でプロキシがあれば、プロキシ)。</summary>
+    private string EffectivePath(string path) =>
+        UseProxies && ProxyStore.Enabled && ProxyStore.FindReady(path) is { } proxy ? proxy : path;
 
     /// <summary>
     /// 複数の動画のフレームを、動画ごとに別スレッドで同時にデコードしておく。
@@ -44,14 +60,15 @@ public sealed class MediaCache : IDisposable
         var jobs = new List<(VideoEntry Entry, double Seconds, bool Loop)>();
         foreach (var (key, path, seconds, loop) in requests)
         {
-            var e = Ensure(key, path);
+            var e = Ensure(key, EffectivePath(path), path);
             if (e?.Reader != null && jobs.All(j => !ReferenceEquals(j.Entry, e))) jobs.Add((e, seconds, loop));
         }
         if (jobs.Count < 2) return;
         Parallel.ForEach(jobs, job => Decode(job.Entry, job.Seconds, job.Loop));
     }
 
-    private VideoEntry? Ensure(string key, string path)
+    /// <param name="original">path がプロキシのときの、元の動画のパス。</param>
+    private VideoEntry? Ensure(string key, string path, string? original = null)
     {
         if (string.IsNullOrEmpty(path)) return null;
         if (!_videos.TryGetValue(key, out var e) || e.Path != path)
@@ -60,6 +77,15 @@ public sealed class MediaCache : IDisposable
             e = new VideoEntry { Path = path };
             try { e.Reader = File.Exists(path) ? new VideoReader(path) : null; }
             catch { e.Reader = null; }
+            if (e.Reader == null && original != null && original != path)
+            {
+                // プロキシが壊れていて開けなければ、元の動画を読む
+                e.Path = original;
+                try { e.Reader = File.Exists(original) ? new VideoReader(original) : null; }
+                catch { e.Reader = null; }
+            }
+            else if (original != null && original != path)
+                e.SourceWidth = MediaInfo.Probe(original)?.Width ?? 0;
             _videos[key] = e;
             e.LastUsed = ++_tick;
             Trim();
