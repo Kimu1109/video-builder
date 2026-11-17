@@ -52,7 +52,12 @@ public sealed class ObjectSettingsView : UserControl
 
         _session.SelectionChanged += Sync;
         _session.ProjectChanged += Sync;
-        _session.FrameChanged += RefreshValues;
+        _session.FrameChanged += RefreshValuesSoon;
+        _refreshTimer = new Avalonia.Threading.DispatcherTimer(TimeSpan.FromMilliseconds(RefreshIntervalMs), Avalonia.Threading.DispatcherPriority.Background, (_, _) =>
+        {
+            _refreshTimer!.Stop();
+            if (_refreshPending) RefreshValues();
+        });
         // 描画が終わるたびに確認するもの (スクリプトのエラー表示)
         Svc.Preview.FrameReady += () => { foreach (var w in _frameWatchers.ToList()) w(); };
         Sync();
@@ -68,8 +73,24 @@ public sealed class ObjectSettingsView : UserControl
         else RefreshValues();
     }
 
+    // 現在位置が動くたびに全部の入力欄を更新すると、再生やシーク中の負荷が大きい。
+    // そこで更新は 1 秒に 15 回程度までに抑える (最後の位置の値は必ず反映する)
+    private const int RefreshIntervalMs = 66;
+    private readonly Avalonia.Threading.DispatcherTimer? _refreshTimer;
+    private bool _refreshPending;
+    private long _lastRefresh;
+
+    private void RefreshValuesSoon()
+    {
+        if (Environment.TickCount64 - _lastRefresh >= RefreshIntervalMs) { RefreshValues(); return; }
+        _refreshPending = true;
+        if (_refreshTimer is { IsEnabled: false }) _refreshTimer.Start();
+    }
+
     private void RefreshValues()
     {
+        _refreshPending = false;
+        _lastRefresh = Environment.TickCount64;
         if (Target == null) return;
         _refreshing = true;
         try { foreach (var r in _refreshers) r(); }

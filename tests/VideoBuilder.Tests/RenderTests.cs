@@ -774,6 +774,54 @@ public class OptimizationTests
     }
 
     [Fact]
+    public void Mosaic_fills_each_cell_with_its_average_color()
+    {
+        // 左半分が赤、右半分が青の 40x20。マス 16px: 2 列目のマス (x=16..31) は赤 4 列 + 青 12 列の平均になる
+        using var bmp = new SKBitmap(new SKImageInfo(40, 20, SKColorType.Bgra8888, SKAlphaType.Premul));
+        using (var c = new SKCanvas(bmp))
+        {
+            c.Clear(SKColors.Red);
+            using var blue = new SKPaint { Color = SKColors.Blue };
+            c.DrawRect(20, 0, 20, 20, blue);
+        }
+        PixelOps.Mosaic(bmp.GetPixels(), 40, 20, bmp.RowBytes, 16);
+        Assert.Equal(new SKColor(255, 0, 0), bmp.GetPixel(3, 3));
+        var mixed = bmp.GetPixel(17, 5);
+        Assert.Equal(mixed, bmp.GetPixel(31, 15));                 // マスの中は同じ色
+        Assert.InRange(mixed.Red, 62, 66);                          // 255 * 4/16
+        Assert.InRange(mixed.Blue, 189, 193);                       // 255 * 12/16
+        Assert.Equal(new SKColor(0, 0, 255), bmp.GetPixel(36, 18)); // 端の半端なマス (幅 8, 高さ 4)
+        Assert.Equal(bmp.GetPixel(17, 17), bmp.GetPixel(30, 19));   // 下端の半端なマスも 1 色
+    }
+
+    [Fact]
+    public void Mosaic_on_the_whole_frame_and_on_an_object_agree_between_cpu_and_gpu()
+    {
+        var p = Small();
+        var bg = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 10); bg.Main.Values["type"] = "0"; bg.Main.Values["color"] = "#204060";
+        var circle = ObjectFactory.Create(EffectRegistry.Shape, 1, 0, 10); circle.Main.Values["type"] = "1"; circle.Main.Values["color"] = "#F2A900";
+        ObjectFactory.AddFilter(circle, "filter.mosaic").Tracks["size"] = new AnimatedValue(20);
+        var text = ObjectFactory.Create(EffectRegistry.Text, 2, 0, 10); text.Draw!.Tracks["y"] = new AnimatedValue(120);
+        var frame = ObjectFactory.Create("filter.mosaic", 3, 0, 10); frame.Main.Tracks["size"] = new AnimatedValue(8);
+        p.Root.Objects.AddRange(new[] { bg, circle, text, frame });
+
+        using var cpu = new RenderEngine();
+        using var a = new SKBitmap(new SKImageInfo(640, 360, SKColorType.Bgra8888, SKAlphaType.Premul));
+        cpu.RenderToBitmap(p, p.Root, 0, a);
+        // 画面全体のモザイク (8px): 同じマスの中は同じ色
+        Assert.Equal(a.GetPixel(320, 296), a.GetPixel(327, 303));
+        Assert.Equal(a.GetPixel(0, 0), a.GetPixel(7, 7));
+
+        using var gpu = GpuContext.TryCreate(out _);
+        if (gpu == null) return;
+        using var gpuEngine = new RenderEngine(gpu);
+        using var g = new SKBitmap(a.Info);
+        gpuEngine.RenderToBitmap(p, p.Root, 0, g);
+        var (mean, _) = Diff(a, g);
+        Assert.True(mean < 2.0, $"CPU と GPU の差が大きい: {mean:0.00}");
+    }
+
+    [Fact]
     public void Fast_chroma_key_for_preview_is_close_to_the_exact_one()
     {
         using var src = TestImage();

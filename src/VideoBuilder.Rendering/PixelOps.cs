@@ -208,6 +208,42 @@ public static unsafe class PixelOps
     }
 
     /// <summary>
+    /// モザイク: size ピクセル四方のマスごとに平均の色で塗りつぶす (その場で書き換える)。
+    /// マスの行ごとに複数スレッドへ分ける。
+    /// </summary>
+    public static void Mosaic(IntPtr pixels, int width, int height, int rowBytes, int size)
+    {
+        if (size <= 1) return;
+        byte* basePtr = (byte*)pixels;
+        int cellRows = (height + size - 1) / size;
+        void Row(int cy)
+        {
+            int y0 = cy * size, y1 = Math.Min(height, y0 + size);
+            for (int x0 = 0; x0 < width; x0 += size)
+            {
+                int x1 = Math.Min(width, x0 + size);
+                // 乗算済みアルファのまま平均すると、半透明の縁も正しい色になる
+                uint b = 0, g = 0, r = 0, a = 0;
+                for (int y = y0; y < y1; y++)
+                {
+                    byte* p = basePtr + (long)y * rowBytes + x0 * 4;
+                    for (int x = x0; x < x1; x++, p += 4) { b += p[0]; g += p[1]; r += p[2]; a += p[3]; }
+                }
+                uint n = (uint)((x1 - x0) * (y1 - y0)), half = n / 2;
+                uint value = ((b + half) / n) | (((g + half) / n) << 8) | (((r + half) / n) << 16) | (((a + half) / n) << 24);
+                for (int y = y0; y < y1; y++)
+                {
+                    uint* q = (uint*)(basePtr + (long)y * rowBytes + x0 * 4);
+                    for (int x = x0; x < x1; x++) *q++ = value;
+                }
+            }
+        }
+        if ((long)width * height < ParallelThreshold || Environment.ProcessorCount == 1)
+            for (int cy = 0; cy < cellRows; cy++) Row(cy);
+        else Parallel.For(0, cellRows, Row);
+    }
+
+    /// <summary>
     /// Skia の描画を横帯に分けて、複数スレッドで同時に行う (Skia の CPU 描画は 1 回の描画が 1 スレッドでしか動かないため)。
     /// draw は帯ごとに別々の SKCanvas で呼ばれるので、共有するのは読み取り専用のもの (SKImage・SKPaint・フィルタ) だけにする。
     /// </summary>

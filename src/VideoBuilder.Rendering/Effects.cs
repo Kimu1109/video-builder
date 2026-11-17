@@ -25,6 +25,13 @@ public static class Effects
         float[]? Matrix(EffectArgs args);
     }
 
+    /// <summary>ピクセルを直接書き換えられる効果。画面全体にかけるとき、複製を作らずその場で処理できる。</summary>
+    internal interface IPixelEffect
+    {
+        /// <summary>BGRA (乗算済みアルファ) のピクセルをその場で書き換える。処理しなかったら false。</summary>
+        bool ApplyInPlace(IntPtr pixels, int width, int height, int rowBytes, EffectArgs args);
+    }
+
     public static void Register(IVideoEffect effect) => Map[effect.Id] = effect;
     public static IVideoEffect? Find(string id) => Map.TryGetValue(id, out var e) ? e : null;
 
@@ -57,9 +64,10 @@ public static class Effects
     /// CPU 描画のとき: 画像を複製して、ピクセルを直接書き換える (PixelOps は複数スレッドで動く)。
     /// GPU 描画中や形式が合わないときは null を返すので、呼び出し側は Skia の描画で処理する。
     /// </summary>
-    internal static Sprite? WithPixels(Sprite s, EffectArgs a, Action<IntPtr, int, int, int> op)
+    /// <param name="alsoOnGpu">GPU 描画中でも、画像を読み戻してこの処理を使う (CPU と同じ絵にしたい効果用)。</param>
+    internal static Sprite? WithPixels(Sprite s, EffectArgs a, Action<IntPtr, int, int, int> op, bool alsoOnGpu = false)
     {
-        if (a.Context.Gpu != null) return null;
+        if (a.Context.Gpu != null && !alsoOnGpu) return null;
         var bmp = new SKBitmap(Info(s.Width, s.Height));
         if (!s.Image.ReadPixels(bmp.Info, bmp.GetPixels(), bmp.RowBytes, 0, 0)) { bmp.Dispose(); return null; }
         op(bmp.GetPixels(), bmp.Width, bmp.Height, bmp.RowBytes);
@@ -282,13 +290,23 @@ public static class Effects
         }
     }
 
-    private sealed class Mosaic : IVideoEffect
+    private sealed class Mosaic : IVideoEffect, IPixelEffect
     {
         public string Id => "filter.mosaic";
+
+        public bool ApplyInPlace(IntPtr pixels, int width, int height, int rowBytes, EffectArgs a)
+        {
+            PixelOps.Mosaic(pixels, width, height, rowBytes, Math.Max(1, (int)a.Track("size")));
+            return true;
+        }
+
         public Sprite Apply(Sprite s, EffectArgs a)
         {
             int size = Math.Max(1, (int)a.Track("size"));
             if (size <= 1) return s;
+            // ピクセルを直接平均する。CPU 描画では縮小と拡大を 2 回描くより速く、マスの色も正確になる。
+            // GPU 描画でも同じ絵になるよう、読み戻してこの処理を使う
+            if (WithPixels(s, a, (px, w, h, rb) => PixelOps.Mosaic(px, w, h, rb, size), alsoOnGpu: true) is { } fast) return fast;
             int sw = Math.Max(1, (int)MathF.Ceiling(s.Width / (float)size)), sh = Math.Max(1, (int)MathF.Ceiling(s.Height / (float)size));
             using var small = a.Context.CreateSurface(sw, sh);
             if (small == null) return s;

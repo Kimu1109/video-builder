@@ -451,6 +451,13 @@ public sealed class RenderEngine : IDisposable
                     continue;
                 }
             }
+            if (ctx.Gpu == null && fx is Effects.IPixelEffect pixelEffect)
+            {
+                WriteBack();
+                using var pixmap = surface.PeekPixels();
+                if (pixmap != null && pixmap.ColorType == SKColorType.Bgra8888 &&
+                    pixelEffect.ApplyInPlace(pixmap.GetPixels(), pixmap.Width, pixmap.Height, pixmap.RowBytes, args)) continue;
+            }
             if (pending == null)
             {
                 var snap = Sprite.Centered(ctx.Own(surface.Snapshot()));

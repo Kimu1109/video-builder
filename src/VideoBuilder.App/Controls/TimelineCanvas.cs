@@ -57,7 +57,7 @@ public sealed class TimelineCanvas : Control
         _session.SelectionChanged += InvalidateVisual;
         _session.SceneChanged += () => { _scrollX = _scrollY = 0; ViewChanged?.Invoke(); InvalidateVisual(); };
         _session.FrameChanged += OnFrameChanged;
-        Svc.Theme.Changed += () => { _brushes.Clear(); InvalidateVisual(); };
+        Svc.Theme.Changed += () => { _brushes.Clear(); _pens.Clear(); _textCache.Clear(); InvalidateVisual(); };
         Svc.Waveforms.Updated += InvalidateVisual;
         Svc.Thumbnails.Updated += InvalidateVisual;
     }
@@ -119,9 +119,10 @@ public sealed class TimelineCanvas : Control
                 _scrollX = Math.Max(0, _session.CurrentFrame * _ppf - ViewportWidth * 0.1);
                 ClampScroll();
                 ViewChanged?.Invoke();
+                InvalidateVisual();
             }
         }
-        InvalidateVisual();
+        // 現在位置が動いただけでは描き直さない (線は PlayheadOverlay が動かす)
     }
 
     /// <summary>現在位置が見えるようにスクロールする。</summary>
@@ -136,16 +137,67 @@ public sealed class TimelineCanvas : Control
 
     private readonly Dictionary<string, IBrush> _brushes = new();
 
+    private readonly Dictionary<(string, double), IPen> _pens = new();
+
+    private IPen P(string key, double thickness = 1)
+    {
+        if (!_pens.TryGetValue((key, thickness), out var p)) _pens[(key, thickness)] = p = new Pen(B(key), thickness);
+        return p;
+    }
+
     private IBrush B(string key)
     {
         if (!_brushes.TryGetValue(key, out var b)) _brushes[key] = b = key.StartsWith('#') ? new SolidColorBrush(Color.Parse(key)) : Svc.Brush(key);
         return b;
     }
 
-    private FormattedText Text(string s, IBrush brush, double size = 11, bool mono = false) =>
-        new(s, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, mono ? _mono : _typeface, size, brush);
+    // 文字の組版は重いので、同じ文字・大きさ・色のものは使い回す
+    private readonly Dictionary<(string, double, bool, IBrush), FormattedText> _textCache = new();
+
+    private FormattedText Text(string s, IBrush brush, double size = 11, bool mono = false)
+    {
+        var key = (s, size, mono, brush);
+        if (_textCache.TryGetValue(key, out var t)) return t;
+        if (_textCache.Count > 800) _textCache.Clear();
+        t = new FormattedText(s, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, mono ? _mono : _typeface, size, brush);
+        _textCache[key] = t;
+        return t;
+    }
+
+    private static readonly Avalonia.Media.Immutable.ImmutableSolidColorBrush Highlight = new Avalonia.Media.Immutable.ImmutableSolidColorBrush(Colors.White, 0.18);
+    private static readonly Avalonia.Media.Immutable.ImmutableSolidColorBrush WaveBrush = new Avalonia.Media.Immutable.ImmutableSolidColorBrush(Colors.White, 0.45);
+    private static readonly IPen KeyLinePen = new Avalonia.Media.Immutable.ImmutablePen(new Avalonia.Media.Immutable.ImmutableSolidColorBrush(Colors.White, 0.7));
+    private static readonly IPen WavePen = new Avalonia.Media.Immutable.ImmutablePen(WaveBrush);
+    private static readonly Geometry Diamond = CreateDiamond();
+
+    private static Geometry CreateDiamond()
+    {
+        var g = new StreamGeometry();
+        using (var s = g.Open())
+        {
+            s.BeginFigure(new Point(0, -4), true);
+            s.LineTo(new Point(4, 0)); s.LineTo(new Point(0, 4)); s.LineTo(new Point(-4, 0));
+            s.EndFigure(true);
+        }
+        return g;
+    }
+
+    // 波形の図形は、表示範囲が変わらない限り作り直さない
+    private readonly Dictionary<string, (string Signature, Geometry Geometry)> _waveCache = new();
+
+    /// <summary>描き直した回数と、それにかかった合計時間 (計測用)。</summary>
+    public int RenderCount { get; private set; }
+    public double RenderMsTotal { get; private set; }
 
     public override void Render(DrawingContext ctx)
+    {
+        long started = System.Diagnostics.Stopwatch.GetTimestamp();
+        RenderCore(ctx);
+        RenderCount++;
+        RenderMsTotal += System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+    }
+
+    private void RenderCore(DrawingContext ctx)
     {
         if (_typeface == default)
         {
@@ -274,14 +326,7 @@ public sealed class TimelineCanvas : Control
         }
         ctx.DrawLine(new Pen(B("Border.Strong")), new Point(HeaderWidth - 0.5, 0), new Point(HeaderWidth - 0.5, H));
 
-        // 現在位置カーソル
-        double px = Math.Round(FrameToX(_session.CurrentFrame)) + 0.5;
-        if (px >= HeaderWidth)
-        {
-            var red = B("Playhead");
-            ctx.DrawLine(new Pen(red), new Point(px, 0), new Point(px, H));
-            ctx.FillRectangle(red, new Rect(px - 4.5, 0, 9, 6));
-        }
+        // 現在位置カーソルは PlayheadOverlay が描く (再生中にこのコントロール全体を描き直さないため)
     }
 
     private void DrawObject(DrawingContext ctx, TimelineObject o, double lh)
@@ -295,7 +340,7 @@ public sealed class TimelineCanvas : Control
         using (ctx.PushOpacity(o.Enabled ? 1 : 0.45))
         {
             ctx.FillRectangle(B(def.Color), rect);
-            ctx.FillRectangle(new SolidColorBrush(Colors.White, 0.18), new Rect(rect.X, rect.Y, rect.Width, 1));   // 上端のハイライト
+            ctx.FillRectangle(Highlight, new Rect(rect.X, rect.Y, rect.Width, 1));   // 上端のハイライト
             if (rect.Width > 8 && def.Id == EffectRegistry.Audio && Svc.Settings.ShowWaveform) DrawWaveform(ctx, o, rect);
             if (rect.Width > 8)
             {
@@ -325,23 +370,17 @@ public sealed class TimelineCanvas : Control
                 }
             }
             // 中間点: 縦線 + ひし形
-            var keyPen = new Pen(new SolidColorBrush(Colors.White, 0.7));
+            var diamondPen = P("Timeline.ObjectBorder");
             foreach (var k in o.KeyFrames)
             {
                 double kx = Math.Round(FrameToX(k)) + 0.5, cy = y + (lh - 1) / 2;
-                ctx.DrawLine(keyPen, new Point(kx, y + 1), new Point(kx, y + lh - 2));
-                var g = new StreamGeometry();
-                using (var s = g.Open())
-                {
-                    s.BeginFigure(new Point(kx, cy - 4), true);
-                    s.LineTo(new Point(kx + 4, cy)); s.LineTo(new Point(kx, cy + 4)); s.LineTo(new Point(kx - 4, cy));
-                    s.EndFigure(true);
-                }
-                ctx.DrawGeometry(Brushes.White, new Pen(B("Timeline.ObjectBorder")), g);
+                ctx.DrawLine(KeyLinePen, new Point(kx, y + 1), new Point(kx, y + lh - 2));
+                using (ctx.PushTransform(Matrix.CreateTranslation(kx, cy)))
+                    ctx.DrawGeometry(Brushes.White, diamondPen, Diamond);
             }
         }
-        if (selected) ctx.DrawRectangle(null, new Pen(B("Accent"), 2), rect.Deflate(1));
-        else ctx.DrawRectangle(null, new Pen(B("Timeline.ObjectBorder")), rect.Deflate(0.5));
+        if (selected) ctx.DrawRectangle(null, P("Accent", 2), rect.Deflate(1));
+        else ctx.DrawRectangle(null, P("Timeline.ObjectBorder"), rect.Deflate(0.5));
     }
 
     /// <summary>音声オブジェクトの中に、ピーク値の波形を描く。</summary>
@@ -357,6 +396,12 @@ public sealed class TimelineCanvas : Control
         double fps = project.Settings.Fps.Value;
         double x1 = Math.Max(rect.X, HeaderWidth), x2 = Math.Min(rect.Right, Bounds.Width);
         double mid = rect.Y + rect.Height / 2, half = rect.Height / 2 - 1;
+        string signature = FormattableString.Invariant($"{x1}|{x2}|{rect.Y}|{rect.Height}|{_scrollX}|{_ppf}|{o.Start}|{speed}|{offset}|{loop}|{fps}|{peaks.Values.Length}");
+        if (_waveCache.TryGetValue(o.Id, out var cached) && cached.Signature == signature)
+        {
+            ctx.DrawGeometry(null, WavePen, cached.Geometry);
+            return;
+        }
         var geo = new StreamGeometry();
         using (var g = geo.Open())
         {
@@ -375,7 +420,9 @@ public sealed class TimelineCanvas : Control
                 g.LineTo(new Point(x + 0.5, mid + hgt));
             }
         }
-        ctx.DrawGeometry(null, new Pen(new SolidColorBrush(Colors.White, 0.45)), geo);
+        if (_waveCache.Count > 200) _waveCache.Clear();
+        _waveCache[o.Id] = (signature, geo);
+        ctx.DrawGeometry(null, WavePen, geo);
     }
 
     /// <summary>オブジェクトの帯に出す名前 (表示言語に合わせる)。</summary>

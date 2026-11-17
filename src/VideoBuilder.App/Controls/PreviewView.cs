@@ -29,6 +29,7 @@ public sealed class PreviewView : Control
         Focusable = true;
         Svc.Preview.FrameReady += OnFrameReady;
         Svc.Session.SelectionChanged += InvalidateVisual;
+        Svc.Preview.PlayStateChanged += InvalidateVisual;
         Svc.Theme.Changed += InvalidateVisual;
     }
 
@@ -62,7 +63,9 @@ public sealed class PreviewView : Control
 
         if (_bitmap != null)
         {
-            using (context.PushRenderOptions(new RenderOptions { BitmapInterpolationMode = BitmapInterpolationMode.HighQuality }))
+            // 再生中は軽い補間にして、止まっているときだけ高品質にする
+            var mode = Svc.Preview.IsPlaying ? BitmapInterpolationMode.LowQuality : BitmapInterpolationMode.HighQuality;
+            using (context.PushRenderOptions(new RenderOptions { BitmapInterpolationMode = mode }))
                 context.DrawImage(_bitmap, new Rect(_bitmap.Size), _dest);
         }
         else context.FillRectangle(Brushes.Black, _dest);

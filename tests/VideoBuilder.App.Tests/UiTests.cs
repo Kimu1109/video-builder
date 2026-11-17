@@ -486,4 +486,62 @@ public class UiTests
         }
         finally { L.Initialize(wasEnglish ? Language.English : Language.Japanese); }
     }
+
+    /// <summary>再生中に画面側 (タイムライン・設定ダイアログ) の更新にかかる時間を測って表示する。</summary>
+    [AvaloniaFact]
+    public void Report_ui_cost_per_frame_during_playback()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        s.Edit("bench", () =>
+        {
+            for (int i = 0; i < 40; i++)
+            {
+                var o = ObjectFactory.Create(i % 2 == 0 ? EffectRegistry.Text : EffectRegistry.Shape, i % 14, (i / 14) * 130 + i % 5 * 3, 110);
+                if (i % 2 == 0) o.Main.Values["text"] = $"テロップ {i}";
+                o.AddKeyFrame(o.Start + 40);
+                s.Scene.Objects.Add(o);
+            }
+        });
+        // 動きのあるパラメータを持つオブジェクトを選択しておく (設定ダイアログの値が毎フレーム変わる)
+        var target = s.Scene.Objects[0];
+        var x = target.Draw!.Tracks["x"]; x.Mode = MovementMode.Linear; x.Values[0] = 0; x.Values[1] = 500;
+        ObjectFactory.AddFilter(target, "filter.border"); ObjectFactory.AddFilter(target, "filter.shadow");
+        s.Select(target.Id);
+        Pump();
+        w.CaptureRenderedFrame()?.Dispose();
+
+        const int Frames = 120;
+        var canvas = w.Timeline.Canvas;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int f = 1; f <= Frames; f++) { s.CurrentFrame = f % 100; Pump(); }
+        double update = sw.Elapsed.TotalMilliseconds / Frames;
+        int rendersBefore = canvas.RenderCount;
+        sw.Restart();
+        for (int f = 1; f <= Frames; f++) { s.CurrentFrame = f % 100; Pump(); w.CaptureRenderedFrame()?.Dispose(); }
+        double total = sw.Elapsed.TotalMilliseconds / Frames;
+        int rendersWhileSeeking = canvas.RenderCount - rendersBefore;
+        // 現在位置が動くだけなら、タイムライン本体は描き直さない (赤い線だけが動く)
+        Assert.Equal(0, rendersWhileSeeking);
+        int count0 = canvas.RenderCount; double ms0 = canvas.RenderMsTotal;
+        for (int f = 0; f < 50; f++) { canvas.InvalidateVisual(); w.CaptureRenderedFrame()?.Dispose(); }
+        Console.WriteLine($"BENCH ui timeline: redraws while seeking {Frames} frames = {rendersWhileSeeking}, one full redraw (building draw commands) = {(canvas.RenderMsTotal - ms0) / Math.Max(1, canvas.RenderCount - count0):0.00} ms");
+        sw.Restart();
+        for (int f = 1; f <= Frames; f++) { w.Timeline.Canvas.InvalidateVisual(); w.CaptureRenderedFrame()?.Dispose(); }
+        double timelineOnly = sw.Elapsed.TotalMilliseconds / Frames;
+        sw.Restart();
+        for (int f = 1; f <= Frames; f++) w.CaptureRenderedFrame()?.Dispose();
+        double idle = sw.Elapsed.TotalMilliseconds / Frames;
+        var preview = w.GetVisualDescendants().OfType<PreviewView>().Single();
+        sw.Restart();
+        for (int f = 1; f <= Frames; f++) { preview.InvalidateVisual(); w.CaptureRenderedFrame()?.Dispose(); }
+        double previewOnly = sw.Elapsed.TotalMilliseconds / Frames;
+        var settings = w.GetVisualDescendants().OfType<ObjectSettingsView>().Single();
+        sw.Restart();
+        for (int f = 1; f <= Frames; f++) { settings.InvalidateVisual(); foreach (var c in settings.GetVisualDescendants().OfType<Control>().Take(400)) c.InvalidateVisual(); w.CaptureRenderedFrame()?.Dispose(); }
+        double settingsOnly = sw.Elapsed.TotalMilliseconds / Frames;
+        Console.WriteLine($"BENCH ui parts: preview redraw={previewOnly:0.00} ms, settings redraw={settingsOnly:0.00} ms");
+        Console.WriteLine($"BENCH ui per frame: update={update:0.00} ms, update+draw={total:0.00} ms, timeline redraw={timelineOnly:0.00} ms, capture only={idle:0.00} ms");
+        Assert.True(total > 0);
+    }
 }

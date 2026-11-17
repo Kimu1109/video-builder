@@ -16,6 +16,7 @@ public static class L
     private static Dictionary<string, string> _exact = new();
     private static List<(Regex Pattern, string Template)> _patterns = new();
     private static bool _installed;
+    private static readonly Dictionary<string, string> Memo = new();
 
     public static bool English { get; private set; }
 
@@ -27,6 +28,7 @@ public static class L
             Language.Japanese => false,
             _ => CultureInfo.CurrentUICulture.TwoLetterISOLanguageName != "ja",
         };
+        lock (Memo) Memo.Clear();
         if (!English) return;
         _exact = new Dictionary<string, string>();
         var patterns = new List<(Regex, string, int)>();
@@ -48,17 +50,29 @@ public static class L
         if (!English || string.IsNullOrEmpty(s)) return s ?? "";
         if (_exact.TryGetValue(s, out var en)) return en;
         if (!HasJapanese(s)) return s;
+        // 型紙との照合は重いので、結果を覚えておく (同じ文字列が毎フレーム来る)
+        lock (Memo)
+        {
+            if (Memo.TryGetValue(s, out var known)) return known;
+        }
+        string result = s;
         foreach (var (pattern, template) in _patterns)
         {
             var m = pattern.Match(s);
             if (!m.Success) continue;
-            return Regex.Replace(template, @"\{(\d)}", x =>
+            result = Regex.Replace(template, @"\{(\d)}", x =>
             {
                 var value = m.Groups["g" + x.Groups[1].Value].Value;
                 return _exact.TryGetValue(value, out var inner) ? inner : value;
             });
+            break;
         }
-        return s;
+        lock (Memo)
+        {
+            if (Memo.Count > 4000) Memo.Clear();
+            Memo[s] = result;
+        }
+        return result;
     }
 
     private static bool HasJapanese(string s)

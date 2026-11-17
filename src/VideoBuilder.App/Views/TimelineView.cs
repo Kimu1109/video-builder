@@ -30,6 +30,7 @@ public sealed class TimelineView : UserControl
     {
         var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), RowDefinitions = new RowDefinitions("*,Auto") };
         grid.Children.Add(Canvas);
+        grid.Children.Add(new PlayheadOverlay(Canvas));
 
         _v.Margin = new Thickness(0, TimelineCanvas.RulerHeight, 0, 0);
         Grid.SetColumn(_v, 1); grid.Children.Add(_v);
