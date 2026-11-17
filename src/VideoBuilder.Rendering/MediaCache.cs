@@ -18,7 +18,7 @@ public sealed class MediaCache : IDisposable
     private readonly Dictionary<string, VideoEntry> _videos = new();
     private readonly Dictionary<string, (SKImage? Image, DateTime Stamp)> _images = new();
     private long _tick;
-    private const int MaxReaders = 12;
+    private const int MaxReaders = 24;
     private readonly bool _zeroCopy;
 
     /// <param name="zeroCopy">
@@ -30,6 +30,29 @@ public sealed class MediaCache : IDisposable
     /// <summary>key ごとにデコーダを持つ (同じファイルを別オブジェクトで使ってもシークが競合しない)。</summary>
     public SKImage? GetVideoFrame(string key, string path, double seconds, bool loop)
     {
+        var e = Ensure(key, path);
+        return e == null ? null : Decode(e, seconds, loop);
+    }
+
+    /// <summary>
+    /// 複数の動画のフレームを、動画ごとに別スレッドで同時にデコードしておく。
+    /// このあとの GetVideoFrame は、デコード済みのフレームをすぐ返す。
+    /// </summary>
+    public void Prefetch(IReadOnlyList<(string Key, string Path, double Seconds, bool Loop)> requests)
+    {
+        // デコーダの用意 (一覧の書き換え) は 1 スレッドで済ませ、デコードだけを並列にする
+        var jobs = new List<(VideoEntry Entry, double Seconds, bool Loop)>();
+        foreach (var (key, path, seconds, loop) in requests)
+        {
+            var e = Ensure(key, path);
+            if (e?.Reader != null && jobs.All(j => !ReferenceEquals(j.Entry, e))) jobs.Add((e, seconds, loop));
+        }
+        if (jobs.Count < 2) return;
+        Parallel.ForEach(jobs, job => Decode(job.Entry, job.Seconds, job.Loop));
+    }
+
+    private VideoEntry? Ensure(string key, string path)
+    {
         if (string.IsNullOrEmpty(path)) return null;
         if (!_videos.TryGetValue(key, out var e) || e.Path != path)
         {
@@ -38,9 +61,15 @@ public sealed class MediaCache : IDisposable
             try { e.Reader = File.Exists(path) ? new VideoReader(path) : null; }
             catch { e.Reader = null; }
             _videos[key] = e;
+            e.LastUsed = ++_tick;
             Trim();
         }
         e.LastUsed = ++_tick;
+        return e;
+    }
+
+    private SKImage? Decode(VideoEntry e, double seconds, bool loop)
+    {
         var r = e.Reader;
         if (r == null) return null;
         if (loop && r.Duration > 0) seconds %= r.Duration;

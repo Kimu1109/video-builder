@@ -835,5 +835,59 @@ public class OptimizationTests
         for (int x = 0; x < src.Width; x += 4) if (fast.GetPixel(x, 180).Alpha < src.GetPixel(x, 180).Alpha) removed++;
         Assert.True(removed > 5);
     }
+
+    [Fact]
+    public void Filter_cache_keeps_working_with_many_objects_on_screen()
+    {
+        var p = Small();
+        for (int i = 0; i < 120; i++)
+        {
+            var o = ObjectFactory.Create(EffectRegistry.Shape, i % 100, 0, 30);
+            o.Main.Tracks["size"] = new AnimatedValue(20 + i % 7);
+            o.Draw!.Tracks["x"] = new AnimatedValue(-300 + i * 5);
+            if (i >= 100) { o.Start = 40; o.End = 70; }      // レイヤーが足りないぶんは後ろの時間に置く
+            ObjectFactory.AddFilter(o, "filter.border");
+            p.Root.Objects.Add(o);
+        }
+        using var engine = new RenderEngine();
+        using var bmp = new SKBitmap(new SKImageInfo(640, 360, SKColorType.Bgra8888, SKAlphaType.Premul));
+        engine.RenderToBitmap(p, p.Root, 0, bmp);
+        var first = engine.FilterCacheStats;
+        Assert.Equal(100, first.Misses);
+        for (int f = 1; f <= 5; f++) engine.RenderToBitmap(p, p.Root, f, bmp);
+        // 2 フレーム目以降は 1 つも作り直さない (以前は 48 個を超えると毎フレーム作り直していた)
+        Assert.Equal(100, engine.FilterCacheStats.Misses);
+        Assert.Equal(500, engine.FilterCacheStats.Hits);
+    }
+
+    [Fact]
+    public void Large_scaled_and_rotated_sprites_drawn_in_parallel_match_gpu_and_keep_positions()
+    {
+        var p = new Project();     // 1920x1080: 並列描画の条件 (広い範囲) を満たす大きさ
+        var bg = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 10); bg.Main.Values["type"] = "0"; bg.Main.Values["color"] = "#102030";
+        var big = ObjectFactory.Create(EffectRegistry.Text, 1, 0, 10);
+        big.Main.Values["text"] = "並列描画"; big.Main.Tracks["size"] = new AnimatedValue(200);
+        big.Draw!.Tracks["scale"] = new AnimatedValue(180); big.Draw!.Tracks["rotation"] = new AnimatedValue(12);
+        big.Draw!.Tracks["alpha"] = new AnimatedValue(20);
+        var tilted = ObjectFactory.Create(EffectRegistry.Shape, 2, 0, 10);
+        tilted.Main.Tracks["size"] = new AnimatedValue(700); tilted.Main.Values["color"] = "#E53935";
+        tilted.Draw!.Tracks["ry"] = new AnimatedValue(40); tilted.Draw!.Tracks["x"] = new AnimatedValue(400); tilted.Draw!.Values["blend"] = "4";
+        p.Root.Objects.AddRange(new[] { bg, big, tilted });
+
+        using var cpu = new RenderEngine();
+        using var a = new SKBitmap(new SKImageInfo(1920, 1080, SKColorType.Bgra8888, SKAlphaType.Premul));
+        cpu.RenderToBitmap(p, p.Root, 0, a);
+        Assert.Equal(3, cpu.LastQuads.Count);
+        Assert.NotEqual(new SKColor(0x10, 0x20, 0x30), a.GetPixel(1300, 540));    // 傾けた四角が描かれている
+        Assert.Equal(new SKColor(0x10, 0x20, 0x30), a.GetPixel(5, 5));
+
+        using var gpu = GpuContext.TryCreate(out _);
+        if (gpu == null) return;
+        using var gpuEngine = new RenderEngine(gpu);
+        using var g = new SKBitmap(a.Info);
+        gpuEngine.RenderToBitmap(p, p.Root, 0, g);
+        var (mean, _) = Diff(a, g);
+        Assert.True(mean < 0.8, $"CPU (並列) と GPU の差が大きい: {mean:0.00}");
+    }
 }
 

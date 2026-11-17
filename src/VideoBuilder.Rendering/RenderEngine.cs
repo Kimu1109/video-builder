@@ -75,6 +75,7 @@ public sealed class RenderEngine : IDisposable
         try
         {
             var canvas = surface.Canvas;
+            _frameStartTick = _tick + 1;
             LastQuads.Clear();
             canvas.ResetMatrix();
             canvas.Clear(SKColors.Black);
@@ -129,10 +130,14 @@ public sealed class RenderEngine : IDisposable
         int W = project.Settings.Width, H = project.Settings.Height;
         var groups = new List<GroupState>();
         var cameras = new List<CameraState>();
+        var active = scene.ObjectsAt(frame).ToList();
+        PrefetchVideos(project, scene, active, frame);
+        // CPU 描画のときは描画先のピクセルを直接つかんでおく (大きな絵を帯に分けて並列に描くため)
+        using var target = ctx.Gpu == null ? surface.PeekPixels() : null;
 
         try
         {
-            foreach (var obj in scene.ObjectsAt(frame))
+            foreach (var obj in active)
             {
                 if (!obj.Enabled || obj.Effects.Count == 0 || !scene.GetLayer(obj.Layer).Visible) continue;
                 var bounds = obj.Bounds;
@@ -178,7 +183,7 @@ public sealed class RenderEngine : IDisposable
                             if (fx != null)
                                 sprite = fx.Apply(sprite, new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx });
                         }
-                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, cameras, W, H, depth == 0 ? LastQuads : null, ctx.Modifiers, Draft);
+                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, cameras, W, H, depth == 0 ? LastQuads : null, ctx.Modifiers, Draft, target);
                         break;
                     }
                 }
@@ -191,7 +196,7 @@ public sealed class RenderEngine : IDisposable
     }
 
     private static void DrawSprite(SKCanvas canvas, Sprite sprite, TimelineObject obj, int[] bounds, int frame,
-        List<GroupState> groups, List<CameraState> cameras, int W, int H, List<(string, SKPoint[])>? quads, DrawModifiers mod, bool draft)
+        List<GroupState> groups, List<CameraState> cameras, int W, int H, List<(string, SKPoint[])>? quads, DrawModifiers mod, bool draft, SKPixmap? target)
     {
         var draw = obj.Draw;
         float x = 0, y = 0, z = 0, scale = 1, rot = 0, rx = 0, ry = 0, alpha = 1;
@@ -238,6 +243,12 @@ public sealed class RenderEngine : IDisposable
         };
         // 中心がカメラより後ろにあるものは描かない
         if (m.M43 <= 1f) return;
+        // 全体を同じ数で割っても同じ変換を表す。右下を 1 にそろえておくと、遠近のない場合に
+        // Skia が「平行移動・拡大・回転だけ」と判断できて、速い描画経路を使える
+        float inv = 1f / m.M43;
+        h.ScaleX *= inv; h.SkewX *= inv; h.TransX *= inv;
+        h.SkewY *= inv; h.ScaleY *= inv; h.TransY *= inv;
+        h.Persp0 *= inv; h.Persp1 *= inv; h.Persp2 = 1;
 
         canvas.Save();
         canvas.Concat(ref h);
@@ -272,7 +283,8 @@ public sealed class RenderEngine : IDisposable
             else
             {
                 paint.BlendMode = BlendModeOf(blend);
-                canvas.DrawImage(sprite.Image, -sprite.Cx, -sprite.Cy, paint);
+                if (!DrawSpriteParallel(canvas, target, sprite, paint))
+                    canvas.DrawImage(sprite.Image, -sprite.Cx, -sprite.Cy, paint);
             }
         }
         canvas.Restore();
@@ -290,10 +302,77 @@ public sealed class RenderEngine : IDisposable
             bool aligned = Math.Abs(m.TransX - MathF.Round(m.TransX)) < 1e-3f && Math.Abs(m.TransY - MathF.Round(m.TransY)) < 1e-3f;
             return aligned ? SKFilterQuality.None : SKFilterQuality.Low;
         }
-        if (!draft) return SKFilterQuality.High;
-        // 半分より小さくするときだけ、縮小用の中間画像 (ミップマップ) を使う
+        if (!flat) return draft ? SKFilterQuality.Low : SKFilterQuality.High;
         float sx = MathF.Sqrt(m.ScaleX * m.ScaleX + m.SkewY * m.SkewY), sy = MathF.Sqrt(m.ScaleY * m.ScaleY + m.SkewX * m.SkewX);
-        return Math.Min(sx, sy) < 0.5f ? SKFilterQuality.Medium : SKFilterQuality.Low;
+        float min = Math.Min(sx, sy);
+        // 半分より小さくするときだけ、縮小用の中間画像 (ミップマップ) を使う。
+        // 半分〜等倍の縮小は、隣り合う 4 点の補間で十分きれいに縮まる (中間画像を毎フレーム作らずに済む)
+        if (min < 0.5f) return SKFilterQuality.Medium;
+        if (min <= 1f) return SKFilterQuality.Low;
+        // 拡大: 出力ではなめらかな補間 (バイキュービック)、プレビューでは軽い補間
+        return draft ? SKFilterQuality.Low : SKFilterQuality.High;
+    }
+
+    /// <summary>これより広い範囲に描くときは、帯に分けて複数スレッドで描く。</summary>
+    private const int ParallelDrawPixels = 300_000;
+
+    /// <summary>
+    /// 大きな絵を、描画先を横帯に分けて複数スレッドで描く (CPU 描画のみ)。
+    /// 帯ごとに同じ変換・同じ絵で描くので、結果は 1 スレッドで描いたときと変わらない。
+    /// 条件に合わず描かなかったときは false を返す。
+    /// </summary>
+    private static bool DrawSpriteParallel(SKCanvas canvas, SKPixmap? target, Sprite sprite, SKPaint paint)
+    {
+        int cores = Environment.ProcessorCount;
+        if (target == null || cores < 2 || target.ColorType != SKColorType.Bgra8888) return false;
+        // 等倍でそのまま置くだけの描画はメモリの読み書きが大半なので、分けても速くならない
+        if (paint.FilterQuality == SKFilterQuality.None) return false;
+        var total = canvas.TotalMatrix;
+        // 画面上で絵が占める範囲を求める
+        var rect = SKRect.Create(-sprite.Cx, -sprite.Cy, sprite.Width, sprite.Height);
+        float minY = float.MaxValue, maxY = float.MinValue, minX = float.MaxValue, maxX = float.MinValue;
+        foreach (var corner in new[] { new SKPoint(rect.Left, rect.Top), new SKPoint(rect.Right, rect.Top), new SKPoint(rect.Right, rect.Bottom), new SKPoint(rect.Left, rect.Bottom) })
+        {
+            // 遠近のある変換でカメラの後ろに回る角があると範囲を求められないので、通常の描画に任せる
+            float w = total.Persp0 * corner.X + total.Persp1 * corner.Y + total.Persp2;
+            if (w <= 1e-3f) return false;
+            var q = total.MapPoint(corner);
+            minX = Math.Min(minX, q.X); maxX = Math.Max(maxX, q.X); minY = Math.Min(minY, q.Y); maxY = Math.Max(maxY, q.Y);
+        }
+        int W = target.Width, H = target.Height;
+        int y0 = Math.Clamp((int)MathF.Floor(minY) - 1, 0, H), y1 = Math.Clamp((int)MathF.Ceiling(maxY) + 1, 0, H);
+        float visibleWidth = Math.Min(maxX, W) - Math.Max(minX, 0);
+        if (y1 - y0 < 64 || visibleWidth <= 0 || (long)(y1 - y0) * (long)visibleWidth < ParallelDrawPixels) return false;
+
+        int bands = Math.Min(cores, (y1 - y0) / 32);
+        IntPtr pixels = target.GetPixels();
+        int rowBytes = target.RowBytes;
+        var image = sprite.Image;
+        float left = -sprite.Cx, top = -sprite.Cy;
+        Parallel.For(0, bands, b =>
+        {
+            int ya = y0 + (int)((long)(y1 - y0) * b / bands), yb = y0 + (int)((long)(y1 - y0) * (b + 1) / bands);
+            if (yb <= ya) return;
+            using var band = SKSurface.Create(new SKImageInfo(W, yb - ya, SKColorType.Bgra8888, SKAlphaType.Premul), pixels + ya * rowBytes, rowBytes);
+            var c = band.Canvas;
+            c.Translate(0, -ya);
+            c.Concat(ref total);
+            c.DrawImage(image, left, top, paint);
+            c.Flush();
+        });
+        return true;
+    }
+
+    /// <summary>同じフレームに動画が複数あるときは、先にまとめて (並列に) デコードしておく。</summary>
+    private void PrefetchVideos(Project project, Scene scene, List<TimelineObject> active, int frame)
+    {
+        List<(string, string, double, bool)>? requests = null;
+        foreach (var o in active)
+        {
+            if (!o.Enabled || o.Effects.Count == 0 || o.Main.DefinitionId != EffectRegistry.Video || !scene.GetLayer(o.Layer).Visible) continue;
+            (requests ??= new()).Add((o.Id, o.Main.GetString("file"), SourceTime(project, o, o.Bounds, frame), o.Main.GetBool("loop")));
+        }
+        if (requests is { Count: >= 2 }) Media.Prefetch(requests);
     }
 
     // ---------------- フィルタ結果のキャッシュ ----------------
@@ -313,7 +392,12 @@ public sealed class RenderEngine : IDisposable
 
     private readonly Dictionary<string, FilterCacheEntry> _filterCache = new();
     private readonly System.Text.StringBuilder _signature = new();
-    private const int MaxFilterCacheEntries = 48;
+    // キャッシュの上限は「個数」ではなくメモリ量で決める (小さなテロップなら何百個でも持てるように)
+    private const long FilterCacheBudgetBytes = 384L * 1024 * 1024;
+    private long _filterCacheBytes;
+    private long _frameStartTick;
+
+    private static long BytesOf(Sprite s) => (long)s.Width * s.Height * 4;
 
     /// <summary>フィルタ結果のキャッシュを使った回数 / 作り直した回数 (計測用)。</summary>
     public (long Hits, long Misses) FilterCacheStats { get; private set; }
@@ -379,21 +463,26 @@ public sealed class RenderEngine : IDisposable
 
         // 結果の画像を「このフレームで捨てるもの」から外して、キャッシュの持ち物にする
         if (!ctx.Temporaries.Remove(sprite.Image)) return end;
-        if (entry != null) entry.Sprite.Image.Dispose();
-        else
+        if (entry != null)
         {
-            if (_filterCache.Count >= MaxFilterCacheEntries) TrimFilterCache();
-            _filterCache[key] = entry = new FilterCacheEntry();
+            _filterCacheBytes -= BytesOf(entry.Sprite);
+            entry.Sprite.Image.Dispose();
         }
+        else _filterCache[key] = entry = new FilterCacheEntry();
         entry.Signature = signature; entry.Sprite = sprite; entry.LastUsed = _tick;
+        _filterCacheBytes += BytesOf(sprite);
+        if (_filterCacheBytes > FilterCacheBudgetBytes) TrimFilterCache();
         return end;
     }
 
+    /// <summary>メモリの上限を超えたら、今のフレームで使っていないものを古い順に捨てる。</summary>
     private void TrimFilterCache()
     {
-        foreach (var k in _filterCache.OrderBy(kv => kv.Value.LastUsed).Take(MaxFilterCacheEntries / 2).Select(kv => kv.Key).ToList())
+        foreach (var (k, e) in _filterCache.Where(kv => kv.Value.LastUsed < _frameStartTick).OrderBy(kv => kv.Value.LastUsed).ToList())
         {
-            _filterCache[k].Sprite.Image.Dispose();
+            if (_filterCacheBytes <= FilterCacheBudgetBytes * 3 / 4) break;
+            _filterCacheBytes -= BytesOf(e.Sprite);
+            e.Sprite.Image.Dispose();
             _filterCache.Remove(k);
         }
     }
@@ -534,10 +623,10 @@ public sealed class RenderEngine : IDisposable
     {
         _tick++;
         if (_generated.TryGetValue(key, out var img)) { _generatedUse[key] = _tick; return img; }
-        if (_generated.Count >= 96)
+        if (_generated.Count >= 512)
         {
-            // 古い半分を捨てる。直近のフレームで使ったものは残る
-            foreach (var k in _generatedUse.OrderBy(kv => kv.Value).Take(48).Select(kv => kv.Key).ToList())
+            // 今のフレームで使っていないものを、古い順に半分捨てる
+            foreach (var k in _generatedUse.Where(kv => kv.Value < _frameStartTick).OrderBy(kv => kv.Value).Take(256).Select(kv => kv.Key).ToList())
             {
                 _generated[k]?.Dispose();
                 _generated.Remove(k); _generatedUse.Remove(k);
@@ -553,6 +642,7 @@ public sealed class RenderEngine : IDisposable
         Gpu?.MakeCurrent();
         foreach (var e in _filterCache.Values) e.Sprite.Image.Dispose();
         _filterCache.Clear();
+        _filterCacheBytes = 0;
         _gpuSurface?.Dispose();
         _gpuSurface = null;
         foreach (var img in _generated.Values) img?.Dispose();
