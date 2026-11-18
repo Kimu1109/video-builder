@@ -10,6 +10,7 @@ public enum EffectCategory
     Draw,          // 標準描画
     AudioPlay,     // 標準再生
     Control,       // グループ制御など
+    AudioFilter,   // 音声のエフェクト
 }
 
 public sealed class ParamDefinition

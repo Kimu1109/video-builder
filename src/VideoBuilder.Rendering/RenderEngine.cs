@@ -192,14 +192,7 @@ public sealed class RenderEngine : IDisposable
                         }
                         ctx.Modifiers = DrawModifiers.None;
                         int next = ApplyCachedFilters(ctx, obj, bounds, frame, depth, ref sprite);
-                        for (int i = next; i < obj.Effects.Count; i++)
-                        {
-                            var e = obj.Effects[i];
-                            if (!e.Enabled || e.Definition.Category != EffectCategory.Filter) continue;
-                            var fx = Effects.Find(e.DefinitionId);
-                            if (fx != null)
-                                sprite = fx.Apply(sprite, new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx });
-                        }
+                        sprite = Effects.ApplyRange(sprite, obj, bounds, ctx, next, obj.Effects.Count);
                         DrawSprite(canvas, sprite, obj, bounds, frame, groups, cameras, W, H, depth == 0 ? LastQuads : null, ctx.Modifiers, Draft, target,
                             changesEveryFrame: def.Id is EffectRegistry.Video or EffectRegistry.SceneRef);
                         break;
@@ -425,12 +418,6 @@ public sealed class RenderEngine : IDisposable
 
     // ---------------- フィルタ結果のキャッシュ ----------------
 
-    /// <summary>入力とパラメータだけで結果が決まる (時刻やほかの状態に左右されない) 組み込みフィルタ。</summary>
-    private static readonly HashSet<string> PureFilters = new()
-    {
-        "filter.color", "filter.blur", "filter.border", "filter.shadow", "filter.clip", "filter.mosaic", "filter.chromakey", "filter.mono", "filter.flip",
-    };
-
     private sealed class FilterCacheEntry
     {
         public string Signature = "";
@@ -465,7 +452,7 @@ public sealed class RenderEngine : IDisposable
             if (e.Definition.Category != EffectCategory.Filter) break;
             if (e.Enabled)
             {
-                if (!PureFilters.Contains(e.DefinitionId)) break;
+                if (!Effects.IsDeterministic(e.DefinitionId, Effects.Find(e.DefinitionId))) break;
                 any = true;
             }
             end++;
@@ -499,13 +486,7 @@ public sealed class RenderEngine : IDisposable
         }
 
         var source = sprite;
-        for (int i = 1; i < end; i++)
-        {
-            var e = obj.Effects[i];
-            if (!e.Enabled) continue;
-            var fx = Effects.Find(e.DefinitionId);
-            if (fx != null) sprite = fx.Apply(sprite, new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx });
-        }
+        sprite = Effects.ApplyRange(sprite, obj, bounds, ctx, 1, end);
         FilterCacheStats = (FilterCacheStats.Hits, FilterCacheStats.Misses + 1);
         if (ReferenceEquals(sprite.Image, source.Image)) return end;   // 何も変わらなかった (強さ 0 など)
 
@@ -570,6 +551,32 @@ public sealed class RenderEngine : IDisposable
             pending = null;
         }
 
+        // 続けて並んだ色の変換は、行列を掛け合わせて 1 回で処理する
+        float[]? matrix = null;
+        EffectArgs matrixArgs = default;
+        void FlushMatrix()
+        {
+            if (matrix == null) return;
+            var m = matrix; matrix = null;
+            // CPU 描画なら画面のピクセルをその場で書き換える (複製も描き戻しも不要)
+            if (ctx.Gpu == null && pending == null && PixelOps.CanApply(m))
+            {
+                using var pixmap = surface.PeekPixels();
+                if (pixmap != null && pixmap.ColorType == SKColorType.Bgra8888)
+                {
+                    PixelOps.ColorMatrix(pixmap.GetPixels(), pixmap.Width, pixmap.Height, pixmap.RowBytes, m);
+                    return;
+                }
+            }
+            if (pending == null)
+            {
+                var snap = Sprite.Centered(ctx.Own(surface.Snapshot()));
+                originX = snap.Cx; originY = snap.Cy;
+                pending = snap;
+            }
+            pending = Effects.ApplyMatrix(pending.Value, matrixArgs, m);
+        }
+
         foreach (var e in obj.Effects)
         {
             if (!e.Enabled || e.Definition.Category != EffectCategory.Filter) continue;
@@ -577,23 +584,26 @@ public sealed class RenderEngine : IDisposable
             if (fx == null) continue;
             var args = new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx, IsFrameBuffer = true };
 
-            // 色の変換だけの効果は、CPU 描画なら画面のピクセルをその場で書き換える (複製も描き戻しも不要)
-            if (ctx.Gpu == null && fx is Effects.IMatrixEffect matrixEffect && matrixEffect.Matrix(args) is { } m && PixelOps.CanApply(m))
+            if (fx is IColorMatrixEffect matrixEffect)
+            {
+                if (matrixEffect.GetMatrix(args) is { } m)
+                {
+                    if (matrix == null) WriteBack();
+                    matrix = matrix == null ? m : Effects.Concat(m, matrix);
+                    matrixArgs = args;
+                }
+                continue;
+            }
+            FlushMatrix();
+            if (ctx.Gpu == null && fx is IPixelEffect pixelEffect)
             {
                 WriteBack();
                 using var pixmap = surface.PeekPixels();
                 if (pixmap != null && pixmap.ColorType == SKColorType.Bgra8888)
                 {
-                    PixelOps.ColorMatrix(pixmap.GetPixels(), pixmap.Width, pixmap.Height, pixmap.RowBytes, m);
+                    pixelEffect.Process(new PixelBuffer(pixmap.GetPixels(), pixmap.Width, pixmap.Height, pixmap.RowBytes), args);
                     continue;
                 }
-            }
-            if (ctx.Gpu == null && fx is Effects.IPixelEffect pixelEffect)
-            {
-                WriteBack();
-                using var pixmap = surface.PeekPixels();
-                if (pixmap != null && pixmap.ColorType == SKColorType.Bgra8888 &&
-                    pixelEffect.ApplyInPlace(pixmap.GetPixels(), pixmap.Width, pixmap.Height, pixmap.RowBytes, args)) continue;
             }
             if (pending == null)
             {
@@ -612,6 +622,7 @@ public sealed class RenderEngine : IDisposable
             var after = fx.Apply(before, args);
             pending = after;
         }
+        FlushMatrix();
         WriteBack();
     }
 
@@ -683,7 +694,18 @@ public sealed class RenderEngine : IDisposable
         }
         // プラグインが追加したメディアオブジェクト
         var source = Effects.FindSource(main.DefinitionId);
-        return source?.Render(new EffectArgs { Effect = main, Object = obj, Bounds = bounds, Context = ctx });
+        if (source == null) return null;
+        var sourceArgs = new EffectArgs { Effect = main, Object = obj, Bounds = bounds, Context = ctx };
+        // CacheKey を返すプラグインは、同じキーの間は前に作った絵を使い回す (動かない背景を毎フレーム描かない)
+        string? cacheKey = source.CacheKey(sourceArgs);
+        if (cacheKey == null) return source.Render(sourceArgs);
+        string fullKey = "plugin|" + main.DefinitionId + "|" + (ctx.Gpu != null ? "g|" : "c|") + cacheKey;
+        _tick++;
+        if (_generated.TryGetValue(fullKey, out var hit)) { _generatedUse[fullKey] = _tick; return hit; }
+        var made = source.Render(sourceArgs);
+        // エンジンの持ち物 (ctx.Own したもの) だけをキャッシュに移す。プラグインが自分で持っている絵は預からない
+        if (made == null || !ctx.Temporaries.Remove(made)) return made;
+        return Cached(fullKey, () => made);
     }
 
     /// <summary>オブジェクト内のフレーム位置を、素材の再生位置 (秒) に直す。</summary>

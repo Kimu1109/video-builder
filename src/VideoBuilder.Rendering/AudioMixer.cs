@@ -1,5 +1,6 @@
 using VideoBuilder.Core;
 using VideoBuilder.Media;
+using VideoBuilder.Plugins;
 
 namespace VideoBuilder.Rendering;
 
@@ -26,6 +27,56 @@ public sealed class AudioMixer : IDisposable
     public int ReaderCount { get { lock (_gate) return _readers.Values.Sum(l => l.Count); } }
     private readonly object _gate = new();
     private float[] _temp = Array.Empty<float>();
+    private float[] _fxBuf = Array.Empty<float>();
+
+    /// <summary>音声エフェクトの、オブジェクト・エフェクトごとの続きの状態。</summary>
+    private sealed class FxState
+    {
+        public object? State;
+        /// <summary>次に来るはずのブロックの先頭 (オブジェクトの先頭からのサンプル位置)。</summary>
+        public long Next = -1;
+        public long LastMix;
+    }
+    private readonly Dictionary<(string Obj, int Index, string Def), FxState> _fxStates = new();
+
+    /// <summary>このオブジェクトに、有効な音声エフェクトがあるか。</summary>
+    private static bool HasAudioEffects(TimelineObject obj)
+    {
+        for (int i = 1; i < obj.Effects.Count; i++)
+            if (obj.Effects[i].Enabled && obj.Effects[i].Definition.Category == EffectCategory.AudioFilter) return true;
+        return false;
+    }
+
+    private void ApplyAudioEffects(Project project, TimelineObject obj, Span<float> samples, long objSample, long objLength, int frame)
+    {
+        int rate = project.Settings.SampleRate;
+        for (int i = 1; i < obj.Effects.Count; i++)
+        {
+            var e = obj.Effects[i];
+            if (!e.Enabled || e.Definition.Category != EffectCategory.AudioFilter) continue;
+            var fx = AudioEffects.Find(e.DefinitionId);
+            if (fx == null) continue;
+            var key = (obj.Id, i, e.DefinitionId);
+            if (!_fxStates.TryGetValue(key, out var st)) _fxStates[key] = st = new FxState();
+            bool continuous = st.Next == objSample && st.LastMix == _mix - 1;
+            var block = new AudioBlock
+            {
+                Samples = samples, SampleRate = rate, ObjectSample = objSample, ObjectLength = objLength, Continuous = continuous,
+                Object = obj, Effect = e, Project = project, Frame = frame,
+            };
+            try { fx.Process(block, ref st.State); }
+            catch { /* プラグインの失敗で再生を止めない */ }
+            st.Next = objSample + samples.Length / 2;
+            st.LastMix = _mix;
+        }
+    }
+
+    /// <summary>しばらく使っていないエフェクトの状態を捨てる。</summary>
+    private void PruneFxStates()
+    {
+        if (_fxStates.Count == 0 || _mix % 64 != 0) return;
+        foreach (var k in _fxStates.Where(kv => kv.Value.LastMix < _mix - 64).Select(kv => kv.Key).ToList()) _fxStates.Remove(k);
+    }
 
     /// <summary>startSample から dst.Length / 2 フレーム分を dst に書く (上書き)。</summary>
     public void Mix(Project project, Scene scene, long startSample, Span<float> dst)
@@ -80,7 +131,21 @@ public sealed class AudioMixer : IDisposable
                 entry.NextSample = srcStart + (long)Math.Floor(count * speed);
 
                 var o = dst.Slice((int)(from - startSample) * 2, count * 2);
-                if (Math.Abs(speed - 1) < 1e-9)
+                if (HasAudioEffects(obj))
+                {
+                    // エフェクトがあるときは、いったんオブジェクトだけの音を作り、エフェクトをかけてから混ぜる
+                    if (_fxBuf.Length < count * 2) _fxBuf = new float[count * 2];
+                    var fxs = _fxBuf.AsSpan(0, count * 2);
+                    Resample(temp, fxs, count, srcPos - srcStart, speed, 1, 1);
+                    int blockFrame = Math.Clamp((int)(from * fps.Num / ((long)rate * fps.Den)), obj.Start, obj.End);
+                    ApplyAudioEffects(project, obj, fxs, from - objStart, objEnd - objStart, blockFrame);
+                    for (int i = 0; i < count; i++)
+                    {
+                        o[i * 2] += fxs[i * 2] * gl;
+                        o[i * 2 + 1] += fxs[i * 2 + 1] * gr;
+                    }
+                }
+                else if (Math.Abs(speed - 1) < 1e-9)
                 {
                     for (int i = 0; i < count; i++)
                     {
@@ -101,7 +166,30 @@ public sealed class AudioMixer : IDisposable
                     }
                 }
             }
+            PruneFxStates();
             for (int i = 0; i < dst.Length; i++) dst[i] = Math.Clamp(dst[i], -1f, 1f);
+        }
+    }
+
+    /// <summary>src (frac0 から speed 刻み) を count フレームに伸び縮みさせて dst に書く (上書き)。</summary>
+    private static void Resample(ReadOnlySpan<float> src, Span<float> dst, int count, double frac0, double speed, float gl, float gr)
+    {
+        if (Math.Abs(speed - 1) < 1e-9)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                dst[i * 2] = src[i * 2] * gl;
+                dst[i * 2 + 1] = src[i * 2 + 1] * gr;
+            }
+            return;
+        }
+        for (int i = 0; i < count; i++)
+        {
+            double sp = frac0 + i * speed;
+            int k = (int)sp;
+            float t = (float)(sp - k);
+            dst[i * 2] = (src[k * 2] + (src[k * 2 + 2] - src[k * 2]) * t) * gl;
+            dst[i * 2 + 1] = (src[k * 2 + 1] + (src[k * 2 + 3] - src[k * 2 + 1]) * t) * gr;
         }
     }
 

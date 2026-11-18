@@ -420,5 +420,10 @@ internal static class TranslationsEn
         ("調整レイヤー [{0}]", "Adjustment layer [{0}]"),
         ("メイン", "Main"),
         ("自動 (表示の大きさ)", "Auto (display size)"),
+        ("音声フェード", "Audio fade"),
+        ("エコー", "Echo"),
+        ("遅延 (ms)", "Delay (ms)"),
+        ("繰り返し", "Feedback"),
+        ("混ぜる量", "Mix"),
     };
 }

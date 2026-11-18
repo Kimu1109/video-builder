@@ -1,4 +1,6 @@
 using SkiaSharp;
+using VideoBuilder.Core;
+using VideoBuilder.Plugins;
 
 namespace VideoBuilder.Rendering;
 
@@ -9,6 +11,8 @@ public static class Effects
 
     static Effects()
     {
+        // プラグインの PixelBuffer.ParallelRows を、エンジンの並列化の仕組みにつなぐ
+        PixelRows.ForBands = PixelOps.ForBands;
         Register(new ColorCorrect()); Register(new Blur()); Register(new Border()); Register(new Shadow());
         Register(new Clip()); Register(new Mosaic()); Register(new ChromaKey()); Register(new Mono());
         Register(new Flip()); Register(new Fade()); Register(new ScriptEffect());
@@ -18,22 +22,72 @@ public static class Effects
     public static void RegisterSource(string definitionId, VideoBuilder.Plugins.IVideoSource source) { lock (Sources) Sources[definitionId] = source; }
     public static VideoBuilder.Plugins.IVideoSource? FindSource(string id) { lock (Sources) return Sources.GetValueOrDefault(id); }
 
-    /// <summary>色の変換だけを行う効果。画面全体にかけるとき、複製を作らずその場で処理できる。</summary>
-    internal interface IMatrixEffect
+    public static void Register(IVideoEffect effect) { lock (Map) Map[effect.Id] = effect; }
+    public static IVideoEffect? Find(string id) { lock (Map) return Map.TryGetValue(id, out var e) ? e : null; }
+
+    /// <summary>ピクセルを直接書き換える効果を登録する (IVideoEffect としても使えるように包む)。</summary>
+    public static void RegisterPixel(IPixelEffect effect) => Register(new PixelAdapter(effect));
+
+    /// <summary>色の変換だけを行う効果を登録する。</summary>
+    public static void RegisterMatrix(IColorMatrixEffect effect) => Register(new MatrixAdapter(effect));
+
+    // 組み込みの効果のうち、結果が入力とパラメータだけで決まるもの (結果を使い回してよい)
+    private static readonly HashSet<string> BuiltInDeterministic = new()
     {
-        /// <summary>今のフレームでのカラーマトリクス。その場で処理できないときは null。</summary>
-        float[]? Matrix(EffectArgs args);
+        "filter.color", "filter.blur", "filter.border", "filter.shadow", "filter.clip", "filter.mosaic", "filter.chromakey", "filter.mono", "filter.flip",
+    };
+
+    /// <summary>結果を使い回してよい効果か (EffectFlags.Deterministic)。</summary>
+    public static bool IsDeterministic(string id, IVideoEffect? fx) =>
+        BuiltInDeterministic.Contains(id) || (fx != null && (fx.Flags & EffectFlags.Deterministic) != 0);
+
+    /// <summary>IPixelEffect を、絵を受け取って絵を返す形 (IVideoEffect) でも使えるようにする。</summary>
+    private sealed class PixelAdapter(IPixelEffect inner) : IVideoEffect, IPixelEffect
+    {
+        public string Id => inner.Id;
+        public EffectFlags Flags => inner.Flags;
+        public void Process(PixelBuffer pixels, EffectArgs args) => inner.Process(pixels, args);
+        public Sprite Apply(Sprite s, EffectArgs a) =>
+            WithPixels(s, a, (px, w, h, rb) => inner.Process(new PixelBuffer(px, w, h, rb), a), alsoOnGpu: true) ?? s;
     }
 
-    /// <summary>ピクセルを直接書き換えられる効果。画面全体にかけるとき、複製を作らずその場で処理できる。</summary>
-    internal interface IPixelEffect
+    private sealed class MatrixAdapter(IColorMatrixEffect inner) : IVideoEffect, IColorMatrixEffect
     {
-        /// <summary>BGRA (乗算済みアルファ) のピクセルをその場で書き換える。処理しなかったら false。</summary>
-        bool ApplyInPlace(IntPtr pixels, int width, int height, int rowBytes, EffectArgs args);
+        public string Id => inner.Id;
+        public EffectFlags Flags => inner.Flags;
+        public float[]? GetMatrix(EffectArgs args) => inner.GetMatrix(args);
+        public Sprite Apply(Sprite s, EffectArgs a) => inner.GetMatrix(a) is { } m ? ApplyMatrix(s, a, m) : s;
     }
 
-    public static void Register(IVideoEffect effect) => Map[effect.Id] = effect;
-    public static IVideoEffect? Find(string id) => Map.TryGetValue(id, out var e) ? e : null;
+    /// <summary>
+    /// effects[from..to) を順にかける (Filter 以外・無効なものは飛ばす)。
+    /// 続けて並んだ色の変換 (IColorMatrixEffect) は、行列を掛け合わせて 1 回で処理する。
+    /// </summary>
+    public static Sprite ApplyRange(Sprite sprite, TimelineObject obj, int[] bounds, RenderContext ctx, int from, int to)
+    {
+        float[]? pending = null;
+        EffectArgs pendingArgs = default;
+        for (int i = from; i < to && i < obj.Effects.Count; i++)
+        {
+            var e = obj.Effects[i];
+            if (!e.Enabled || e.Definition.Category != EffectCategory.Filter) continue;
+            var fx = Find(e.DefinitionId);
+            if (fx == null) continue;
+            var args = new EffectArgs { Effect = e, Object = obj, Bounds = bounds, Context = ctx };
+            if (fx is IColorMatrixEffect cm)
+            {
+                var m = cm.GetMatrix(args);
+                if (m == null) continue;
+                pending = pending == null ? m : Concat(m, pending);
+                pendingArgs = args;
+                continue;
+            }
+            if (pending != null) { sprite = ApplyMatrix(sprite, pendingArgs, pending); pending = null; }
+            sprite = fx.Apply(sprite, args);
+        }
+        if (pending != null) sprite = ApplyMatrix(sprite, pendingArgs, pending);
+        return sprite;
+    }
 
 
     internal static SKImageInfo Info(int w, int h) => new(Math.Max(1, w), Math.Max(1, h), SKColorType.Bgra8888, SKAlphaType.Premul);
@@ -151,7 +205,7 @@ public static class Effects
         };
     }
 
-    private sealed class ColorCorrect : IVideoEffect, IMatrixEffect
+    private sealed class ColorCorrect : IVideoEffect, IColorMatrixEffect
     {
         public string Id => "filter.color";
         public Sprite Apply(Sprite s, EffectArgs a)
@@ -170,7 +224,7 @@ public static class Effects
             return ApplyMatrix(s, a, m);
         }
 
-        public float[]? Matrix(EffectArgs a)
+        public float[]? GetMatrix(EffectArgs a)
         {
             float brightness = (a.Track("brightness") - 100) / 100f, contrast = a.Track("contrast") / 100f;
             float gain = a.Track("luminance") / 100f, sat = a.Track("saturation") / 100f, hue = a.Track("hue");
@@ -314,11 +368,8 @@ public static class Effects
     {
         public string Id => "filter.mosaic";
 
-        public bool ApplyInPlace(IntPtr pixels, int width, int height, int rowBytes, EffectArgs a)
-        {
-            PixelOps.Mosaic(pixels, width, height, rowBytes, Math.Max(1, (int)a.Track("size")));
-            return true;
-        }
+        public void Process(PixelBuffer b, EffectArgs a) =>
+            PixelOps.Mosaic(b.Pointer, b.Width, b.Height, b.RowBytes, Math.Max(1, (int)a.Track("size")));
 
         public Sprite Apply(Sprite s, EffectArgs a)
         {
@@ -340,9 +391,19 @@ public static class Effects
         }
     }
 
-    private sealed class ChromaKey : IVideoEffect
+    private sealed class ChromaKey : IVideoEffect, IPixelEffect
     {
         public string Id => "filter.chromakey";
+
+        public void Process(PixelBuffer b, EffectArgs a)
+        {
+            var key = a.Color("color");
+            key.ToHsv(out float kh, out float ks, out _);
+            float hueRange = a.Track("hue") / 256f * 180f, satRange = a.Track("saturation") / 256f * 100f, edge = Math.Max(0.001f, a.Track("edge") / 100f);
+            if (a.IsDraft) PixelOps.ChromaKeyFast(b.Pointer, b.Width, b.Height, b.RowBytes, kh, ks, hueRange, satRange, edge);
+            else PixelOps.ChromaKey(b.Pointer, b.Width, b.Height, b.RowBytes, kh, ks, hueRange, satRange, edge);
+        }
+
         // SkSL シェーダ (SKRuntimeEffect) での実装は、SkiaSharp 2.88 では描画時にネイティブ側で
         // クラッシュするため使わない。GPU 描画中でも、この効果だけは画像を読み戻して CPU で処理する。
         public unsafe Sprite Apply(Sprite s, EffectArgs a)
@@ -361,10 +422,10 @@ public static class Effects
         }
     }
 
-    private sealed class Mono : IVideoEffect, IMatrixEffect
+    private sealed class Mono : IVideoEffect, IColorMatrixEffect
     {
         public string Id => "filter.mono";
-        public float[]? Matrix(EffectArgs a)
+        public float[]? GetMatrix(EffectArgs a)
         {
             float t = Math.Clamp(a.Track("strength") / 100f, 0, 1);
             var c = a.Color("color");
@@ -379,7 +440,7 @@ public static class Effects
             return m;
         }
 
-        public Sprite Apply(Sprite s, EffectArgs a) => ApplyMatrix(s, a, Matrix(a)!);
+        public Sprite Apply(Sprite s, EffectArgs a) => ApplyMatrix(s, a, GetMatrix(a)!);
     }
 
     private sealed class Flip : IVideoEffect

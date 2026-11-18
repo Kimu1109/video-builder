@@ -145,7 +145,7 @@ public sealed class ObjectSettingsView : UserControl
         add.Click += (_, _) =>
         {
             var menu = new ContextMenu();
-            foreach (var f in EffectRegistry.Filters)
+            foreach (var f in EffectRegistry.FiltersFor(o))
                 menu.Items.Add(Menus.Item(f.Name, f.Icon, () => { var t = Target; if (t != null) _session.AddFilter(t, f.Id); }));
             menu.Open(add);
         };
@@ -203,7 +203,7 @@ public sealed class ObjectSettingsView : UserControl
     {
         var effect = obj.Effects[index];
         var def = effect.Definition;
-        bool isFilter = def.Category == EffectCategory.Filter;
+        bool isFilter = def.Category is EffectCategory.Filter or EffectCategory.AudioFilter;
         string collapseKey = index + "/" + def.Id;
 
         var rows = new StackPanel { Margin = new Thickness(8, 4, 18, 8), Spacing = 2 };

@@ -1083,7 +1083,7 @@ video-builder/
 | 項目 | 状況 |
 |---|---|
 | `.exo` インポート | 未着手。実際の `.exo` ファイルで確認しながら実装する必要がある |
-| プラグインの音声効果・入力・出力 | API が未定義 (今は映像のフィルタ・メディアオブジェクト・移動方法のみ) |
+| プラグインの入力・出力 | API が未定義 (映像・音声のエフェクト、メディアオブジェクト、移動方法は追加できる) |
 | カメラ制御の奥行きによる並べ替え・深度ぼけ | 未実装。描画順は常にレイヤー順 |
 | Flatpak | 未着手 |
 | AppImage | AppDir を作って起動するところまで確認。`appimagetool` による AppImage 化は未確認 |
@@ -1120,11 +1120,15 @@ video-builder/
 
 1. クラスライブラリを作り、`VideoBuilder.Plugin.Abstractions` を参照する。
 2. `IPlugin` を実装し、`Initialize(IPluginHost host)` で登録する。
-   - `host.RegisterFilter(定義, IVideoEffect)` … フィルタ効果
+   - `host.RegisterColorMatrixEffect(定義, IColorMatrixEffect)` … 色の変換だけのエフェクト (いちばん速い)
+   - `host.RegisterPixelEffect(定義, IPixelEffect)` … ピクセルを直接書き換えるエフェクト
+   - `host.RegisterFilter(定義, IVideoEffect)` … 自由に描くエフェクト
+   - `host.RegisterAudioEffect(定義, IAudioEffect)` … 音声のエフェクト
    - `host.RegisterMediaObject(定義, IVideoSource)` … メディアオブジェクト
    - `host.RegisterInterpolator(IInterpolator)` … トラックバーの移動方法
 3. `plugin.json` (id / name / version / apiVersion / assembly) と DLL を、`$XDG_DATA_HOME/video-builder/plugins/<名前>/` に置く。
 
+詳しくは [PLUGIN_API.md](PLUGIN_API.md)。
 読み込みの結果 (失敗した場合は理由) は、環境設定の「プラグイン」に表示される。
 プラグインはアプリと同じ権限で動くので、信頼できるものだけを入れること。
 
@@ -1413,6 +1417,23 @@ AviUtl の操作感の中心 (レイヤーとオブジェクト、キーフレ�
 - プロジェクトの JSON をビルド時生成の手順で読み書きする: 速くならなかった (保存はファイル全体で 2000 個 40 ms ほどで、十分速い)。
 - 色選択の部品のスタイルを起動時に読み込まない / JIT の設定を変える: 起動時間 (約 0.8 秒、配布用ビルド) に差が出なかった。
 - 描画 1 フレームあたりのメモリ確保: 約 70 KB で、100 フレームでガベージコレクションが 0 回だったので、手を入れていない。
+
+### 22.17 プラグイン API (バージョン 2)
+
+速く動くプラグインを書きやすくするために、API を整理した ([PLUGIN_API.md](PLUGIN_API.md))。バージョン 1 のプラグインはそのまま読み込める (`apiVersion` 1〜2 を受け付ける)。
+
+| 追加したもの | 内容 | 速くなる理由 |
+|---|---|---|
+| `IColorMatrixEffect` | 色の変換をカラーマトリクスで返すだけのエフェクト | 続けて並んだ色の変換を 1 つの行列にまとめて 1 回で処理する (組み込みの色調補正・単色化とも)。調整レイヤーではその場で書き換え、GPU 描画中は GPU 上で処理 |
+| `IPixelEffect` / `PixelBuffer` | BGRA のピクセルを直接書き換えるエフェクト。`ParallelRows` でエンジンのスレッドを使って並列化できる | 描画を経由しない。調整レイヤーでは画面を複製しない。バッファは使い回し |
+| `EffectFlags.Deterministic` | 結果が入力とパラメータだけで決まることを宣言する | フィルタ結果のキャッシュの対象になる (以前は組み込みの効果だけ) |
+| `IVideoSource.CacheKey` | 絵を使い回すための鍵を返す | 鍵が同じ間は `Render` を呼ばない |
+| `IAudioEffect` / `AudioBlock` | 音声のエフェクト。ブロックをその場で書き換え、続きの値は `state` に持つ | 確保なしで処理できる。シーク後は `Continuous = false` |
+| `EffectArgs.Frame` / `Time` / `IsDraft` | 今のフレーム・オブジェクトの先頭からの秒と、プレビューの軽い描画中か | 再生中は品質を落とす、などができる |
+| `IPluginHost.Log` | プラグインのログ | – |
+
+あわせて、組み込みの音声エフェクト「音声フェード」「エコー」を追加し、音声オブジェクトの「エフェクトを追加」には音声のエフェクトだけが出るようにした。
+サンプルプラグインには、セピア (色の変換)・ポスタリゼーション (ピクセル)・こもった音 (音声) と、市松模様の `CacheKey` を追加した。
 
 ---
 

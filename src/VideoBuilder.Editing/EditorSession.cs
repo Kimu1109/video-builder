@@ -419,7 +419,7 @@ public sealed class EditorSession
     public void RemoveEffect(TimelineObject obj, Effect effect)
     {
         int i = obj.Effects.IndexOf(effect);
-        if (i <= 0 || effect.Definition.Category != EffectCategory.Filter) return;
+        if (i <= 0 || effect.Definition.Category is not (EffectCategory.Filter or EffectCategory.AudioFilter)) return;
         Edit("エフェクトの削除", () => obj.Effects.RemoveAt(i));
     }
 
@@ -428,7 +428,7 @@ public sealed class EditorSession
         int i = obj.Effects.IndexOf(effect);
         int j = i + direction;
         if (i <= 0 || j <= 0 || j >= obj.Effects.Count) return;
-        if (effect.Definition.Category != EffectCategory.Filter || obj.Effects[j].Definition.Category != EffectCategory.Filter) return;
+        if (effect.Definition.Category is not (EffectCategory.Filter or EffectCategory.AudioFilter) || obj.Effects[j].Definition.Category != effect.Definition.Category) return;
         Edit("エフェクトの移動", () => (obj.Effects[i], obj.Effects[j]) = (obj.Effects[j], obj.Effects[i]));
     }
 

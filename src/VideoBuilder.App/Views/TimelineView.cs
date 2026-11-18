@@ -182,7 +182,7 @@ public sealed class TimelineView : UserControl
         }
         menu.Items.Add(Menus.Sep());
         menu.Items.Add(Menus.Sub("エフェクトの追加", "AddBox",
-            EffectRegistry.Filters.Select(f => (object)Menus.Item(f.Name, f.Icon, () => _session.AddFilter(o, f.Id)))));
+            EffectRegistry.FiltersFor(o).Select(f => (object)Menus.Item(f.Name, f.Icon, () => _session.AddFilter(o, f.Id)))));
         menu.Items.Add(Menus.Item("オブジェクトを有効にする", null, () =>
         {
             var targets = _session.WithGroup(_session.SelectedObjects.ToList());

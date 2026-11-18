@@ -77,13 +77,110 @@ public readonly struct EffectArgs
     /// <summary>フレームバッファ全体にかけている (フィルタオブジェクト) か。</summary>
     public bool IsFrameBuffer { get; init; }
 
+    /// <summary>描いているフレーム (タイムライン上の番号)。</summary>
+    public int Frame => Context.Frame;
+    /// <summary>オブジェクトの先頭からの時間 (秒)。</summary>
+    public double Time => Context.Project.FrameToSeconds(Context.Frame - Object.Start);
+    /// <summary>
+    /// プレビュー用の描画か。true のときは、見た目がほぼ変わらない範囲で速い近似を使ってよい (出力では false)。
+    /// </summary>
+    public bool IsDraft => Context.Draft;
+
     public float Track(string key) => (float)Effect.Eval(key, Bounds, Context.Frame);
     public bool Check(string key) => Effect.GetBool(key);
     public SKColor Color(string key) => SKColor.TryParse(Effect.GetString(key), out var c) ? c : SKColors.White;
 }
 
+/// <summary>効果の性質。エンジンはこれを見て、速い経路を選ぶ。</summary>
+[Flags]
+public enum EffectFlags
+{
+    None = 0,
+    /// <summary>
+    /// 結果が「入力の絵」と「パラメータの今の値」だけで決まる (時刻・乱数・外部の状態を使わない)。
+    /// エンジンは、入力とパラメータが前のフレームと同じなら、前回の結果を使い回す (Apply を呼ばない)。
+    /// </summary>
+    Deterministic = 1,
+}
+
+/// <summary>
+/// 絵を受け取って、新しい絵を返す効果。いちばん自由だが、いちばん遅い経路。
+/// 色を変えるだけなら IColorMatrixEffect、ピクセルを書き換えるだけなら IPixelEffect を使うと速い。
+/// </summary>
 public interface IVideoEffect
 {
     string Id { get; }
+    /// <summary>
+    /// 新しく作った画像は args.Context.Own() に渡す (フレームを描き終えたら破棄される)。
+    /// 作業用の描画先は args.Context.CreateSurface (GPU 描画中は GPU 上に作られる) か
+    /// PixelOps.DrawParallel (CPU で横帯に分けて並列に描く) を使う。
+    /// </summary>
     Sprite Apply(Sprite input, EffectArgs args);
+    /// <summary>効果の性質。既定は None (毎フレーム Apply を呼ぶ)。</summary>
+    EffectFlags Flags => EffectFlags.None;
+}
+
+/// <summary>
+/// ピクセルを直接書き換える効果 (絵の大きさは変えない)。
+/// エンジンが BGRA (乗算済みアルファ) のバッファを用意して渡す:
+/// 画面全体 (調整レイヤー) にかけるときは、画面のバッファをそのまま (複製なしで) 渡す。
+/// オブジェクトにかけるときは、使い回しのバッファに 1 回写して渡す。GPU 描画中は読み戻して渡す。
+/// バッファの処理を並列にするには PixelBuffer.ParallelRows を使う。
+/// </summary>
+public interface IPixelEffect
+{
+    string Id { get; }
+    void Process(PixelBuffer pixels, EffectArgs args);
+    /// <summary>既定は Deterministic (時刻や乱数を使うなら None にする)。</summary>
+    EffectFlags Flags => EffectFlags.Deterministic;
+}
+
+/// <summary>
+/// 色の変換だけを行う効果。4x5 のカラーマトリクスを返すだけでよい (ピクセルの処理はエンジンが行う)。
+/// CPU 描画では並列の表引き / 固定小数点、GPU 描画ではカラーフィルタで処理する。
+/// 続けて並んだ色の変換 (組み込みの色調補正・単色化を含む) は、行列を掛け合わせて 1 回で処理する。
+/// </summary>
+public interface IColorMatrixEffect
+{
+    string Id { get; }
+    /// <summary>
+    /// 今のフレームでの行列 (RGBA の順に 4 行 x 5 列。5 列目は 0〜1 の平行移動)。変換しないときは null。
+    /// アルファの行 (4 行目) は 0, 0, 0, 1, 0 にすること (それ以外は遅い経路になる)。
+    /// </summary>
+    float[]? GetMatrix(EffectArgs args);
+    /// <summary>既定は Deterministic (行列が時刻や乱数で変わるなら None にする)。</summary>
+    EffectFlags Flags => EffectFlags.Deterministic;
+}
+
+/// <summary>ピクセルのバッファ (BGRA・乗算済みアルファ)。IPixelEffect に渡される。Process の中でだけ使う。</summary>
+public readonly unsafe struct PixelBuffer
+{
+    public IntPtr Pointer { get; }
+    public int Width { get; }
+    public int Height { get; }
+    /// <summary>1 行のバイト数 (Width * 4 以上)。</summary>
+    public int RowBytes { get; }
+
+    public PixelBuffer(IntPtr pointer, int width, int height, int rowBytes)
+    {
+        Pointer = pointer; Width = width; Height = height; RowBytes = rowBytes;
+    }
+
+    /// <summary>y 行目のピクセル (1 ピクセル = 4 バイト: B, G, R, A)。</summary>
+    public Span<byte> Row(int y) => new((byte*)Pointer + (long)y * RowBytes, Width * 4);
+
+    /// <summary>y 行目のピクセルを 32bit 単位で (下位から B, G, R, A)。</summary>
+    public Span<uint> RowPixels(int y) => new((byte*)Pointer + (long)y * RowBytes, Width);
+
+    /// <summary>
+    /// 行の範囲 [y0, y1) ごとに body を呼ぶ。大きなバッファでは複数のスレッドに分ける (行どうしが独立した処理に使う)。
+    /// </summary>
+    public void ParallelRows(Action<int, int> body) => PixelRows.ForBands(Width, Height, body);
+}
+
+/// <summary>PixelBuffer.ParallelRows の実体 (エンジンが差し替える)。</summary>
+public static class PixelRows
+{
+    /// <summary>エンジンの並列化の仕組み。既定は 1 スレッドで呼ぶだけ。</summary>
+    public static Action<int, int, Action<int, int>> ForBands { get; set; } = (_, h, body) => body(0, h);
 }

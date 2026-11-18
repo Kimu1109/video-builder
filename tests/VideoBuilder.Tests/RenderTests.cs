@@ -550,6 +550,29 @@ public class ScriptAndPluginTests
         Assert.Equal(new SKColor(255, 255, 255), Pixel(q, 0, 160, 120));
         Assert.True(Pixel(q, 0, 2, 2).Red < 60);
 
+        // 色の変換 (セピア): 白は黄みがかる
+        var sp = Small();
+        var white = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 60);
+        white.Main.Values["type"] = "0";
+        ObjectFactory.AddFilter(white, "sample.sepia");
+        sp.Root.Objects.Add(white);
+        var sepia = Pixel(sp, 0, 160, 120);
+        Assert.Equal(255, sepia.Red);
+        Assert.InRange(sepia.Blue, 230, 245);
+
+        // ピクセルの書き換え (階調 2): 暗い灰色は黒に、明るい灰色は白になる
+        foreach (var (color, expected) in new[] { ("#707070", (byte)0), ("#909090", (byte)255) })
+        {
+            var pp = Small();
+            var g = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 60);
+            g.Main.Values["type"] = "0";
+            g.Main.Values["color"] = color;
+            ObjectFactory.AddFilter(g, "sample.posterize").Tracks["levels"] = new AnimatedValue(2);
+            pp.Root.Objects.Add(g);
+            Assert.Equal(expected, Pixel(pp, 0, 160, 120).Green);
+        }
+        Assert.Contains(EffectRegistry.AudioFilters, f => f.Id == "sample.lowpass");
+
         // 移動方法: 終点に着いたあとも ID で保存・復元できる
         var v = new AnimatedValue { Values = new() { 0, 100 }, Custom = "sample.bounce" };
         Assert.Equal(100, v.Evaluate(new[] { 0, 100 }, 100), 3);

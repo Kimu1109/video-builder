@@ -165,6 +165,12 @@ public static class EffectRegistry
         F("filter.fade", "フェード", "Icon.Gradient", T("in", "イン", 0, 30, 0.5, 2), T("out", "アウト", 0, 30, 0.5, 2));
         F("filter.script", "スクリプト制御", "Icon.Code",
             new ParamDefinition { Key = "code", Name = "Lua スクリプト", Kind = ParamKind.MultilineText, DefaultText = "-- obj.ox, obj.oy : 位置のずれ   obj.zoom : 拡大率 (1 = 等倍)\n-- obj.rz : 回転   obj.alpha : 不透明度 (1 = そのまま)\nobj.oy = math.sin(obj.time * 4) * 20" });
+
+        // ---- 音声のエフェクト ----
+        void A(string id, string name, string icon, params ParamDefinition[] ps) =>
+            Register(new EffectDefinition { Id = id, Name = name, Category = EffectCategory.AudioFilter, Icon = icon, Color = "#7A7A7A", Params = ps });
+        A("audio.fade", "音声フェード", "Icon.VolumeUp", T("in", "イン", 0, 30, 0.5, 2), T("out", "アウト", 0, 30, 0.5, 2));
+        A("audio.echo", "エコー", "Icon.MusicNote", T("delay", "遅延 (ms)", 1, 2000, 250, 0, 1, 1000), T("feedback", "繰り返し", 0, 95, 40, 0), T("mix", "混ぜる量", 0, 100, 40, 0));
     }
 
     public static void Register(EffectDefinition def)
@@ -178,6 +184,11 @@ public static class EffectRegistry
     public static bool Exists(string id) => Map.ContainsKey(id);
     public static IReadOnlyList<EffectDefinition> All => List;
     public static IEnumerable<EffectDefinition> Filters => List.Where(d => d.Category == EffectCategory.Filter);
+    public static IEnumerable<EffectDefinition> AudioFilters => List.Where(d => d.Category == EffectCategory.AudioFilter);
+
+    /// <summary>このオブジェクトに追加できるエフェクト (映像のオブジェクトには映像、音声のオブジェクトには音声のもの)。</summary>
+    public static IEnumerable<EffectDefinition> FiltersFor(TimelineObject o) =>
+        o.Definition.Category == EffectCategory.AudioSource ? AudioFilters : Filters;
     public static IEnumerable<EffectDefinition> MediaObjects =>
         List.Where(d => d.Category is EffectCategory.VideoSource or EffectCategory.AudioSource or EffectCategory.Control);
 }
