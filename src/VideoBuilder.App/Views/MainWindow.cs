@@ -24,7 +24,11 @@ public sealed class ToolWindow : Window
 
     protected override void OnClosing(WindowClosingEventArgs e)
     {
-        if (!AllowClose) { e.Cancel = true; Hide(); }
+        // このウィンドウだけを閉じようとしたとき (閉じるボタンなど) は、閉じずに隠す。
+        // メインウィンドウの終了やアプリの終了に伴うときは、そのまま閉じる。
+        // ここで閉じるのを取りやめると、メインウィンドウの終了処理 (保存の確認) まで届かず、終了できなくなる
+        // (Avalonia は、持ち主のウィンドウを閉じる前に、子ウィンドウに「閉じてよいか」を問うため)。
+        if (!AllowClose && e.CloseReason == WindowCloseReason.WindowClosing) { e.Cancel = true; Hide(); }
         base.OnClosing(e);
     }
 }

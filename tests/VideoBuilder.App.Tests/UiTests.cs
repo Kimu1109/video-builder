@@ -610,5 +610,51 @@ public class UiTests
             try { Directory.Delete(dir, true); } catch { }
         }
     }
+
+    /// <summary>
+    /// 終了の不具合の再現: 分離表示のとき、メインウィンドウを閉じようとすると、先に子ウィンドウ (タイムライン・設定) に
+    /// 「閉じてよいか」が問われる。子ウィンドウが「隠すだけにして、閉じるのは取りやめる」と答えていたため、
+    /// メインウィンドウの終了処理 (保存の確認) まで届かず、子ウィンドウが消えるだけで終了できなかった。
+    /// </summary>
+    [AvaloniaFact]
+    public void Closing_the_owner_reaches_its_confirmation_and_tool_windows_close_with_it()
+    {
+        var owner = new Window { Width = 300, Height = 200 };
+        int asked = 0;
+        bool allow = false;
+        owner.Closing += (_, e) => { asked++; if (!allow) e.Cancel = true; };   // 保存の確認で「キャンセル」した場合
+        owner.Show();
+        var tool = new ToolWindow("tool", 200, 100);
+        bool toolClosed = false;
+        tool.Closed += (_, _) => toolClosed = true;
+        tool.Show(owner);
+        Pump();
+
+        owner.Close();
+        Pump();
+        Assert.Equal(1, asked);                 // メインウィンドウの終了処理 (確認) まで届く
+        Assert.True(tool.IsVisible);            // 確認でやめたら、子ウィンドウもそのまま残る
+        Assert.True(owner.IsVisible);
+
+        allow = true;                           // 確認で「保存しない」を選んだ場合
+        owner.Close();
+        Pump();
+        Assert.Equal(2, asked);
+        Assert.False(owner.IsVisible);
+        Assert.True(toolClosed);                // 子ウィンドウも一緒に閉じる
+
+        // 子ウィンドウだけを閉じたときは、従来どおり隠すだけ
+        var owner2 = new Window();
+        owner2.Show();
+        var tool2 = new ToolWindow("tool2", 200, 100);
+        bool tool2Closed = false;
+        tool2.Closed += (_, _) => tool2Closed = true;
+        tool2.Show(owner2);
+        tool2.Close();
+        Pump();
+        Assert.False(tool2.IsVisible);
+        Assert.False(tool2Closed);
+        owner2.Close();
+    }
 }
 
