@@ -49,9 +49,12 @@ public sealed class TimelineCanvas : Control
         DragDrop.SetAllowDrop(this, true);
         AddHandler(DragDrop.DragOverEvent, (_, e) =>
         {
-            e.DragEffects = e.Data.Contains(DataFormats.Files) ? DragDropEffects.Copy : DragDropEffects.None;
+            bool files = e.Data.Contains(DataFormats.Files);
+            e.DragEffects = files ? DragDropEffects.Copy : DragDropEffects.None;
+            ShowDropTarget(files ? e.GetPosition(this) : null);
             e.Handled = true;
         });
+        AddHandler(DragDrop.DragLeaveEvent, (_, _) => ShowDropTarget(null));
         AddHandler(DragDrop.DropEvent, OnDrop);
         _session.ProjectChanged += InvalidateVisual;
         _session.SelectionChanged += InvalidateVisual;
@@ -277,6 +280,14 @@ public sealed class TimelineCanvas : Control
             {
                 if (o.Layer < firstLayer || o.Layer > lastLayer || o.End < firstFrame || o.Start > lastFrame) continue;
                 DrawObject(ctx, o, lh);
+            }
+            if (_dropTarget is { } drop)
+            {
+                // ドロップ先: そのレイヤーの行を薄く塗り、置き始める位置に縦線を引く
+                double dy = LayerToY(drop.Layer), dx = Math.Round(FrameToX(drop.Frame)) + 0.5;
+                var accent = ((ISolidColorBrush)B("Accent")).Color;
+                ctx.FillRectangle(new SolidColorBrush(accent, 0.18), new Rect(Math.Max(HeaderWidth, dx), dy, Math.Max(0, W - dx), lh));
+                ctx.DrawLine(new Pen(B("Accent"), 2), new Point(dx, dy), new Point(dx, dy + lh));
             }
             if (_drag == Drag.Rubber)
                 ctx.DrawRectangle(new SolidColorBrush(((ISolidColorBrush)B("Accent")).Color, 0.15), new Pen(B("Accent")), _rubber);
@@ -805,19 +816,45 @@ public sealed class TimelineCanvas : Control
     private void OnDrop(object? sender, DragEventArgs e)
     {
         var files = e.Data.GetFiles();
+        ShowDropTarget(null);
         if (files == null) return;
-        var pos = e.GetPosition(this);
-        int layer = Math.Clamp(YToLayer(Math.Max(pos.Y, RulerHeight)), 0, Scene.LayerCount - 1);
-        int frame = Math.Max(0, XToFrame(Math.Max(pos.X, HeaderWidth)));
-        foreach (var item in files)
-        {
-            var path = item.TryGetLocalPath();
-            if (path == null) continue;
-            var error = MediaImport.AddFile(path, layer, frame);
-            if (error != null) { ErrorRaised?.Invoke(error); continue; }
-            var added = _session.Primary;
-            if (added != null) { layer = Math.Min(Scene.LayerCount - 1, added.Layer + (added.GroupId != null ? 2 : 1)); }
-        }
+        DropFiles(files.Select(f => f.TryGetLocalPath()).Where(p => p != null).Select(p => p!).ToList(), e.GetPosition(this));
         e.Handled = true;
+    }
+
+    /// <summary>ドロップ先として示している場所 (レイヤー, フレーム)。ドラッグ中だけ。</summary>
+    private (int Layer, int Frame)? _dropTarget;
+
+    /// <summary>位置 (このコントロール内の座標) に対応するレイヤーとフレーム。ルーラーやレイヤー名の上なら端に寄せる。</summary>
+    private (int Layer, int Frame) DropCell(Point pos) =>
+        (Math.Clamp(YToLayer(Math.Max(pos.Y, RulerHeight)), 0, Scene.LayerCount - 1), Math.Max(0, XToFrame(Math.Max(pos.X, HeaderWidth))));
+
+    /// <summary>ドラッグ中に、ドロップされる場所を示す (null で消す)。</summary>
+    public void ShowDropTarget(Point? pos)
+    {
+        (int, int)? cell = pos is { } p ? DropCell(p) : null;
+        if (cell == _dropTarget) return;
+        _dropTarget = cell;
+        InvalidateVisual();
+    }
+
+    /// <summary>
+    /// ファイルをタイムラインに置く。pos (このコントロール内の座標) のレイヤー・フレームから置き始め、
+    /// 2 つ目以降は下のレイヤーへ順に置く。pos が null なら現在位置に置く。
+    /// </summary>
+    public void DropFiles(IReadOnlyList<string> paths, Point? pos)
+    {
+        var (layer, frame) = pos is { } p ? DropCell(p) : (0, _session.CurrentFrame);
+        var errors = new List<string>();
+        foreach (var path in paths)
+        {
+            if (Directory.Exists(path)) { errors.Add($"フォルダは置けません: {Path.GetFileName(path)}"); continue; }
+            var error = MediaImport.AddFile(path, layer, frame);
+            if (error != null) { errors.Add(error); continue; }
+            var added = _session.Primary;
+            if (added != null) layer = Math.Min(Scene.LayerCount - 1, added.Layer + (added.GroupId != null ? 2 : 1));
+        }
+        if (errors.Count > 0) ErrorRaised?.Invoke(string.Join("\n", errors));
+        Focus();
     }
 }

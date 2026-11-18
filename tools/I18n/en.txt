@@ -411,3 +411,4 @@ MP4 ({0} + AAC) - ハードウェア ({1}) = MP4 ({0} + AAC) - hardware ({1})
 プロキシを削除 = Delete proxy
 プロキシを作成 = Create proxy
 プロキシを作成中... = Creating proxy...
+フォルダは置けません: {0} = Folders cannot be placed: {0}

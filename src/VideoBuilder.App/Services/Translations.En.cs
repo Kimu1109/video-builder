@@ -416,5 +416,6 @@ internal static class TranslationsEn
         ("プロキシを削除", "Delete proxy"),
         ("プロキシを作成", "Create proxy"),
         ("プロキシを作成中...", "Creating proxy..."),
+        ("フォルダは置けません: {0}", "Folders cannot be placed: {0}"),
     };
 }

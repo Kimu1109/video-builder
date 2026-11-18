@@ -101,11 +101,17 @@ public sealed class MainWindow : Window
         };
         Closed += (_, _) =>
         {
+            _xdnd?.Dispose();
+            _xdnd = null;
             Svc.Proxies.CancelAll();
             foreach (var w in new[] { _timelineWindow, _settingsWindow }) { if (w != null) { w.AllowClose = true; w.Close(); } }
             Svc.Preview.Dispose();
         };
-        Opened += (_, _) => { if (!_docked) ShowToolWindows(); };
+        Opened += (_, _) =>
+        {
+            if (!_docked) ShowToolWindows();
+            AttachDropTarget(this);
+        };
     }
 
     private readonly Control _previewArea;
@@ -178,12 +184,63 @@ public sealed class MainWindow : Window
         {
             _timelineWindow.Position = new PixelPoint(Position.X, Position.Y + (int)(Height * RenderScaling) + 40);
             _timelineWindow.Show(this);
+            AttachDropTarget(_timelineWindow);
         }
         if (_settingsWindow is { IsVisible: false })
         {
             _settingsWindow.Position = new PixelPoint(Position.X + (int)(Width * RenderScaling) + 12, Position.Y);
             _settingsWindow.Show(this);
+            AttachDropTarget(_settingsWindow);
         }
+    }
+
+    // ---------------- ほかのアプリからのファイルのドロップ (Linux / X11) ----------------
+
+    private Platform.XdndDropTarget? _xdnd;
+    private bool _xdndTried;
+    private readonly Dictionary<IntPtr, Window> _dropWindows = new();
+
+    /// <summary>
+    /// X11 では Avalonia がドロップを受け取れないので、自前の受け取り口 (XdndDropTarget) をウィンドウに付ける。
+    /// Windows・macOS では Avalonia の DragDrop がそのまま使われる。
+    /// </summary>
+    private void AttachDropTarget(Window window)
+    {
+        if (!_xdndTried)
+        {
+            _xdndTried = true;
+            if (OperatingSystem.IsLinux() && window.TryGetPlatformHandle() is { HandleDescriptor: "XID" })
+            {
+                _xdnd = Platform.XdndDropTarget.TryCreate();
+                if (_xdnd != null)
+                {
+                    _xdnd.Moved += (w, x, y) => Avalonia.Threading.Dispatcher.UIThread.Post(() => OnExternalDrag(w, x, y, null));
+                    _xdnd.Left += _ => Avalonia.Threading.Dispatcher.UIThread.Post(() => Timeline.Canvas.ShowDropTarget(null));
+                    _xdnd.Dropped += (w, x, y, files) => Avalonia.Threading.Dispatcher.UIThread.Post(() => OnExternalDrag(w, x, y, files));
+                }
+            }
+        }
+        if (_xdnd == null || window.TryGetPlatformHandle() is not { HandleDescriptor: "XID" } handle) return;
+        _dropWindows[handle.Handle] = window;
+        _xdnd.Attach(handle.Handle);
+    }
+
+    /// <summary>X11 からのドラッグ位置・ドロップを、タイムライン上の位置に直して処理する。files が null ならドラッグ中。</summary>
+    private void OnExternalDrag(IntPtr windowId, int x, int y, IReadOnlyList<string>? files)
+    {
+        var canvas = Timeline.Canvas;
+        Point? onCanvas = null;
+        if (_dropWindows.TryGetValue(windowId, out var window))
+        {
+            // X11 の位置は物理ピクセルなので、画面の拡大率で割って Avalonia の座標にする
+            var p = new Point(x / window.RenderScaling, y / window.RenderScaling);
+            if (canvas.IsEffectivelyVisible && window.TranslatePoint(p, canvas) is { } c && new Rect(canvas.Bounds.Size).Contains(c)) onCanvas = c;
+        }
+        if (files == null) { canvas.ShowDropTarget(onCanvas); return; }
+        canvas.ShowDropTarget(null);
+        window?.Activate();
+        // タイムラインの外 (プレビューなど) に落としたときは、現在位置に置く
+        canvas.DropFiles(files, onCanvas);
     }
 
     public IEnumerable<Window> ToolWindows => new Window?[] { _timelineWindow, _settingsWindow }.Where(w => w is { IsVisible: true })!;

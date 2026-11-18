@@ -14,10 +14,11 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Install FFmpeg, OpenAL, software OpenGL ES and a Japanese font
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg libopenal1 fonts-ipafont-gothic libegl1 libgles2 libgl1-mesa-dri
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libopenal1 fonts-ipafont-gothic libegl1 libgles2 libgl1-mesa-dri xvfb
       - name: Build
         run: dotnet build -warnaserror:CS8600,CS8602,CS8604
       - name: Test
-        run: dotnet test --no-build
+        # X サーバー (仮想) の上で動かし、ほかのアプリからのドロップ (XDND) のテストも実行する
+        run: xvfb-run -a dotnet test --no-build
         env:
           VB_REQUIRE_FFMPEG: "1"

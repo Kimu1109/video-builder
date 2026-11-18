@@ -10,6 +10,7 @@
   <ItemGroup>
     <AvaloniaResource Include="Assets/**" />
     <AvaloniaResource Include="Themes/**" />
+    <InternalsVisibleTo Include="VideoBuilder.App.Tests" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../VideoBuilder.Core/VideoBuilder.Core.csproj" />
