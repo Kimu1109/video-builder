@@ -10,9 +10,20 @@ public sealed class AudioMixer : IDisposable
     {
         public AudioReader? Reader;
         public string Path = "";
+        /// <summary>前回読んだ範囲の終わり (サンプル)。ここから読めばシークしなくてよい。</summary>
+        public long NextSample = -1;
+        public long UsedInMix = -1;
+        public long LastUsed;
     }
 
-    private readonly Dictionary<string, Entry> _readers = new();
+    // 読み手はファイルごとに持ち、オブジェクトには Mix のたびに貸す (MediaCache と同じ考え方)。
+    // 分割した音声のつなぎ目でも、前のオブジェクトの読み手をそのまま続きから使えるので、開き直し・シークをしない
+    private readonly Dictionary<string, List<Entry>> _readers = new();
+    private long _mix, _tick;
+    private const int MaxReaders = 16;
+
+    /// <summary>開いている読み手の数 (計測・テスト用)。</summary>
+    public int ReaderCount { get { lock (_gate) return _readers.Values.Sum(l => l.Count); } }
     private readonly object _gate = new();
     private float[] _temp = Array.Empty<float>();
 
@@ -22,6 +33,7 @@ public sealed class AudioMixer : IDisposable
         lock (_gate)
         {
             dst.Clear();
+            _mix++;
             int frames = dst.Length / 2;
             int rate = project.Settings.SampleRate;
             long endSample = startSample + frames;
@@ -37,15 +49,14 @@ public sealed class AudioMixer : IDisposable
                 long from = Math.Max(startSample, objStart), to = Math.Min(endSample, objEnd);
                 if (to <= from) continue;
 
-                var reader = GetReader(obj.Id, obj.Main.GetString("file"), rate);
-                if (reader == null) continue;
 
                 var bounds = obj.Bounds;
                 int f = Math.Clamp(frame, obj.Start, obj.End);
                 double speed = Math.Max(0.01, obj.Main.Eval("speed", bounds, f) / 100.0);
                 double offset = (obj.Main.Eval("position", bounds, obj.Start) + project.FrameToSeconds(obj.SourceOffsetFrames)) * rate;
                 bool loop = obj.Main.GetBool("loop");
-                long total = (long)(reader.Duration * rate);
+                string file = obj.Main.GetString("file");
+                long total = loop ? (long)(DurationOf(file, rate) * rate) : 0;
 
                 float volume = 1, pan = 0;
                 var play = obj.FindEffect(EffectRegistry.StandardPlay);
@@ -63,7 +74,10 @@ public sealed class AudioMixer : IDisposable
                 if (_temp.Length < srcCount * 2) _temp = new float[srcCount * 2];
                 var temp = _temp.AsSpan(0, srcCount * 2);
                 long srcStart = (long)Math.Floor(srcPos);
-                reader.Read(srcStart, temp);
+                var entry = GetReader(file, rate, srcStart);
+                if (entry?.Reader == null) continue;
+                entry.Reader.Read(srcStart, temp);
+                entry.NextSample = srcStart + (long)Math.Floor(count * speed);
 
                 var o = dst.Slice((int)(from - startSample) * 2, count * 2);
                 if (Math.Abs(speed - 1) < 1e-9)
@@ -91,23 +105,71 @@ public sealed class AudioMixer : IDisposable
         }
     }
 
-    private AudioReader? GetReader(string key, string path, int rate)
+    /// <summary>このオブジェクトに貸す読み手を選ぶ。続きから読めるもの → 使われていないもの → 新しく開く、の順。</summary>
+    private Entry? GetReader(string path, int rate, long start)
     {
         if (string.IsNullOrEmpty(path)) return null;
-        if (_readers.TryGetValue(key, out var e) && e.Path == path) return e.Reader;
-        e?.Reader?.Dispose();
-        e = new Entry { Path = path };
-        try { e.Reader = File.Exists(path) ? new AudioReader(path, rate) : null; }
-        catch { e.Reader = null; }
-        _readers[key] = e;
-        return e.Reader;
+        if (!_readers.TryGetValue(path, out var list)) _readers[path] = list = new List<Entry>();
+        Entry? best = null;
+        long bestCost = long.MaxValue;
+        foreach (var e in list)
+        {
+            if (e.UsedInMix == _mix) continue;
+            long cost = e.NextSample >= 0 && start >= e.NextSample - 1 && start - e.NextSample <= rate ? start - e.NextSample : long.MaxValue / 2 - e.LastUsed;
+            if (cost < bestCost) { best = e; bestCost = cost; }
+        }
+        if (best == null)
+        {
+            best = new Entry { Path = path };
+            try { best.Reader = File.Exists(path) ? new AudioReader(path, rate) : null; }
+            catch { best.Reader = null; }
+            list.Add(best);
+            Trim();
+        }
+        best.UsedInMix = _mix;
+        best.LastUsed = ++_tick;
+        return best;
+    }
+
+    private readonly Dictionary<string, double> _durations = new();
+
+    /// <summary>ファイルの長さ (秒)。ループ再生の折り返しに使う。開けなければ 0。</summary>
+    private double DurationOf(string path, int rate)
+    {
+        if (string.IsNullOrEmpty(path)) return 0;
+        if (_durations.TryGetValue(path, out var d)) return d;
+        if (_readers.TryGetValue(path, out var list) && list.FirstOrDefault(e => e.Reader != null) is { } open) d = open.Reader!.Duration;
+        else
+        {
+            // まだ開いていなければ開いておく (このあと GetReader でそのまま使われる)
+            var e = new Entry { Path = path };
+            try { e.Reader = File.Exists(path) ? new AudioReader(path, rate) : null; }
+            catch { e.Reader = null; }
+            if (!_readers.TryGetValue(path, out list)) _readers[path] = list = new List<Entry>();
+            list.Add(e);
+            d = e.Reader?.Duration ?? 0;
+        }
+        _durations[path] = d;
+        return d;
+    }
+
+    private void Trim()
+    {
+        while (_readers.Values.Sum(l => l.Count) > MaxReaders)
+        {
+            var oldest = _readers.SelectMany(kv => kv.Value.Select(e => (kv.Key, e))).Where(x => x.e.UsedInMix != _mix).MinBy(x => x.e.LastUsed);
+            if (oldest.e == null) return;
+            oldest.e.Reader?.Dispose();
+            _readers[oldest.Key].Remove(oldest.e);
+            if (_readers[oldest.Key].Count == 0) _readers.Remove(oldest.Key);
+        }
     }
 
     public void Dispose()
     {
         lock (_gate)
         {
-            foreach (var e in _readers.Values) e.Reader?.Dispose();
+            foreach (var e in _readers.Values.SelectMany(l => l)) e.Reader?.Dispose();
             _readers.Clear();
         }
     }

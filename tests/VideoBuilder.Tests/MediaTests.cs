@@ -626,3 +626,53 @@ public class DecoderSharingTests : IDisposable
         Assert.Equal(2, e.Media.TotalSeeks);          // それぞれ最初の 1 回だけ (毎フレーム取り合ってシークしない)
     }
 }
+
+public class AudioReaderSharingTests
+{
+    [Fact]
+    public void Split_audio_mixes_the_same_samples_with_one_reader_and_loop_still_wraps()
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-amix-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var clip = Path.Combine(dir, "a.wav");
+            if (!MediaTests.RunFfmpeg($"-f lavfi -i \"sine=frequency=330:sample_rate=48000:duration=3\" \"{clip}\"")) return;
+            Project Make(params (int Start, int Length, int Offset)[] parts)
+            {
+                var p = new Project();
+                foreach (var (start, length, offset) in parts)
+                {
+                    var a = ObjectFactory.Create(EffectRegistry.Audio, 0, start, length);
+                    a.Main.Values["file"] = clip; a.SourceOffsetFrames = offset;
+                    p.Root.Objects.Add(a);
+                }
+                return p;
+            }
+            var whole = Make((0, 90, 0));
+            var split = Make((0, 40, 0), (40, 50, 40));
+            using var m1 = new AudioMixer();
+            using var m2 = new AudioMixer();
+            var b1 = new float[1600 * 2]; var b2 = new float[1600 * 2];
+            for (int f = 0; f < 90; f++)
+            {
+                m1.Mix(whole, whole.Root, f * 1600, b1);
+                m2.Mix(split, split.Root, f * 1600, b2);
+                Assert.Equal(b1, b2);
+            }
+            Assert.Equal(1, m2.ReaderCount);
+
+            // ループ再生: 3 秒の素材を 4 秒置くと、3 秒目からは頭に戻る
+            var loop = Make((0, 120, 0));
+            loop.Root.Objects[0].Main.Values["loop"] = "1";
+            using var m3 = new AudioMixer();
+            var head = new float[1600 * 2]; var wrapped = new float[1600 * 2];
+            m3.Mix(loop, loop.Root, 0, head);
+            m3.Mix(loop, loop.Root, 48000 * 3, wrapped);
+            Assert.Contains(wrapped, x => Math.Abs(x) > 0.01f);
+            Assert.Equal(head, wrapped);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+}
