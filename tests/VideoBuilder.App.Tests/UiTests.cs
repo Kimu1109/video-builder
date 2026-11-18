@@ -688,5 +688,33 @@ public class UiTests
         Assert.Empty(s.SelectionIds);
         Assert.Equal(120, s.CurrentFrame);
     }
+
+    [AvaloniaFact]
+    public void Report_selection_change_cost()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        var ids = new List<string>();
+        s.Edit("bench", () =>
+        {
+            for (int i = 0; i < 20; i++)
+            {
+                var o = ObjectFactory.Create(i % 2 == 0 ? EffectRegistry.Text : EffectRegistry.Video, i, 0, 100);
+                ObjectFactory.AddFilter(o, "filter.border"); ObjectFactory.AddFilter(o, "filter.color");
+                s.Scene.Objects.Add(o); ids.Add(o.Id);
+            }
+        });
+        Pump(); w.CaptureRenderedFrame()?.Dispose();
+        foreach (var id in ids.Take(4)) { s.Select(id); Pump(); w.CaptureRenderedFrame()?.Dispose(); }   // 1 回目の組み立て・JIT を済ませる
+        double selectMs = 0;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < 40; i++) { var t0 = sw.Elapsed.TotalMilliseconds; s.Select(ids[i % ids.Count]); selectMs += sw.Elapsed.TotalMilliseconds - t0; Pump(); }
+        double update = sw.Elapsed.TotalMilliseconds / 40;
+        Console.WriteLine($"BENCH detail: select-event {selectMs / 40:0.0} ms");
+        sw.Restart();
+        for (int i = 0; i < 40; i++) { s.Select(ids[(i + 1) % ids.Count]); Pump(); w.CaptureRenderedFrame()?.Dispose(); }
+        double withDraw = sw.Elapsed.TotalMilliseconds / 40;
+        Console.WriteLine($"BENCH selection change: build {update:0.0} ms, build+layout+draw {withDraw:0.0} ms");
+    }
 }
 
