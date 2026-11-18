@@ -194,6 +194,61 @@ public class RenderTests
     }
 
     [Fact]
+    public void Camera_control_draws_objects_from_far_to_near()
+    {
+        // 上のレイヤーの赤を奥 (z = 300)、下のレイヤーの緑を手前 (z = -300) に置く
+        var p = Small();
+        p.Root.Objects.Add(ObjectFactory.Create(EffectRegistry.CameraControl, 0, 0, 60));
+        AddShape(p, 1, "#00FF00", 60).Draw!.Tracks["z"] = new AnimatedValue(-300);
+        AddShape(p, 2, "#FF0000", 60).Draw!.Tracks["z"] = new AnimatedValue(300);
+        // 奥行きで並べ替える (既定): 手前の緑が見える
+        Assert.Equal(new SKColor(0, 255, 0), Pixel(p, 0, 160, 120));
+        // 並べ替えない: レイヤー順なので、あとに描く赤が上に来る
+        p.Root.Objects[0].Main.Values["zsort"] = "0";
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 160, 120));
+
+        // カメラの対象外のオブジェクト・調整レイヤーをはさんでも、順番は崩れない
+        var q = Small();
+        q.Root.Objects.Add(ObjectFactory.Create(EffectRegistry.CameraControl, 0, 0, 60));
+        AddShape(q, 1, "#FF0000", 60).Draw!.Tracks["z"] = new AnimatedValue(-300);   // 手前
+        var mono = ObjectFactory.Create("filter.mono", 2, 0, 60);                              // ここまでを単色化 (白)
+        q.Root.Objects.Add(mono);
+        AddShape(q, 3, "#0000FF", 20).Draw!.Tracks["z"] = new AnimatedValue(300);    // 奥だが、単色化のあとに描く
+        // 赤は単色化の前に描き終えているので灰色に、青は単色化のあとに描くので、奥にあっても上に乗る
+        Assert.Equal(new SKColor(0, 0, 255), Pixel(q, 0, 160, 120));
+        var gray = Pixel(q, 0, 190, 120);
+        Assert.True(gray.Red > 0 && gray.Red == gray.Green && gray.Green == gray.Blue, gray.ToString());
+    }
+
+    [Fact]
+    public void Depth_of_field_blurs_objects_away_from_the_focus()
+    {
+        const float DefaultDistance = RenderEngine.DefaultCameraDistance;
+        // 白い四角の縁の明るさで、ぼけたかどうかを見る
+        SKColor EdgeAt(float z, float dof, float focus = 0)
+        {
+            var p = Small();
+            var cam = ObjectFactory.Create(EffectRegistry.CameraControl, 0, 0, 60);
+            cam.Main.Tracks["dof"] = new AnimatedValue(dof);
+            cam.Main.Tracks["focus"] = new AnimatedValue(focus);
+            p.Root.Objects.Add(cam);
+            var sq = AddShape(p, 1, "#FFFFFF", 100);
+            sq.Draw!.Tracks["z"] = new AnimatedValue(z);
+            // 四角の右端の少し外側 (中心 160 + 半分の大きさ x 拡大率 + 3)
+            float half = 50 * DefaultDistance / (DefaultDistance + z);
+            return Pixel(p, 0, (int)(160 + half + 3), 120);
+        }
+        // ぼけなし: 外側は黒
+        Assert.Equal(SKColors.Black, EdgeAt(1000, 0));
+        // ピント (目標 = z 0) から離れた奥の四角はぼける
+        Assert.True(EdgeAt(1000, 20).Red > 20);
+        // ピントが合っている位置ならぼけない
+        Assert.Equal(SKColors.Black, EdgeAt(0, 20));
+        // ピントの距離を奥に合わせると、奥の四角はぼけない
+        Assert.Equal(SKColors.Black, EdgeAt(1000, 20, DefaultDistance + 1000));
+    }
+
+    [Fact]
     public void Old_projects_get_newly_added_parameters_on_load()
     {
         var p = Small();

@@ -48,8 +48,17 @@ public sealed class RenderEngine : IDisposable
 
     private readonly record struct GroupState(int FromLayer, int ToLayer, float X, float Y, float Scale, float Rotation, float Alpha);
 
-    /// <summary>カメラ: ワールド座標 → カメラ座標 (X 右, Y 下, Z 奥) の変換と、焦点距離。</summary>
-    private readonly record struct CameraState(int FromLayer, int ToLayer, Matrix4x4 View, float Focal);
+    /// <summary>
+    /// カメラ: ワールド座標 → カメラ座標 (X 右, Y 下, Z 奥) の変換と、焦点距離。
+    /// ZSort: 対象のオブジェクトを奥から順に描く。Dof: 深度ぼけの強さ (ピクセル)、FocusDistance: ピントの合う距離。
+    /// </summary>
+    private readonly record struct CameraState(int FromLayer, int ToLayer, Matrix4x4 View, float Focal, bool ZSort = false, float Dof = 0, float FocusDistance = 0);
+
+    /// <summary>オブジェクトを画面のどこにどう描くか (Place で求め、DrawPlaced で描く)。</summary>
+    private readonly record struct Placement(SKMatrix Matrix, float Depth, float Alpha, float Scale, int Blend, int Camera);
+
+    /// <summary>奥行きで並べ替えるために、描くのを待っているオブジェクト。</summary>
+    private readonly record struct DeferredDraw(Sprite Sprite, TimelineObject Obj, Placement Place, int Order, bool ChangesEveryFrame);
 
     /// <summary>カメラ制御がないときの視点。Z = 0 の平面がちょうど等倍で映る。</summary>
     public const float DefaultCameraDistance = 1024;
@@ -139,6 +148,7 @@ public sealed class RenderEngine : IDisposable
         int W = project.Settings.Width, H = project.Settings.Height;
         var groups = new List<GroupState>();
         var cameras = new List<CameraState>();
+        var deferred = new List<DeferredDraw>();
         var active = scene.ObjectsAt(frame).ToList();
         PrefetchVideos(project, scene, active, frame);
         // CPU 描画のときは描画先のピクセルを直接つかんでおく (大きな絵を帯に分けて並列に描くため)
@@ -170,11 +180,19 @@ public sealed class RenderEngine : IDisposable
                         int n = (int)E("layers");
                         float fov = E("fov");
                         float focal = fov > 0.5f ? H / 2f / MathF.Tan(fov * MathF.PI / 360f) : DefaultCameraDistance;
+                        var eye = new Vector3(E("x"), E("y"), E("z"));
+                        var aim = new Vector3(E("tx"), E("ty"), E("tz"));
+                        float focus = E("focus");
+                        if (focus <= 0) focus = Math.Max(1, Vector3.Distance(eye, aim));   // 0 = 目標の位置にピントを合わせる
+                        // 新しいカメラより前に待たせていたものは、前のカメラの並びで描き終えておく
+                        FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth);
                         cameras.Add(new CameraState(obj.Layer + 1, n <= 0 ? int.MaxValue : obj.Layer + n,
-                            LookAt(new Vector3(E("x"), E("y"), E("z")), new Vector3(E("tx"), E("ty"), E("tz")), E("roll")), focal));
+                            LookAt(eye, aim, E("roll")), focal, main.GetBool("zsort"), Math.Max(0, E("dof")), focus));
                         break;
                     }
                     case EffectCategory.Filter:
+                        // 画面全体にかける効果は、それまでに描くはずだったものを描き終えてからかける
+                        FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth);
                         ApplyToFrameBuffer(ctx, obj, bounds, surface);
                         break;
                     case EffectCategory.VideoSource:
@@ -193,12 +211,23 @@ public sealed class RenderEngine : IDisposable
                         ctx.Modifiers = DrawModifiers.None;
                         int next = ApplyCachedFilters(ctx, obj, bounds, frame, depth, ref sprite);
                         sprite = Effects.ApplyRange(sprite, obj, bounds, ctx, next, obj.Effects.Count);
-                        DrawSprite(canvas, sprite, obj, bounds, frame, groups, cameras, W, H, depth == 0 ? LastQuads : null, ctx.Modifiers, Draft, target,
-                            changesEveryFrame: def.Id is EffectRegistry.Video or EffectRegistry.SceneRef);
+                        bool changes = def.Id is EffectRegistry.Video or EffectRegistry.SceneRef;
+                        if (Place(sprite, obj, bounds, frame, groups, cameras, W, H, ctx.Modifiers) is not { } place) break;
+                        if (place.Camera >= 0 && cameras[place.Camera].ZSort)
+                        {
+                            // 奥行きで並べ替える: 同じカメラのものが続く間は描かずに待たせる
+                            if (deferred.Count > 0 && deferred[0].Place.Camera != place.Camera)
+                                FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth);
+                            deferred.Add(new DeferredDraw(sprite, obj, place, deferred.Count, changes));
+                            break;
+                        }
+                        FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth);
+                        DrawPlaced(canvas, ApplyDepthOfField(ctx, sprite, obj, place, cameras, depth), sprite, obj, place, W, depth == 0 ? LastQuads : null, Draft, target, changes);
                         break;
                     }
                 }
             }
+            FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth);
         }
         finally
         {
@@ -206,8 +235,79 @@ public sealed class RenderEngine : IDisposable
         }
     }
 
-    private static void DrawSprite(SKCanvas canvas, Sprite sprite, TimelineObject obj, int[] bounds, int frame,
-        List<GroupState> groups, List<CameraState> cameras, int W, int H, List<(string, SKPoint[])>? quads, DrawModifiers mod, bool draft, SKPixmap? target, bool changesEveryFrame = false)
+    /// <summary>待たせていたものを、奥 (カメラから遠い) から順に描く。同じ距離ならレイヤー順。</summary>
+    private void FlushDeferred(SKCanvas canvas, List<DeferredDraw> deferred, List<CameraState> cameras, int W, int H,
+        List<(string, SKPoint[])>? quads, SKPixmap? target, RenderContext ctx, int depth)
+    {
+        if (deferred.Count == 0) return;
+        deferred.Sort((a, b) =>
+        {
+            int c = b.Place.Depth.CompareTo(a.Place.Depth);
+            return c != 0 ? c : a.Order.CompareTo(b.Order);
+        });
+        foreach (var d in deferred)
+            DrawPlaced(canvas, ApplyDepthOfField(ctx, d.Sprite, d.Obj, d.Place, cameras, depth), d.Sprite, d.Obj, d.Place, W, quads, Draft, target, d.ChangesEveryFrame);
+        deferred.Clear();
+    }
+
+    /// <summary>深度ぼけ: ピントの位置から離れているほど、絵をぼかす。</summary>
+    private sealed class DofEntry
+    {
+        public uint SourceId;
+        public float Radius;
+        public Sprite Sprite;
+        public long LastUsed;
+    }
+    // 深度ぼけの結果。元の絵とぼけの半径が前のフレームと同じなら使い回す (止まっている背景を毎フレームぼかさない)
+    private readonly Dictionary<string, DofEntry> _dofCache = new();
+
+    private Sprite ApplyDepthOfField(RenderContext ctx, Sprite sprite, TimelineObject obj, Placement place, List<CameraState> cameras, int depth)
+    {
+        if (place.Camera < 0) return sprite;
+        var cam = cameras[place.Camera];
+        if (cam.Dof <= 0 || place.Alpha <= 0) return sprite;
+        // 画面上でのぼけの半径 (プロジェクトのピクセル)。ピントの位置で 0、遠くへ行くほど Dof に近づき、手前ではさらに大きくなる
+        float screenRadius = cam.Dof * MathF.Abs(place.Depth - cam.FocusDistance) / place.Depth;
+        // 絵の 1 ピクセルが画面で何ピクセルになるか (オブジェクトの中心のあたりで測る)
+        var m = place.Matrix;
+        var o = m.MapPoint(0, 0);
+        var ux = m.MapPoint(1, 0);
+        var uy = m.MapPoint(0, 1);
+        float pixel = MathF.Sqrt(Math.Max(Dist2(ux, o), Dist2(uy, o))) * sprite.Scale;
+        if (pixel <= 1e-4f) return sprite;
+        float radius = Math.Min(screenRadius / pixel, 500);
+        if (radius < 0.5f) return sprite;
+        radius = MathF.Round(radius * 4) / 4;   // 細かな揺れで作り直さない
+        string key = depth == 0 ? obj.Id : obj.Id + "@" + depth;
+        _tick++;
+        if (_dofCache.TryGetValue(key, out var hit) && hit.SourceId == sprite.Image.UniqueId && hit.Radius == radius)
+        {
+            hit.LastUsed = _tick;
+            return hit.Sprite;
+        }
+        // ぼかした絵は元と同じ縮尺 (プロキシなら小さいまま) で描く
+        var blurred = Effects.GaussianBlur(sprite, ctx, radius) with { Scale = sprite.Scale };
+        if (ReferenceEquals(blurred.Image, sprite.Image) || !ctx.Temporaries.Remove(blurred.Image)) return blurred;
+        if (hit != null) hit.Sprite.Image.Dispose();
+        else
+        {
+            if (_dofCache.Count >= 64)
+                foreach (var k in _dofCache.Where(kv => kv.Value.LastUsed < _frameStartTick).Select(kv => kv.Key).ToList())
+                {
+                    _dofCache[k].Sprite.Image.Dispose();
+                    _dofCache.Remove(k);
+                }
+            _dofCache[key] = hit = new DofEntry();
+        }
+        hit.SourceId = sprite.Image.UniqueId; hit.Radius = radius; hit.Sprite = blurred; hit.LastUsed = _tick;
+        return blurred;
+
+        static float Dist2(SKPoint a, SKPoint b) => (a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y);
+    }
+
+    /// <summary>オブジェクトの変形・グループ制御・カメラから、画面への変換を求める。描かないもの (カメラの後ろ) は null。</summary>
+    private static Placement? Place(Sprite sprite, TimelineObject obj, int[] bounds, int frame,
+        List<GroupState> groups, List<CameraState> cameras, int W, int H, DrawModifiers mod)
     {
         var draw = obj.Draw;
         float x = 0, y = 0, z = 0, scale = 1, rot = 0, rx = 0, ry = 0, alpha = 1;
@@ -240,8 +340,12 @@ public sealed class RenderEngine : IDisposable
         // 対象レイヤーに入っている、いちばん下 (最後) のカメラ制御を使う
         var view = Matrix4x4.CreateTranslation(0, 0, DefaultCameraDistance);
         float focal = DefaultCameraDistance;
-        foreach (var c in cameras)
-            if (obj.Layer >= c.FromLayer && obj.Layer <= c.ToLayer) { view = c.View; focal = c.Focal; }
+        int camera = -1;
+        for (int ci = 0; ci < cameras.Count; ci++)
+        {
+            var c = cameras[ci];
+            if (obj.Layer >= c.FromLayer && obj.Layer <= c.ToLayer) { view = c.View; focal = c.Focal; camera = ci; }
+        }
         var m = model * view;
 
         // オブジェクトは平面なので、(lx, ly, 1) → 画面座標の射影変換 (3x3) にまとめられる
@@ -253,28 +357,37 @@ public sealed class RenderEngine : IDisposable
             Persp0 = m.M13, Persp1 = m.M23, Persp2 = m.M43,
         };
         // 中心がカメラより後ろにあるものは描かない
-        if (m.M43 <= 1f) return;
+        if (m.M43 <= 1f) return null;
         // 全体を同じ数で割っても同じ変換を表す。右下を 1 にそろえておくと、遠近のない場合に
         // Skia が「平行移動・拡大・回転だけ」と判断できて、速い描画経路を使える
         float inv = 1f / m.M43;
         h.ScaleX *= inv; h.SkewX *= inv; h.TransX *= inv;
         h.SkewY *= inv; h.ScaleY *= inv; h.TransY *= inv;
         h.Persp0 *= inv; h.Persp1 *= inv; h.Persp2 = 1;
+        return new Placement(h, m.M43, Math.Clamp(alpha, 0, 1), scale, blend, camera);
+    }
 
+    /// <summary>Place で求めた位置に描く。quadSprite は選択枠に使う絵 (ぼかして広がる前の大きさ)。</summary>
+    private static void DrawPlaced(SKCanvas canvas, Sprite sprite, Sprite quadSprite, TimelineObject obj, Placement place, int W,
+        List<(string, SKPoint[])>? quads, bool draft, SKPixmap? target, bool changesEveryFrame)
+    {
+        var h = place.Matrix;
+        float alpha = place.Alpha, scale = place.Scale;
+        int blend = place.Blend;
         canvas.Save();
         canvas.Concat(ref h);
-        if (sprite.Scale != 1) canvas.Scale(sprite.Scale);   // 小さく作った絵 (プロキシ) を元の大きさで描く
-        alpha = Math.Clamp(alpha, 0, 1);
         if (quads != null)
         {
             // デバイス座標 → プロジェクト座標 (プレビューの縮小率を打ち消す)
             float k = W / (float)Math.Max(1, canvas.DeviceClipBounds.Width);
             var total = canvas.TotalMatrix;
-            var rect = SKRect.Create(-sprite.Cx, -sprite.Cy, sprite.Width, sprite.Height);
+            if (quadSprite.Scale != 1) total = total.PreConcat(SKMatrix.CreateScale(quadSprite.Scale, quadSprite.Scale));
+            var rect = SKRect.Create(-quadSprite.Cx, -quadSprite.Cy, quadSprite.Width, quadSprite.Height);
             var pts = new[] { new SKPoint(rect.Left, rect.Top), new SKPoint(rect.Right, rect.Top), new SKPoint(rect.Right, rect.Bottom), new SKPoint(rect.Left, rect.Bottom) };
             for (int i = 0; i < 4; i++) { var q = total.MapPoint(pts[i]); pts[i] = new SKPoint(q.X * k, q.Y * k); }
             quads.Add((obj.Id, pts));
         }
+        if (sprite.Scale != 1) canvas.Scale(sprite.Scale);   // 小さく作った絵 (プロキシ) を元の大きさで描く
         // 毎フレーム変わる絵 (動画など) を半分より小さくするときは、先に半分ずつ縮めておく。
         // そのまま描くと、Skia が縮小用の中間画像を毎フレーム 1 スレッドで作り直してしまう
         SKImage? prescaled = null;
@@ -741,6 +854,8 @@ public sealed class RenderEngine : IDisposable
     {
         Gpu?.MakeCurrent();
         foreach (var e in _filterCache.Values) e.Sprite.Image.Dispose();
+        foreach (var e in _dofCache.Values) e.Sprite.Image.Dispose();
+        _dofCache.Clear();
         _filterCache.Clear();
         _filterCacheBytes = 0;
         _gpuSurface?.Dispose();

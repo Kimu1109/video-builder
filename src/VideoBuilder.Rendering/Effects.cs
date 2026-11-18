@@ -241,12 +241,19 @@ public static class Effects
     private sealed class Blur : IVideoEffect
     {
         public string Id => "filter.blur";
-        public Sprite Apply(Sprite s, EffectArgs a)
+        public Sprite Apply(Sprite s, EffectArgs a) => Gaussian(s, a, a.Track("radius"), a.Check("fixed") || a.IsFrameBuffer);
+    }
+
+    /// <summary>ぼかす (半径はピクセル)。keepSize なら大きさを変えない (はみ出すぶんは捨てる)。</summary>
+    internal static Sprite GaussianBlur(Sprite s, RenderContext ctx, float radius, bool keepSize = false) =>
+        Gaussian(s, new EffectArgs { Context = ctx }, radius, keepSize);
+
+    private static Sprite Gaussian(Sprite s, EffectArgs a, float radius, bool keepSize)
+    {
         {
-            float radius = a.Track("radius");
             if (radius <= 0) return s;
             float sigma = radius / 2f;
-            int pad = a.Check("fixed") || a.IsFrameBuffer ? 0 : (int)MathF.Ceiling(radius * 1.5f);
+            int pad = keepSize ? 0 : (int)MathF.Ceiling(radius * 1.5f);
             int k = BlurDownscale(sigma);
             if (k > 1)
             {

@@ -425,5 +425,8 @@ internal static class TranslationsEn
         ("遅延 (ms)", "Delay (ms)"),
         ("繰り返し", "Feedback"),
         ("混ぜる量", "Mix"),
+        ("奥行きで並べ替える", "Sort by depth"),
+        ("深度ぼけ", "Depth of field"),
+        ("ピントの距離", "Focus distance"),
     };
 }
