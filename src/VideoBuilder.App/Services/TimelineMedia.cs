@@ -132,10 +132,27 @@ public sealed class ThumbnailCache
         foreach (var k in _ready.Keys.Take(200).ToList()) { _ready[k]?.Dispose(); _ready.Remove(k); _pending.Remove(k); }
     }
 
+    // 開いた動画を少しのあいだ取っておく (同じ動画の別の位置のサムネイルを、開き直さずに作るため)。
+    // 作るのは 1 本ずつ (_gate) なので、ほかのスレッドと取り合わない
+    private static readonly Dictionary<string, VideoReader> Readers = new();
+    private static readonly Queue<string> ReaderOrder = new();
+
+    private static VideoReader OpenCached(string path)
+    {
+        if (Readers.TryGetValue(path, out var r)) return r;
+        r = new VideoReader(path);
+        Readers[path] = r;
+        ReaderOrder.Enqueue(path);
+        while (ReaderOrder.Count > 4) { var old = ReaderOrder.Dequeue(); Readers[old].Dispose(); Readers.Remove(old); }
+        return r;
+    }
+
     private static (byte[], int, int)? FromVideo(string path, double seconds)
     {
         if (!File.Exists(path) || !FFmpegLoader.EnsureLoaded()) return null;
-        using var reader = new VideoReader(path);
+        // プロキシがあれば、小さいプロキシから作る (元の動画をデコードするより速い)
+        var source = ProxyStore.FindReady(path) ?? path;
+        var reader = OpenCached(source);
         var frame = reader.GetFrame(seconds);
         if (frame == null) return null;
         var info = new SKImageInfo(reader.Width, reader.Height, SKColorType.Bgra8888, SKAlphaType.Opaque);

@@ -62,6 +62,7 @@ public static class Exporter
         // 描いたフレームは数枚ぶんだけ待ち行列に置き、エンコードが追いつかなければ描画側が待つ
         const int QueueSize = 3;
         var pool = new System.Collections.Concurrent.ConcurrentBag<SKBitmap>();
+        var audioPool = new System.Collections.Concurrent.ConcurrentBag<float[]>();
         var queue = new System.Collections.Concurrent.BlockingCollection<(SKBitmap? Frame, float[]? Audio)>(QueueSize);
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancel);
         Exception? encodeError = null;
@@ -80,7 +81,7 @@ public static class Exporter
                         }
                         pool.Add(frame);
                     }
-                    if (audio != null) writer.WriteAudio(audio);
+                    if (audio != null) { writer.WriteAudio(audio); audioPool.Add(audio); }
                     progress?.Report((++done, total));
                 }
                 writer.Finish();
@@ -111,7 +112,9 @@ public static class Exporter
                     if (hasAudio)
                     {
                         long from = project.FrameToSample(frame), to = project.FrameToSample(frame + 1);
-                        audio = new float[(int)(to - from) * 2];
+                        int n = (int)(to - from) * 2;
+                        // 音声の入れ物も使い回す (長さはフレームごとに 1 サンプル違うことがある)
+                        if (!audioPool.TryTake(out audio) || audio.Length != n) audio = new float[n];
                         mixer.Mix(project, scene, from, audio);
                     }
                     queue.Add((target, audio), stop.Token);

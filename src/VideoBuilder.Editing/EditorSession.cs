@@ -177,7 +177,8 @@ public sealed class EditorSession
     /// </summary>
     public Project SnapshotForRead()
     {
-        if (_editBefore != null) return Project.Clone();   // 編集の途中は毎回作る
+        // 編集の途中 (ドラッグ中など) は毎回作る。変わっていないオブジェクトは「編集前」の複製と共有する
+        if (_editBefore != null) return Project.CloneSharing(_editBefore);
         return _clean ??= Project.CloneSharing(_lastSnapshot);
     }
 
