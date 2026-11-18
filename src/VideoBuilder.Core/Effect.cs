@@ -33,6 +33,14 @@ public sealed class Effect
         }
     }
 
+    public static bool SameContent(Effect a, Effect b)
+    {
+        if (a.DefinitionId != b.DefinitionId || a.Enabled != b.Enabled || a.Values.Count != b.Values.Count || a.Tracks.Count != b.Tracks.Count) return false;
+        foreach (var (k, v) in a.Values) if (!b.Values.TryGetValue(k, out var w) || v != w) return false;
+        foreach (var (k, v) in a.Tracks) if (!b.Tracks.TryGetValue(k, out var w) || !AnimatedValue.SameContent(v, w)) return false;
+        return true;
+    }
+
     public Effect Clone()
     {
         var e = new Effect { DefinitionId = DefinitionId, Enabled = Enabled, Values = new Dictionary<string, string>(Values) };

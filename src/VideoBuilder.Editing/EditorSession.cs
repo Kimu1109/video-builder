@@ -72,6 +72,7 @@ public sealed class EditorSession
     private void ResetState()
     {
         _clean = null;
+        _lastSnapshot = null;
         History.Clear();
         _sceneId = Project.Root.Id;
         _frame = 0;
@@ -160,13 +161,15 @@ public sealed class EditorSession
     {
         if (_editBefore != null) return;
         // 直前の編集の「編集後」の複製が今の状態と同じなら、それを「編集前」として使い回す (複製を 1 回減らす)
-        _editBefore = _clean ?? Project.Clone();
+        _editBefore = _clean ?? Project.CloneSharing(_lastSnapshot);
         _clean = null;
         _editDescription = description;
     }
 
     // 今のプロジェクトと同じ内容の、書き換えない複製。編集のたびに作り直さずに済むよう覚えておく
     private Project? _clean;
+    // 直近に作った複製。次の複製は、内容が変わっていないオブジェクトをこれと共有する (取り消し履歴のメモリを減らす)
+    private Project? _lastSnapshot;
 
     /// <summary>
     /// 今の状態を読むだけの用途 (プレビューの描画など) に渡す複製を返す。
@@ -175,7 +178,7 @@ public sealed class EditorSession
     public Project SnapshotForRead()
     {
         if (_editBefore != null) return Project.Clone();   // 編集の途中は毎回作る
-        return _clean ??= Project.Clone();
+        return _clean ??= Project.CloneSharing(_lastSnapshot);
     }
 
     public bool IsEditing => _editBefore != null;
@@ -192,9 +195,11 @@ public sealed class EditorSession
         if (_editBefore == null) return;
         var before = _editBefore;
         _editBefore = null;
-        var after = Project.Clone();
+        // 変わったオブジェクトだけを複製し、ほかは「編集前」の複製と共有する
+        var after = Project.CloneSharing(before);
         History.Push(new SnapshotCommand(_editDescription, before, after, mergeKey));
         _clean = after;
+        _lastSnapshot = after;
         PruneSelection();
         ProjectChanged?.Invoke();
     }

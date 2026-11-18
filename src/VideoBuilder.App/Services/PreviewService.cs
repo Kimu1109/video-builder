@@ -47,6 +47,43 @@ public sealed class PreviewService : IDisposable
     public event Action? PlayStateChanged;
     /// <summary>直近 1 フレームの描画にかかった時間 (ミリ秒)。</summary>
     public double LastRenderMs { get; private set; }
+    /// <summary>
+    /// プレビューが画面に表示される大きさ (物理ピクセル)。PreviewView が知らせる。
+    /// 自動のときは、これより大きく描いても見えないので、この大きさで描く。
+    /// </summary>
+    public (int Width, int Height) DisplaySize
+    {
+        get { lock (_frameLock) return _displaySize; }
+        set
+        {
+            lock (_frameLock)
+            {
+                if (_displaySize == value) return;
+                _displaySize = value;
+            }
+            Request();
+        }
+    }
+    private (int Width, int Height) _displaySize;
+
+    /// <summary>描く大きさ。設定が自動なら、表示される大きさ (プロジェクトより大きくはしない)。</summary>
+    internal (int Width, int Height) TargetSize(int projectWidth, int projectHeight)
+    {
+        int div = _settings.PreviewDivisor;
+        if (div >= 1)
+        {
+            div = Math.Clamp(div, 1, 8);
+            return (Math.Max(2, projectWidth / div), Math.Max(2, projectHeight / div));
+        }
+        var (dw, dh) = DisplaySize;
+        if (dw <= 0 || dh <= 0) return (projectWidth, projectHeight);
+        double k = Math.Min(1.0, Math.Min((double)dw / projectWidth, (double)dh / projectHeight));
+        // 少しの大きさの違いで作り直さないよう、8 ピクセル単位に切り上げる
+        int w = Math.Min(projectWidth, (int)Math.Ceiling(projectWidth * k / 8) * 8);
+        int h = Math.Min(projectHeight, (int)Math.Round((double)w * projectHeight / projectWidth));
+        return (Math.Max(2, w), Math.Max(2, h));
+    }
+
     /// <summary>今使っている描画方式の説明 (環境設定に表示する)。</summary>
     public string BackendDescription { get; private set; } = "";
     public bool IsGpuActive { get; private set; }
@@ -158,8 +195,7 @@ public sealed class PreviewService : IDisposable
     {
         var p = req.Project;
         var scene = p.FindScene(req.SceneId) ?? p.Root;
-        int div = Math.Clamp(_settings.PreviewDivisor, 1, 8);
-        int w = Math.Max(2, p.Settings.Width / div), h = Math.Max(2, p.Settings.Height / div);
+        var (w, h) = TargetSize(p.Settings.Width, p.Settings.Height);
         if (_back == null || _back.Width != w || _back.Height != h)
         {
             _back?.Dispose();

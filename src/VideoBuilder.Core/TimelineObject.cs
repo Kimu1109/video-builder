@@ -67,6 +67,18 @@ public sealed class TimelineObject
         return o;
     }
 
+    /// <summary>a と b の内容がまったく同じか (ID も含む)。複製を使い回せるかの判断に使う。</summary>
+    public static bool SameContent(TimelineObject a, TimelineObject b)
+    {
+        if (ReferenceEquals(a, b)) return true;
+        if (a.Id != b.Id || a.Layer != b.Layer || a.Start != b.Start || a.End != b.End || a.Enabled != b.Enabled
+            || a.GroupId != b.GroupId || a.SourceOffsetFrames != b.SourceOffsetFrames
+            || a.KeyFrames.Count != b.KeyFrames.Count || a.Effects.Count != b.Effects.Count) return false;
+        for (int i = 0; i < a.KeyFrames.Count; i++) if (a.KeyFrames[i] != b.KeyFrames[i]) return false;
+        for (int i = 0; i < a.Effects.Count; i++) if (!Effect.SameContent(a.Effects[i], b.Effects[i])) return false;
+        return true;
+    }
+
     /// <summary>src の内容 (ID 以外) を写す。ドラッグ中に「元の状態からやり直す」ために使う。</summary>
     public void RestoreFrom(TimelineObject src)
     {

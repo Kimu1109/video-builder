@@ -233,9 +233,10 @@ public sealed class PreferencesDialog : DialogBase
         Body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { clearProxies, proxySize } });
 
         Body.Children.Add(Heading("編集"));
-        Body.Children.Add(Row("プレビュー品質", Combo(new[] { "フル", "1/2", "1/4" }, s.PreviewDivisor >= 4 ? 2 : s.PreviewDivisor >= 2 ? 1 : 0, i =>
+        Body.Children.Add(Row("プレビュー品質", Combo(new[] { "自動 (表示の大きさ)", "フル", "1/2", "1/4" },
+            s.PreviewDivisor <= 0 ? 0 : s.PreviewDivisor >= 4 ? 3 : s.PreviewDivisor >= 2 ? 2 : 1, i =>
         {
-            s.PreviewDivisor = new[] { 1, 2, 4 }[i]; Svc.Preview.Request();
+            s.PreviewDivisor = new[] { 0, 1, 2, 4 }[i]; Svc.Preview.Request();
         })));
         var seconds = new NumberBox { Minimum = 0.1, Maximum = 600, Decimals = 1, Value = s.DefaultObjectSeconds, Width = 80, HorizontalAlignment = HorizontalAlignment.Left };
         seconds.Committed += v => { s.DefaultObjectSeconds = v; s.Save(); };

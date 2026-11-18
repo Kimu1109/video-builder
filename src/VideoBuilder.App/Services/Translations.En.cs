@@ -419,5 +419,6 @@ internal static class TranslationsEn
         ("レイヤー {0}", "Layer {0}"),
         ("調整レイヤー [{0}]", "Adjustment layer [{0}]"),
         ("メイン", "Main"),
+        ("自動 (表示の大きさ)", "Auto (display size)"),
     };
 }

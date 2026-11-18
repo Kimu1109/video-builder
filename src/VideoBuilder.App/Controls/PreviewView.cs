@@ -60,6 +60,9 @@ public sealed class PreviewView : Control
         if (scale <= 0 || double.IsNaN(scale)) return;
         double w = Math.Round(pw * scale), h = Math.Round(ph * scale);
         _dest = new Rect(Math.Round((Bounds.Width - w) / 2), Math.Round((Bounds.Height - h) / 2), w, h);
+        // 表示される大きさ (物理ピクセル) を知らせる。自動の設定なら、この大きさで描かれる
+        double scaling = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1;
+        Svc.Preview.DisplaySize = ((int)Math.Ceiling(w * scaling), (int)Math.Ceiling(h * scaling));
 
         if (_bitmap != null)
         {

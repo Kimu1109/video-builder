@@ -419,3 +419,56 @@ public class SnapshotReuseTests
     }
 }
 
+public class SharedHistoryTests
+{
+    [Fact]
+    public void History_snapshots_share_unchanged_objects_and_keep_their_own_content()
+    {
+        var s = new EditorSession();
+        s.Edit("many", () => { for (int i = 0; i < 50; i++) s.Scene.Objects.Add(ObjectFactory.Create(EffectRegistry.Shape, i, 0, 30)); });
+        var first = s.SnapshotForRead();
+        var target = s.Scene.Objects[7].Id;
+        s.Edit("move one", () => s.Scene.Find(target)!.SetRange(100, 129));
+        var second = s.SnapshotForRead();
+
+        // 動かしたオブジェクト以外は、同じインスタンスを共有している
+        int shared = second.Root.Objects.Count(o => first.Root.Objects.Any(f => ReferenceEquals(f, o)));
+        Assert.Equal(49, shared);
+        Assert.Equal(0, first.Root.Find(target)!.Start);       // 前の複製は、前の内容のまま
+        Assert.Equal(100, second.Root.Find(target)!.Start);
+
+        // 取り消し・やり直しで、共有していても正しい内容に戻る
+        s.Edit("param", () => s.Scene.Find(target)!.Draw!.Tracks["x"].Values[0] = 42);
+        s.Undo();
+        Assert.Equal(0, s.Scene.Find(target)!.Draw!.Tracks["x"].Values[0]);
+        s.Undo();
+        Assert.Equal(0, s.Scene.Find(target)!.Start);
+        s.Redo(); s.Redo();
+        Assert.Equal((100, 42.0), (s.Scene.Find(target)!.Start, s.Scene.Find(target)!.Draw!.Tracks["x"].Values[0]));
+        // 生きているプロジェクトは、どの複製ともインスタンスを共有しない (書き換えても履歴が壊れない)
+        Assert.DoesNotContain(s.Scene.Objects, o => first.Root.Objects.Any(f => ReferenceEquals(f, o)) || second.Root.Objects.Any(f => ReferenceEquals(f, o)));
+    }
+
+    [Fact]
+    public void Content_comparison_notices_every_kind_of_change()
+    {
+        var a = ObjectFactory.Create(EffectRegistry.Text, 0, 0, 30);
+        ObjectFactory.AddFilter(a, "filter.blur");
+        a.AddKeyFrame(10);
+        Assert.True(TimelineObject.SameContent(a, a.Clone()));
+        var changes = new Action<TimelineObject>[]
+        {
+            o => o.Layer = 3, o => o.Start = 1, o => o.End = 40, o => o.Enabled = false, o => o.GroupId = "g", o => o.SourceOffsetFrames = 2,
+            o => o.KeyFrames[0] = 11, o => o.Effects[1].Enabled = false, o => o.Main.Values["text"] = "x",
+            o => o.Draw!.Tracks["x"].Values[1] = 5, o => o.Draw!.Tracks["x"].Mode = MovementMode.Linear, o => o.Draw!.Tracks["x"].Accel = true,
+            o => o.Draw!.Tracks["x"].Interval = 3, o => o.Draw!.Tracks["x"].Custom = "c", o => o.Effects.RemoveAt(1),
+        };
+        foreach (var change in changes)
+        {
+            var b = a.Clone();
+            change(b);
+            Assert.False(TimelineObject.SameContent(a, b));
+        }
+    }
+}
+

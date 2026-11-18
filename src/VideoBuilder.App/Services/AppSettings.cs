@@ -31,8 +31,10 @@ public sealed class AppSettings
     public bool AutoSave { get; set; } = true;
     public int AutoSaveMinutes { get; set; } = 5;
     public int UndoLimit { get; set; } = 200;
-    /// <summary>プレビュー解像度の分母 (1 = フル, 2 = 1/2, 4 = 1/4)。</summary>
-    public int PreviewDivisor { get; set; } = 1;
+    /// <summary>
+    /// プレビュー解像度の分母 (1 = フル, 2 = 1/2, 4 = 1/4)。0 は自動 (画面に表示される大きさで描く)。
+    /// </summary>
+    public int PreviewDivisor { get; set; } = 0;
     public double DefaultObjectSeconds { get; set; } = 3;
     public List<string> RecentFiles { get; set; } = new();
     /// <summary>変更したショートカット (操作 ID → キー)。ここにない操作は既定のキー。</summary>

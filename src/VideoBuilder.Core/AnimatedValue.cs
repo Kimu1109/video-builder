@@ -56,6 +56,13 @@ public sealed class AnimatedValue
 
     public bool IsMoving => Mode != MovementMode.None || Custom != null;
 
+    public static bool SameContent(AnimatedValue a, AnimatedValue b)
+    {
+        if (a.Mode != b.Mode || a.Accel != b.Accel || a.Decel != b.Decel || a.Interval != b.Interval || a.Custom != b.Custom || a.Values.Count != b.Values.Count) return false;
+        for (int i = 0; i < a.Values.Count; i++) if (!a.Values[i].Equals(b.Values[i])) return false;
+        return true;
+    }
+
     public AnimatedValue Clone() => new()
     {
         Values = new List<double>(Values), Mode = Mode, Accel = Accel, Decel = Decel, Interval = Interval, Custom = Custom,
