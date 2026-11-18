@@ -63,7 +63,9 @@ public static class Exporter
         const int QueueSize = 3;
         var pool = new System.Collections.Concurrent.ConcurrentBag<SKBitmap>();
         var audioPool = new System.Collections.Concurrent.ConcurrentBag<float[]>();
-        var queue = new System.Collections.Concurrent.BlockingCollection<(SKBitmap? Frame, float[]? Audio)>(QueueSize);
+        // 描画したフレームは、描画側のスレッドでエンコーダ用の形式 (YUV) に変換してから渡す。
+        // 変換をエンコード側でやると、その間エンコーダへ次のフレームを渡せないため
+        var queue = new System.Collections.Concurrent.BlockingCollection<(IntPtr Frame, float[]? Audio)>(QueueSize);
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancel);
         Exception? encodeError = null;
         var encoder = Task.Run(() =>
@@ -73,14 +75,7 @@ public static class Exporter
                 int done = 0;
                 foreach (var (frame, audio) in queue.GetConsumingEnumerable())
                 {
-                    if (frame != null)
-                    {
-                        unsafe
-                        {
-                            writer.WriteVideoFrame(new ReadOnlySpan<byte>((void*)frame.GetPixels(), frame.RowBytes * h), frame.RowBytes);
-                        }
-                        pool.Add(frame);
-                    }
+                    if (frame != IntPtr.Zero) writer.WritePreparedVideoFrame(frame);
                     if (audio != null) { writer.WriteAudio(audio); audioPool.Add(audio); }
                     progress?.Report((++done, total));
                 }
@@ -102,11 +97,16 @@ public static class Exporter
                 {
                     stop.Token.ThrowIfCancellationRequested();
                     int frame = req.StartFrame + i;
-                    SKBitmap? target = null;
+                    IntPtr prepared = IntPtr.Zero;
                     if (hasVideo)
                     {
-                        if (!pool.TryTake(out target)) target = new SKBitmap(Effects.Info(w, h));
+                        if (!pool.TryTake(out var target)) target = new SKBitmap(Effects.Info(w, h));
                         engine.RenderToBitmap(project, scene, frame, target);
+                        unsafe
+                        {
+                            prepared = writer.PrepareVideoFrame(new ReadOnlySpan<byte>((void*)target.GetPixels(), target.RowBytes * h), target.RowBytes);
+                        }
+                        pool.Add(target);
                     }
                     float[]? audio = null;
                     if (hasAudio)
@@ -117,14 +117,14 @@ public static class Exporter
                         if (!audioPool.TryTake(out audio) || audio.Length != n) audio = new float[n];
                         mixer.Mix(project, scene, from, audio);
                     }
-                    queue.Add((target, audio), stop.Token);
+                    queue.Add((prepared, audio), stop.Token);
                 }
             }
             finally
             {
                 queue.CompleteAdding();
                 // エラーや中止のときも、エンコード側が終わるのを待ってから片付ける
-                if (stop.IsCancellationRequested) while (queue.TryTake(out var rest)) rest.Frame?.Dispose();
+                if (stop.IsCancellationRequested) while (queue.TryTake(out _)) { }
                 encoder.Wait();
             }
             if (encodeError != null) throw encodeError;
@@ -138,7 +138,7 @@ public static class Exporter
         finally
         {
             foreach (var b in pool) b.Dispose();
-            while (queue.TryTake(out var rest)) rest.Frame?.Dispose();
+            while (queue.TryTake(out _)) { }
             queue.Dispose();
             if (!ok)
             {

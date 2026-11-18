@@ -128,26 +128,66 @@ public sealed unsafe class MediaWriter : IDisposable
     public void WriteVideoFrame(ReadOnlySpan<byte> bgra, int stride)
     {
         if (_venc == null) return;
-        FFmpegLoader.Check(ffmpeg.av_frame_make_writable(_vframe), "フレームを書き込めません");
+        var frame = PrepareVideoFrame(bgra, stride);
+        WritePreparedVideoFrame(frame);
+    }
+
+    // 変換済みのフレームの使い回し (変換と書き込みを別のスレッドで行うときに使う)
+    private readonly System.Collections.Concurrent.ConcurrentBag<IntPtr> _framePool = new();
+    private readonly List<IntPtr> _allFrames = new();
+
+    /// <summary>
+    /// BGRA を、エンコーダに渡せる形式 (YUV など) に変換したフレームを返す。WritePreparedVideoFrame に渡すこと。
+    /// 変換 (PrepareVideoFrame) と書き込み (WritePreparedVideoFrame) は、それぞれ 1 つのスレッドからなら、別々のスレッドで呼んでよい。
+    /// </summary>
+    public IntPtr PrepareVideoFrame(ReadOnlySpan<byte> bgra, int stride)
+    {
+        if (_venc == null) return IntPtr.Zero;
+        if (!_framePool.TryTake(out var handle))
+        {
+            var f = ffmpeg.av_frame_alloc();
+            f->format = _vframe->format; f->width = _vframe->width; f->height = _vframe->height;
+            FFmpegLoader.Check(ffmpeg.av_frame_get_buffer(f, 0), "フレームの確保に失敗");
+            handle = (IntPtr)f;
+            lock (_allFrames) _allFrames.Add(handle);
+        }
+        var frame = (AVFrame*)handle;
         fixed (byte* p = bgra)
         {
             var src = new byte*[4] { p, null, null, null };
             var strides = new int[4] { stride, 0, 0, 0 };
-            ffmpeg.sws_scale(_sws, src, strides, 0, _height, _vframe->data, _vframe->linesize);
+            ffmpeg.sws_scale(_sws, src, strides, 0, _height, frame->data, frame->linesize);
         }
-        _vframe->pts = _videoPts++;
-        if (!_uploadToHardware) { Encode(_venc, _vst, _vframe); return; }
+        return handle;
+    }
 
-        // VAAPI など: メモリ上のフレームを GPU 側のフレームへ送ってから、エンコーダに渡す
-        var hw = ffmpeg.av_frame_alloc();
+    /// <summary>PrepareVideoFrame で作ったフレームを書き込む (フレームは使い回しに戻る)。</summary>
+    public void WritePreparedVideoFrame(IntPtr handle)
+    {
+        if (_venc == null || handle == IntPtr.Zero) return;
+        var frame = (AVFrame*)handle;
         try
         {
-            FFmpegLoader.Check(ffmpeg.av_hwframe_get_buffer(_venc->hw_frames_ctx, hw, 0), "GPU 側のフレームを確保できません");
-            FFmpegLoader.Check(ffmpeg.av_hwframe_transfer_data(hw, _vframe, 0), "GPU へフレームを送れません");
-            hw->pts = _vframe->pts;
-            Encode(_venc, _vst, hw);
+            frame->pts = _videoPts++;
+            if (!_uploadToHardware) { Encode(_venc, _vst, frame); return; }
+
+            // VAAPI など: メモリ上のフレームを GPU 側のフレームへ送ってから、エンコーダに渡す
+            var hw = ffmpeg.av_frame_alloc();
+            try
+            {
+                FFmpegLoader.Check(ffmpeg.av_hwframe_get_buffer(_venc->hw_frames_ctx, hw, 0), "GPU 側のフレームを確保できません");
+                FFmpegLoader.Check(ffmpeg.av_hwframe_transfer_data(hw, frame, 0), "GPU へフレームを送れません");
+                hw->pts = frame->pts;
+                Encode(_venc, _vst, hw);
+            }
+            finally { ffmpeg.av_frame_free(&hw); }
         }
-        finally { ffmpeg.av_frame_free(&hw); }
+        finally
+        {
+            // エンコーダが中身を参照し続けることがあるので、書き込める状態にしてから戻す
+            ffmpeg.av_frame_make_writable(frame);
+            _framePool.Add(handle);
+        }
     }
 
     /// <summary>インターリーブのステレオ float を追記する。</summary>
@@ -229,6 +269,11 @@ public sealed unsafe class MediaWriter : IDisposable
     public void Dispose()
     {
         if (_vframe != null) { var f = _vframe; ffmpeg.av_frame_free(&f); _vframe = null; }
+        lock (_allFrames)
+        {
+            foreach (var h in _allFrames) { var f = (AVFrame*)h; ffmpeg.av_frame_free(&f); }
+            _allFrames.Clear();
+        }
         if (_aframe != null) { var f = _aframe; ffmpeg.av_frame_free(&f); _aframe = null; }
         if (_pkt != null) { var p = _pkt; ffmpeg.av_packet_free(&p); _pkt = null; }
         if (_sws != null) { ffmpeg.sws_freeContext(_sws); _sws = null; }
