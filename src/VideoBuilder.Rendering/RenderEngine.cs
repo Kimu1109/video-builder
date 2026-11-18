@@ -83,6 +83,7 @@ public sealed class RenderEngine : IDisposable
         try
         {
             var canvas = surface.Canvas;
+            Media.BeginFrame();
             _frameStartTick = _tick + 1;
             LastQuads.Clear();
             canvas.ResetMatrix();

@@ -546,3 +546,83 @@ public class ProxyTests : IDisposable
         public void Report(double value) => onReport(value);
     }
 }
+
+/// <summary>デコーダの使い回し: 同じファイルを使うオブジェクトどうしでデコーダを貸し借りする。</summary>
+public class DecoderSharingTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), $"vb-share-{Guid.NewGuid():N}");
+    private readonly string _clip;
+    private readonly bool _ready;
+
+    public DecoderSharingTests()
+    {
+        Directory.CreateDirectory(_dir);
+        _clip = Path.Combine(_dir, "clip.mp4");
+        _ready = FFmpegLoader.EnsureLoaded() && MediaTests.RunFfmpeg(
+            $"-f lavfi -i testsrc2=size=320x180:rate=30:duration=4 -c:v libx264 -pix_fmt yuv420p -g 120 \"{_clip}\"");
+    }
+
+    public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
+
+    private Project WithVideo(params (int Layer, int Start, int Length, int Offset, double X)[] clips)
+    {
+        var p = new Project();
+        p.Settings.Width = 640; p.Settings.Height = 360;
+        foreach (var (layer, start, length, offset, x) in clips)
+        {
+            var v = ObjectFactory.Create(EffectRegistry.Video, layer, start, length);
+            v.Main.Values["file"] = _clip;
+            v.SourceOffsetFrames = offset;
+            v.Draw!.Tracks["x"] = new AnimatedValue(x);
+            p.Root.Objects.Add(v);
+        }
+        return p;
+    }
+
+    private static byte[] Frame(RenderEngine e, Project p, int f)
+    {
+        using var bmp = new SKBitmap(new SKImageInfo(640, 360, SKColorType.Bgra8888, SKAlphaType.Premul));
+        e.RenderToBitmap(p, p.Root, f, bmp);
+        return bmp.Bytes;
+    }
+
+    [Fact]
+    public void A_split_clip_plays_across_the_cut_with_one_decoder_and_no_extra_seek()
+    {
+        if (!_ready) return;
+        var whole = WithVideo((0, 0, 90, 0, 0));
+        var split = WithVideo((0, 0, 45, 0, 0), (0, 45, 45, 45, 0));    // 45 フレーム目で分割したのと同じ
+        using var a = new RenderEngine();
+        using var b = new RenderEngine();
+        for (int f = 0; f < 90; f++) Assert.Equal(Frame(a, whole, f), Frame(b, split, f));
+        Assert.Equal(1, b.Media.ReaderCount);
+        Assert.Equal(1, b.Media.TotalSeeks);          // 最初の 1 回だけ (つなぎ目でシークし直さない)
+    }
+
+    [Fact]
+    public void Two_objects_of_the_same_file_shown_together_get_their_own_decoders_and_correct_frames()
+    {
+        if (!_ready) return;
+        var both = WithVideo((0, 0, 60, 0, -160), (1, 0, 60, 60, 160));   // 同じ動画の 0 秒目と 2 秒目を並べる
+        var left = WithVideo((0, 0, 60, 0, -160));
+        var right = WithVideo((1, 0, 60, 60, 160));
+        using var e = new RenderEngine();
+        using var l = new RenderEngine();
+        using var r = new RenderEngine();
+        for (int f = 0; f < 60; f += 7)
+        {
+            var bothBytes = Frame(e, both, f);
+            using var bm = new SKBitmap(new SKImageInfo(640, 360, SKColorType.Bgra8888, SKAlphaType.Premul));
+            System.Runtime.InteropServices.Marshal.Copy(bothBytes, 0, bm.GetPixels(), bothBytes.Length);
+            var lb = Frame(l, left, f); var rb = Frame(r, right, f);
+            // 左半分は「左だけ」と、右半分は「右だけ」と同じ
+            for (int y = 0; y < 360; y += 37)
+            {
+                Assert.Equal(lb.AsSpan(y * 640 * 4 + 40 * 4, 4).ToArray(), bothBytes.AsSpan(y * 640 * 4 + 40 * 4, 4).ToArray());
+                Assert.Equal(rb.AsSpan(y * 640 * 4 + 600 * 4, 4).ToArray(), bothBytes.AsSpan(y * 640 * 4 + 600 * 4, 4).ToArray());
+            }
+        }
+        Assert.Equal(2, e.Media.ReaderCount);
+        Assert.Equal(2, e.Media.TotalSeeks);          // それぞれ最初の 1 回だけ (毎フレーム取り合ってシークしない)
+    }
+}

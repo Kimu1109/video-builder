@@ -211,8 +211,12 @@ public sealed unsafe class VideoReader : IDisposable
         return _nativeValid ? (IntPtr)_native : IntPtr.Zero;
     }
 
+    /// <summary>シークした回数 (計測・テスト用)。</summary>
+    public int SeekCount { get; private set; }
+
     private void Seek(long target)
     {
+        SeekCount++;
         ffmpeg.av_seek_frame(_fmt, _stream, target, ffmpeg.AVSEEK_FLAG_BACKWARD);
         ffmpeg.avcodec_flush_buffers(_dec);
         _hasFrame = false; _draining = false; _eof = false;
