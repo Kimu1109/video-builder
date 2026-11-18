@@ -129,9 +129,8 @@ public sealed class MainWindow : Window
             case WindowMode.Docked: return true;
             case WindowMode.Separate: return false;
         }
-        // 自動: Wayland はウィンドウ位置を復元できないのでドッキング、それ以外は AviUtl と同じ分離
-        bool wayland = Environment.GetEnvironmentVariable("XDG_SESSION_TYPE") == "wayland" || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"));
-        return wayland;
+        // 自動: 1 つのウィンドウにまとめる (一般的な動画編集アプリと同じ)。分けたい人は設定で選ぶ
+        return true;
     }
 
     public void ApplyWindowMode(bool force = false)
@@ -174,8 +173,8 @@ public sealed class MainWindow : Window
         else
         {
             _center.Children.Add(_previewArea);
-            _timelineWindow ??= new ToolWindow("拡張編集 - video-builder", 1100, 340);
-            _settingsWindow ??= new ToolWindow("設定ダイアログ - video-builder", 440, 560);
+            _timelineWindow ??= new ToolWindow("タイムライン - video-builder", 1100, 340);
+            _settingsWindow ??= new ToolWindow("プロパティ - video-builder", 440, 560);
             _timelineWindow.Content = Timeline;
             _settingsWindow.Content = _settingsView;
             if (IsVisible) ShowToolWindows();
@@ -326,7 +325,7 @@ public sealed class MainWindow : Window
             Track(Menus.Item("削除", "Delete", _session.DeleteSelected, Shortcuts.First("edit.delete")), HasSelection),
             Menus.Sep(),
             Track(Menus.Item("現在位置で分割", "Split", EditorCommands.Split, Shortcuts.First("edit.split")), HasSelection),
-            Track(Menus.Item("中間点を追加", "AddDiamond", EditorCommands.AddKeyFrame, Shortcuts.First("edit.addKey")), HasSelection),
+            Track(Menus.Item("キーフレームを追加", "AddDiamond", EditorCommands.AddKeyFrame, Shortcuts.First("edit.addKey")), HasSelection),
             Menus.Sep(),
             Menus.Sub("出力範囲", "Crop", new object[]
             {
@@ -334,7 +333,7 @@ public sealed class MainWindow : Window
                 Menus.Item("終了を現在位置に", null, EditorCommands.SetRangeEnd, Shortcuts.First("range.end")),
                 Menus.Item("解除", null, EditorCommands.ClearRange, Shortcuts.First("range.clear")),
             }),
-            Track(Menus.Item("エイリアスを作成...", "Layers", () => _ = EditorCommands.CreateAliasAsync(), Shortcuts.First("alias.create")), HasSelection),
+            Track(Menus.Item("プリセットとして保存...", "Layers", () => _ = EditorCommands.CreateAliasAsync(), Shortcuts.First("alias.create")), HasSelection),
             Menus.Item("グリッドの設定...", "GridOn", () => _ = EditorCommands.GridSettingsAsync()),
             Menus.Sep(),
             Menus.Item("プロジェクト設定...", "Tune", () => _ = EditorCommands.ProjectSettingsAsync()),
@@ -351,16 +350,16 @@ public sealed class MainWindow : Window
             }),
             Menus.Sub("ウィンドウ", "Dock", new object[]
             {
-                Menus.Item("分離 (AviUtl と同じ)", "OpenInNew", () => SetWindowMode(WindowMode.Separate)),
-                Menus.Item("ドッキング (1 つにまとめる)", "Dock", () => SetWindowMode(WindowMode.Docked)),
+                Menus.Item("ウィンドウを分ける", "OpenInNew", () => SetWindowMode(WindowMode.Separate)),
+                Menus.Item("1 つのウィンドウにまとめる", "Dock", () => SetWindowMode(WindowMode.Docked)),
             }),
             Menus.Sub("プレビューの拡大率", "ZoomIn", new object[]
             {
                 Zoom("ウィンドウに合わせる", 0), Zoom("25%", 0.25), Zoom("50%", 0.5), Zoom("100%", 1), Zoom("200%", 2),
             }),
             Menus.Sep(),
-            Menus.Item("拡張編集 (タイムライン) を表示", "Layers", ShowTimelinePanel),
-            Menus.Item("設定ダイアログを表示", "Tune", ShowSettingsPanel),
+            Menus.Item("タイムラインを表示", "Layers", ShowTimelinePanel),
+            Menus.Item("プロパティを表示", "Tune", ShowSettingsPanel),
         });
         var settings = Menus.Sub("設定(_S)", null, new object[] { Menus.Item("環境設定...", "Settings", () => _ = EditorCommands.PreferencesAsync()) });
         var help = Menus.Sub("ヘルプ(_H)", null, new object[] { Menus.Item("バージョン情報...", "Info", () => _ = EditorCommands.AboutAsync()) });
@@ -400,7 +399,7 @@ public sealed class MainWindow : Window
             Track(new IconButton("Delete", "削除 (Delete)", _session.DeleteSelected), HasSelection),
             Divider(),
             Track(new IconButton("Split", "現在位置で分割 (S)", EditorCommands.Split), HasSelection),
-            Track(new IconButton("AddDiamond", "中間点を追加 (P)", EditorCommands.AddKeyFrame), HasSelection),
+            Track(new IconButton("AddDiamond", "キーフレームを追加 (P)", EditorCommands.AddKeyFrame), HasSelection),
             Divider(),
             _snap,
             Divider(),

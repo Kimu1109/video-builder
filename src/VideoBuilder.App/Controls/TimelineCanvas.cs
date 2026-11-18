@@ -28,7 +28,8 @@ public sealed class TimelineCanvas : Control
     private double _ppf = 4;
     private double _scrollX, _scrollY;
 
-    private enum Drag { None, Seek, Pending, Move, ResizeLeft, ResizeRight, Key, Rubber }
+    private enum Drag { None, Seek, Pending, Move, ResizeLeft, ResizeRight, Key, Rubber, EmptyPending }
+    private List<string> _rubberBase = new();
     private Drag _drag;
     private Point _pressPoint;
     private TimelineHit _pressHit;
@@ -325,7 +326,7 @@ public sealed class TimelineCanvas : Control
                 double y = LayerToY(l);
                 var info = scene.GetLayer(l);
                 var fg = info.Visible ? B("Fg.Primary") : B("Fg.Disabled");
-                var label = Text(string.IsNullOrEmpty(info.Name) ? $"Layer {l + 1}" : info.Name, fg);
+                var label = Text(string.IsNullOrEmpty(info.Name) ? L.T($"レイヤー {l + 1}") : info.Name, fg);
                 ctx.DrawText(label, new Point(8, y + (lh - label.Height) / 2));
                 double iy = y + (lh - 14) / 2;
                 var eye = Icons.Get(info.Visible ? "Visibility" : "VisibilityOff");
@@ -456,7 +457,7 @@ public sealed class TimelineCanvas : Control
             case EffectRegistry.Shape:
                 return $"図形 [{EffectRegistry.ShapeTypes[Math.Clamp(main.GetInt("type"), 0, EffectRegistry.ShapeTypes.Length - 1)]}]";
         }
-        return o.Definition.Category == EffectCategory.Filter ? $"{main.Definition.Name} (フィルタ)" : main.Definition.Name;
+        return o.Definition.Category == EffectCategory.Filter ? $"調整レイヤー [{main.Definition.Name}]" : main.Definition.Name;
     }
 
     /// <summary>大目盛が 90px 以上になる間隔を選ぶ。</summary>
@@ -532,9 +533,16 @@ public sealed class TimelineCanvas : Control
                 break;
             case TimelineArea.Header:
             {
+                // 目のアイコンで表示、鍵のアイコンでロックを切り替える。名前の部分は、そのレイヤーのオブジェクトを選ぶ
+                // (以前は名前の部分でも表示が切り替わり、うっかりレイヤーを隠してしまいやすかった)
                 var info = _session.Scene.GetLayer(hit.Layer);
                 if (pos.X >= HeaderWidth - 22) _session.SetLayerLocked(hit.Layer, !info.Locked);
-                else _session.SetLayerVisible(hit.Layer, !info.Visible);
+                else if (pos.X >= HeaderWidth - 44) _session.SetLayerVisible(hit.Layer, !info.Visible);
+                else if (!info.Locked)
+                {
+                    var ids = _session.Scene.Objects.Where(o => o.Layer == hit.Layer).Select(o => o.Id);
+                    _session.SelectMany(ctrl ? _session.SelectionIds.Concat(ids) : ids);
+                }
                 break;
             }
             case TimelineArea.Content when hit.Object != null:
@@ -549,8 +557,9 @@ public sealed class TimelineCanvas : Control
                 break;
             }
             case TimelineArea.Content:
-                if (ctrl) { _drag = Drag.Rubber; _rubber = new Rect(pos, pos); }
-                else { _session.Select(null); _session.CurrentFrame = hit.Frame; _drag = Drag.Seek; }
+                // 何もない所: ドラッグすると範囲選択 (Ctrl で今の選択に追加)、クリックだけなら選択を外して現在位置を移す
+                _rubberBase = ctrl ? _session.SelectionIds.ToList() : new List<string>();
+                _drag = Drag.EmptyPending;
                 break;
         }
         if (_drag != Drag.None) e.Pointer.Capture(this);
@@ -588,6 +597,10 @@ public sealed class TimelineCanvas : Control
                 if (Math.Abs(pos.X - _pressPoint.X) < 3 && Math.Abs(pos.Y - _pressPoint.Y) < 3) break;
                 BeginObjectDrag();
                 goto default;
+            case Drag.EmptyPending:
+                if (Math.Abs(pos.X - _pressPoint.X) < 4 && Math.Abs(pos.Y - _pressPoint.Y) < 4) break;
+                _drag = Drag.Rubber;
+                goto case Drag.Rubber;
             case Drag.Rubber:
                 _rubber = new Rect(_pressPoint, pos).Normalize();
                 SelectInRubber();
@@ -609,7 +622,7 @@ public sealed class TimelineCanvas : Control
         {
             case ObjectPart.LeftEdge: _drag = Drag.ResizeLeft; description = "長さの変更"; targets = _session.WithGroup(new[] { o }); break;
             case ObjectPart.RightEdge: _drag = Drag.ResizeRight; description = "長さの変更"; targets = _session.WithGroup(new[] { o }); break;
-            case ObjectPart.KeyFrame: _drag = Drag.Key; description = "中間点の移動"; targets = new[] { o }; break;
+            case ObjectPart.KeyFrame: _drag = Drag.Key; description = "キーフレームの移動"; targets = new[] { o }; break;
             default: _drag = Drag.Move; description = "オブジェクトの移動"; targets = _session.WithGroup(_session.SelectedObjects.ToList()); break;
         }
         _originals.Clear();
@@ -759,8 +772,8 @@ public sealed class TimelineCanvas : Control
     {
         int f1 = XToFrame(_rubber.Left), f2 = XToFrame(_rubber.Right);
         int l1 = YToLayer(_rubber.Top), l2 = YToLayer(_rubber.Bottom);
-        _session.SelectMany(_session.Scene.Objects
-            .Where(o => o.Layer >= l1 && o.Layer <= l2 && o.Start <= f2 && o.End >= f1 && !IsLocked(o)).Select(o => o.Id));
+        _session.SelectMany(_rubberBase.Concat(_session.Scene.Objects
+            .Where(o => o.Layer >= l1 && o.Layer <= l2 && o.Start <= f2 && o.End >= f1 && !IsLocked(o)).Select(o => o.Id)));
     }
 
     private void AutoScroll(Point pos)
@@ -773,6 +786,12 @@ public sealed class TimelineCanvas : Control
     {
         base.OnPointerReleased(e);
         if (_drag is Drag.Move or Drag.ResizeLeft or Drag.ResizeRight or Drag.Key) _session.CommitEdit();
+        // 何もない所をクリックしただけ (ドラッグしていない): 選択を外して、現在位置をそこへ移す
+        if (_drag == Drag.EmptyPending)
+        {
+            if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) _session.Select(null);
+            _session.CurrentFrame = Math.Max(0, XToFrame(_pressPoint.X));
+        }
         // 複数選択したオブジェクトをドラッグせずに離したら、そのオブジェクトだけの選択にする
         if (_drag == Drag.Pending && _pressHit.Object != null && !e.KeyModifiers.HasFlag(KeyModifiers.Control) && _session.SelectionIds.Count > 1)
             _session.Select(_pressHit.Object.Id);

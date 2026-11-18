@@ -323,7 +323,7 @@ public class AliasAndRangeTests
             var loaded = store.Load("見出し/テロップ");
             Assert.Equal(0, loaded[0].Start);
             Assert.Equal(new[] { 30 }, loaded[0].KeyFrames);
-            Assert.Equal(1, s.Insert(loaded, 0, 500, "エイリアスの追加"));
+            Assert.Equal(1, s.Insert(loaded, 0, 500, "プリセットの追加"));
             var added = s.Primary!;
             Assert.Equal((0, 500, 559), (added.Layer, added.Start, added.End));
             Assert.Equal("見出し", added.Main.GetString("text"));

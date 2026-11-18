@@ -27,7 +27,7 @@ public static class DemoProject
         scene.Objects.Add(circle);
 
         var title = ObjectFactory.Create(EffectRegistry.Text, 2, 30, 210);
-        title.Main.Values["text"] = "video-builder\nAviUtl ライクな動画編集";
+        title.Main.Values["text"] = "video-builder\nシンプルな動画編集";
         title.Main.Tracks["size"] = new AnimatedValue(96);
         title.Draw!.Tracks["y"] = new AnimatedValue(-40);
         ObjectFactory.AddFilter(title, "filter.border").Tracks["size"] = new AnimatedValue(4);

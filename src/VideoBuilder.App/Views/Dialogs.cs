@@ -169,7 +169,7 @@ public sealed class PreferencesDialog : DialogBase
             s.Accent = (AccentMode)i; custom.IsEnabled = s.Accent == AccentMode.Custom; Svc.Theme.Apply();
         })));
         Body.Children.Add(Row("カスタム色", custom));
-        Body.Children.Add(Row("ウィンドウ", Combo(new[] { "自動 (X11 は分離 / Wayland はドッキング)", "分離 (AviUtl と同じ)", "ドッキング (1 つにまとめる)" }, (int)s.WindowMode, i =>
+        Body.Children.Add(Row("ウィンドウ", Combo(new[] { "自動 (1 つのウィンドウにまとめる)", "ウィンドウを分ける", "1 つのウィンドウにまとめる" }, (int)s.WindowMode, i =>
         {
             s.WindowMode = (WindowMode)i; EditorCommands.Main?.ApplyWindowMode();
         })));

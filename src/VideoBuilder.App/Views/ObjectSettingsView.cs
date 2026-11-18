@@ -33,7 +33,7 @@ public sealed class ObjectSettingsView : UserControl
     {
         _empty = new TextBlock
         {
-            Text = "オブジェクトを選択すると、\nここに設定が表示されます", TextAlignment = TextAlignment.Center,
+            Text = "オブジェクトを選択すると、\nここにプロパティが表示されます", TextAlignment = TextAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
         };
         _empty.Classes.Add("secondary");
@@ -109,14 +109,14 @@ public sealed class ObjectSettingsView : UserControl
         _empty.IsVisible = o == null;
         if (o == null)
         {
-            var t = new TextBlock { Text = "設定ダイアログ", VerticalAlignment = VerticalAlignment.Center };
+            var t = new TextBlock { Text = "プロパティ", VerticalAlignment = VerticalAlignment.Center };
             t.Classes.Add("heading");
             _header.Children.Add(t);
             return;
         }
 
         var def = o.Definition;
-        var add = new IconButton("AddBox", "フィルタ効果を追加");
+        var add = new IconButton("AddBox", "エフェクトを追加");
         add.Click += (_, _) =>
         {
             var menu = new ContextMenu();
@@ -200,16 +200,16 @@ public sealed class ObjectSettingsView : UserControl
             {
                 buttons.Children.Add(new IconButton("ArrowUp", "上へ", () => { var t = Target; var e = EffectAt(index); if (t != null && e != null) _session.MoveEffect(t, e, -1); }));
                 buttons.Children.Add(new IconButton("ArrowDown", "下へ", () => { var t = Target; var e = EffectAt(index); if (t != null && e != null) _session.MoveEffect(t, e, 1); }));
-                buttons.Children.Add(new IconButton("Delete", "この効果を削除", () => { var t = Target; var e = EffectAt(index); if (t != null && e != null) _session.RemoveEffect(t, e); }));
+                buttons.Children.Add(new IconButton("Delete", "このエフェクトを削除", () => { var t = Target; var e = EffectAt(index); if (t != null && e != null) _session.RemoveEffect(t, e); }));
             }
             var enabled = new CheckBox { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 0, 0) };
-            ToolTip.SetTip(enabled, "効果の有効 / 無効");
+            ToolTip.SetTip(enabled, "エフェクトの有効 / 無効");
             enabled.IsCheckedChanged += (_, _) =>
             {
                 if (_refreshing) return;
                 var e = EffectAt(index); if (e == null) return;
                 bool v = enabled.IsChecked == true;
-                _session.Edit("効果の有効 / 無効", () => e.Enabled = v);
+                _session.Edit("エフェクトの有効 / 無効", () => e.Enabled = v);
             };
             _refreshers.Add(() => { var e = EffectAt(index); if (e != null) enabled.IsChecked = e.Enabled; });
             buttons.Children.Add(enabled);
@@ -341,7 +341,7 @@ public sealed class ObjectSettingsView : UserControl
     private static readonly (MovementMode Mode, string Name)[] Modes =
     {
         (MovementMode.None, "移動無し"), (MovementMode.Linear, "直線移動"), (MovementMode.Curve, "曲線移動"), (MovementMode.Ease, "加減速移動"),
-        (MovementMode.Jump, "瞬間移動"), (MovementMode.IgnoreMid, "中間点無視"), (MovementMode.Delta, "移動量指定"),
+        (MovementMode.Jump, "瞬間移動"), (MovementMode.IgnoreMid, "キーフレームを無視"), (MovementMode.Delta, "移動量指定"),
         (MovementMode.Random, "ランダム移動"), (MovementMode.Repeat, "反復移動"),
     };
 

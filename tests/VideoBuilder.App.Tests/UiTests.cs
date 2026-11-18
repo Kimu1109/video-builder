@@ -172,7 +172,11 @@ public class UiTests
         var w = Open();
         var s = Svc.Session;
         var c = w.Timeline.Canvas;
-        var eye = c.TranslatePoint(new Point(20, c.LayerToY(1) + 10), w)!.Value;
+        // レイヤー名をクリックしても表示は変わらない (そのレイヤーのオブジェクトを選ぶだけ)
+        var name = c.TranslatePoint(new Point(20, c.LayerToY(1) + 10), w)!.Value;
+        w.MouseDown(name, MouseButton.Left); w.MouseUp(name, MouseButton.Left);
+        Assert.True(s.Scene.GetLayer(1).Visible);
+        var eye = c.TranslatePoint(new Point(TimelineCanvas.HeaderWidth - 33, c.LayerToY(1) + 10), w)!.Value;
         w.MouseDown(eye, MouseButton.Left); w.MouseUp(eye, MouseButton.Left);
         Assert.False(s.Scene.GetLayer(1).Visible);
         var lockPos = c.TranslatePoint(new Point(TimelineCanvas.HeaderWidth - 10, c.LayerToY(1) + 10), w)!.Value;
@@ -389,7 +393,7 @@ public class UiTests
             w.KeyPressQwerty(PhysicalKey.K, RawInputModifiers.None);
             Assert.Equal(2, s.Scene.Objects.Count);
             // すでに使われているキーを割り当てると、元の操作から外れる
-            Assert.Equal("中間点を追加", Shortcuts.Assign("edit.split", new KeyGesture(Key.P)));
+            Assert.Equal("キーフレームを追加", Shortcuts.Assign("edit.split", new KeyGesture(Key.P)));
             Assert.Equal("", Shortcuts.GesturesOf("edit.addKey"));
         }
         finally { Shortcuts.Reset(); }
@@ -655,6 +659,34 @@ public class UiTests
         Assert.False(tool2.IsVisible);
         Assert.False(tool2Closed);
         owner2.Close();
+    }
+
+    [AvaloniaFact]
+    public void Dragging_on_empty_space_selects_a_range_and_clicking_it_seeks()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        var a = s.AddObject(EffectRegistry.Shape, 0, 10, 20)!;
+        var b = s.AddObject(EffectRegistry.Shape, 1, 40, 20)!;
+        var far = s.AddObject(EffectRegistry.Shape, 3, 200, 20)!;
+        s.Select(null);
+        Pump();
+        // 何もない所 (レイヤー 3・フレーム 5) から、レイヤー 2・フレーム 70 までドラッグ → a と b が選ばれる
+        var from = CanvasPoint(w, 5, 2);
+        var to = CanvasPoint(w, 70, 0);
+        w.MouseDown(from, MouseButton.Left);
+        w.MouseMove(new Point(from.X + 10, from.Y - 5));
+        w.MouseMove(to);
+        w.MouseUp(to, MouseButton.Left);
+        Pump();
+        Assert.Equal(new[] { a.Id, b.Id }.OrderBy(x => x), s.SelectionIds.OrderBy(x => x));
+        Assert.DoesNotContain(far.Id, s.SelectionIds);
+
+        // クリックだけなら、選択を外して現在位置を移す
+        var click = CanvasPoint(w, 120, 2);
+        w.MouseDown(click, MouseButton.Left); w.MouseUp(click, MouseButton.Left);
+        Assert.Empty(s.SelectionIds);
+        Assert.Equal(120, s.CurrentFrame);
     }
 }
 

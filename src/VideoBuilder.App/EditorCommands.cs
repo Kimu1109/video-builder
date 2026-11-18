@@ -202,12 +202,12 @@ public static class EditorCommands
     {
         var targets = Session.WithGroup(Session.SelectedObjects.ToList());
         if (Main == null || targets.Count == 0) return;
-        var name = await PromptDialog.Show(Main, "エイリアスを作成", "エイリアスの名前", TimelineCanvasLabel(targets[0]));
+        var name = await PromptDialog.Show(Main, "プリセットとして保存", "プリセットの名前", TimelineCanvasLabel(targets[0]));
         if (name == null) return;
         if (Svc.Aliases.Exists(name) &&
-            await MessageDialog.Show(Main, "エイリアスを作成", $"「{AliasStore.SafeName(name)}」はすでにあります。上書きしますか?", ("キャンセル", false), ("上書き", true)) != "上書き") return;
+            await MessageDialog.Show(Main, "プリセットとして保存", $"「{AliasStore.SafeName(name)}」はすでにあります。上書きしますか?", ("キャンセル", false), ("上書き", true)) != "上書き") return;
         try { Svc.Aliases.Save(name, targets); }
-        catch (Exception ex) { await ShowErrorAsync("エイリアスを保存できませんでした。\n" + ex.Message); }
+        catch (Exception ex) { await ShowErrorAsync("プリセットを保存できませんでした。\n" + ex.Message); }
     }
 
     private static string TimelineCanvasLabel(TimelineObject o) => Controls.TimelineCanvas.ObjectLabel(o);
@@ -216,10 +216,10 @@ public static class EditorCommands
     {
         try
         {
-            if (Session.Insert(Svc.Aliases.Load(name), layer, frame, "エイリアスの追加") == 0)
+            if (Session.Insert(Svc.Aliases.Load(name), layer, frame, "プリセットの追加") == 0)
                 _ = ShowErrorAsync("空いているレイヤーがありません");
         }
-        catch (Exception ex) { _ = ShowErrorAsync("エイリアスを読み込めませんでした。\n" + ex.Message); }
+        catch (Exception ex) { _ = ShowErrorAsync("プリセットを読み込めませんでした。\n" + ex.Message); }
     }
 
     /// <summary>見つからない素材があれば、付け替えのダイアログを出す。</summary>
@@ -268,7 +268,7 @@ public static class EditorCommands
             new("edit.selectAll", "すべて選択", "Ctrl+A", () => Session.SelectMany(Session.Scene.Objects.Where(o => !Session.Scene.GetLayer(o.Layer).Locked).Select(o => o.Id))),
             new("edit.deselect", "選択を解除", "Escape", () => Session.Select(null)),
             new("edit.split", "現在位置で分割", "S", Split),
-            new("edit.addKey", "中間点を追加", "P", AddKeyFrame),
+            new("edit.addKey", "キーフレームを追加", "P", AddKeyFrame),
             new("play.toggle", "再生 / 停止", "Space", () => Svc.Preview.TogglePlay()),
             new("move.prev", "1 フレーム戻る", "Left", () => Step(-1)),
             new("move.next", "1 フレーム進む", "Right", () => Step(1)),
@@ -281,7 +281,7 @@ public static class EditorCommands
             new("range.start", "出力範囲の開始を現在位置に", "OemOpenBrackets", SetRangeStart),
             new("range.end", "出力範囲の終了を現在位置に", "OemCloseBrackets", SetRangeEnd),
             new("range.clear", "出力範囲を解除", "", ClearRange),
-            new("alias.create", "エイリアスを作成", "", () => _ = CreateAliasAsync()));
+            new("alias.create", "プリセットとして保存", "", () => _ = CreateAliasAsync()));
     }
 
     /// <summary>キー入力を処理したら true。文字入力中 (TextBox) は編集用のキーを横取りしない。</summary>

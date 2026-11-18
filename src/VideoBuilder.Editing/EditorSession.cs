@@ -401,20 +401,20 @@ public sealed class EditorSession
     {
         var targets = SelectedObjects.Where(o => frame > o.Start && frame <= o.End && !o.KeyFrames.Contains(frame)).ToList();
         if (targets.Count == 0) return;
-        Edit("中間点の追加", () => { foreach (var o in targets) o.AddKeyFrame(frame); });
+        Edit("キーフレームの追加", () => { foreach (var o in targets) o.AddKeyFrame(frame); });
     }
 
     public void RemoveKeyFrame(TimelineObject obj, int index) =>
-        Edit("中間点の削除", () => obj.RemoveKeyFrameAt(index));
+        Edit("キーフレームの削除", () => obj.RemoveKeyFrameAt(index));
 
     public void AddFilter(TimelineObject obj, string definitionId) =>
-        Edit("フィルタ効果の追加", () => ObjectFactory.AddFilter(obj, definitionId));
+        Edit("エフェクトの追加", () => ObjectFactory.AddFilter(obj, definitionId));
 
     public void RemoveEffect(TimelineObject obj, Effect effect)
     {
         int i = obj.Effects.IndexOf(effect);
         if (i <= 0 || effect.Definition.Category != EffectCategory.Filter) return;
-        Edit("フィルタ効果の削除", () => obj.Effects.RemoveAt(i));
+        Edit("エフェクトの削除", () => obj.Effects.RemoveAt(i));
     }
 
     public void MoveEffect(TimelineObject obj, Effect effect, int direction)
@@ -423,7 +423,7 @@ public sealed class EditorSession
         int j = i + direction;
         if (i <= 0 || j <= 0 || j >= obj.Effects.Count) return;
         if (effect.Definition.Category != EffectCategory.Filter || obj.Effects[j].Definition.Category != EffectCategory.Filter) return;
-        Edit("フィルタ効果の移動", () => (obj.Effects[i], obj.Effects[j]) = (obj.Effects[j], obj.Effects[i]));
+        Edit("エフェクトの移動", () => (obj.Effects[i], obj.Effects[j]) = (obj.Effects[j], obj.Effects[i]));
     }
 
     public void SetLayerVisible(int layer, bool visible) =>

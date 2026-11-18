@@ -128,14 +128,14 @@ public sealed class TimelineView : UserControl
                 else _session.AddObject(def.Id, hit.Layer, hit.Frame, len);
             }));
         }
-        menu.Items.Add(Menus.Sub("メディアオブジェクトの追加", "AddBox", media));
-        menu.Items.Add(Menus.Sub("フィルタオブジェクトの追加", "Filter",
+        menu.Items.Add(Menus.Sub("オブジェクトを追加", "AddBox", media));
+        menu.Items.Add(Menus.Sub("調整レイヤーを追加", "Filter",
             EffectRegistry.Filters.Select(f => (object)Menus.Item(f.Name, f.Icon, () => _session.AddObject(f.Id, hit.Layer, hit.Frame, len)))));
         var aliases = Svc.Aliases.List();
         if (aliases.Count > 0)
-            menu.Items.Add(Menus.Sub("エイリアスから追加", "Layers", aliases.Select(a => (object)Menus.Item(a, null, () => EditorCommands.InsertAlias(a, hit.Layer, hit.Frame)))
+            menu.Items.Add(Menus.Sub("プリセットから追加", "Layers", aliases.Select(a => (object)Menus.Item(a, null, () => EditorCommands.InsertAlias(a, hit.Layer, hit.Frame)))
                 .Append(Menus.Sep())
-                .Append(Menus.Sub("エイリアスを削除", "Delete", aliases.Select(a => (object)Menus.Item(a, null, () => Svc.Aliases.Delete(a)))))));
+                .Append(Menus.Sub("プリセットを削除", "Delete", aliases.Select(a => (object)Menus.Item(a, null, () => Svc.Aliases.Delete(a)))))));
         menu.Items.Add(Menus.Sep());
         menu.Items.Add(Menus.Item("貼り付け", "Paste", () => _session.Paste(hit.Layer, hit.Frame), Shortcuts.First("edit.paste"), _session.HasClipboard));
         var scene = _session.Scene;
@@ -163,15 +163,15 @@ public sealed class TimelineView : UserControl
     {
         var o = hit.Object!;
         bool inside = hit.Frame > o.Start && hit.Frame <= o.End;
-        menu.Items.Add(Menus.Item("中間点を追加", "AddDiamond", () => { _session.Select(o.Id); _session.AddKeyFrameToSelected(hit.Frame); }, null, inside && !o.KeyFrames.Contains(hit.Frame)));
+        menu.Items.Add(Menus.Item("キーフレームを追加", "AddDiamond", () => { _session.Select(o.Id); _session.AddKeyFrameToSelected(hit.Frame); }, null, inside && !o.KeyFrames.Contains(hit.Frame)));
         if (hit.Part == ObjectPart.KeyFrame)
-            menu.Items.Add(Menus.Item("中間点を削除", "Remove", () => _session.RemoveKeyFrame(o, hit.KeyIndex)));
+            menu.Items.Add(Menus.Item("キーフレームを削除", "Remove", () => _session.RemoveKeyFrame(o, hit.KeyIndex)));
         menu.Items.Add(Menus.Item("分割", "Split", () => _session.SplitSelectedAt(hit.Frame), null, inside));
         menu.Items.Add(Menus.Sep());
         menu.Items.Add(Menus.Item("切り取り", "Cut", _session.CutSelected, Shortcuts.First("edit.cut")));
         menu.Items.Add(Menus.Item("コピー", "Copy", _session.CopySelected, Shortcuts.First("edit.copy")));
         menu.Items.Add(Menus.Item("削除", "Delete", _session.DeleteSelected, Shortcuts.First("edit.delete")));
-        menu.Items.Add(Menus.Item("エイリアスを作成...", "Layers", () => _ = EditorCommands.CreateAliasAsync()));
+        menu.Items.Add(Menus.Item("プリセットとして保存...", "Layers", () => _ = EditorCommands.CreateAliasAsync()));
         if (o.Main.DefinitionId == EffectRegistry.Video)
         {
             var file = o.Main.GetString("file");
@@ -181,7 +181,7 @@ public sealed class TimelineView : UserControl
                 menu.Items.Add(Menus.Item(Svc.Proxies.IsQueued(file) ? "プロキシを作成中..." : "プロキシを作成", "Movie", () => Svc.Proxies.Enqueue(file), null, !Svc.Proxies.IsQueued(file)));
         }
         menu.Items.Add(Menus.Sep());
-        menu.Items.Add(Menus.Sub("フィルタ効果の追加", "AddBox",
+        menu.Items.Add(Menus.Sub("エフェクトの追加", "AddBox",
             EffectRegistry.Filters.Select(f => (object)Menus.Item(f.Name, f.Icon, () => _session.AddFilter(o, f.Id)))));
         menu.Items.Add(Menus.Item("オブジェクトを有効にする", null, () =>
         {
@@ -195,7 +195,7 @@ public sealed class TimelineView : UserControl
                 foreach (var t in _session.WithGroup(new[] { o })) t.GroupId = null;
             })));
         menu.Items.Add(Menus.Sep());
-        menu.Items.Add(Menus.Item("設定ダイアログを表示", "Tune", () => EditorCommands.ShowSettings()));
+        menu.Items.Add(Menus.Item("プロパティを表示", "Tune", () => EditorCommands.ShowSettings()));
     }
 
     private void BuildLayerMenu(ContextMenu menu, int layer)

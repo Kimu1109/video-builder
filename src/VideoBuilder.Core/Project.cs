@@ -43,7 +43,7 @@ public sealed class Scene
     public const int LayerCount = 100;
 
     public string Id { get; set; } = "root";
-    public string Name { get; set; } = "Root";
+    public string Name { get; set; } = "メイン";
     public List<TimelineObject> Objects { get; set; } = new();
     /// <summary>既定値と違うレイヤーだけを保持する (キー = レイヤー番号, 0 始まり)。</summary>
     public Dictionary<int, LayerInfo> Layers { get; set; } = new();
