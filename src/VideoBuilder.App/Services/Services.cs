@@ -22,7 +22,10 @@ public static class Svc
     {
         Settings = AppSettings.Load();
         Aliases = new AliasStore(AppPaths.AliasDir);
-        Templates = new TemplateStore(AppPaths.TemplateDir, AppPaths.TemplateAssetDir, AppPaths.AliasDir);
+        Templates = new TemplateStore(AppPaths.TemplateDir, AppPaths.TemplateAssetDir, AppPaths.AliasDir)
+        {
+            SharedDirectory = string.IsNullOrWhiteSpace(Settings.SharedTemplateDir) ? null : Settings.SharedTemplateDir,
+        };
         Styles = new StyleStore(AppPaths.StyleDir);
         VideoBuilder.Media.HardwareDecoding.Mode = Settings.HardwareDecode;
         VideoBuilder.Media.ProxyStore.Directory = Path.Combine(AppPaths.CacheDir, "proxy");

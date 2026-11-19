@@ -41,6 +41,8 @@ public sealed class AppSettings
     public Dictionary<string, string> Shortcuts { get; set; } = new();
     public bool ShowWaveform { get; set; } = true;
     public bool ShowThumbnails { get; set; } = true;
+    /// <summary>共有テンプレートフォルダ (読むだけ)。空なら使わない。</summary>
+    public string SharedTemplateDir { get; set; } = "";
 
     private static readonly JsonSerializerOptions Options = new()
     {

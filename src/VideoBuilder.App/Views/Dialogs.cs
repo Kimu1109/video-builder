@@ -255,6 +255,31 @@ public sealed class PreferencesDialog : DialogBase
         keys.Click += async (_, _) => await new ShortcutDialog().ShowDialog(this);
         Body.Children.Add(keys);
 
+        Body.Children.Add(Heading("テンプレート"));
+        var shared = new TextBox { Text = s.SharedTemplateDir, Watermark = "(使わない)", IsReadOnly = true };
+        void SetShared(string dir)
+        {
+            s.SharedTemplateDir = dir; s.Save();
+            Svc.Templates.SharedDirectory = dir.Length == 0 ? null : dir;
+            shared.Text = dir;
+        }
+        var pickShared = new IconButton("FolderOpen", "共有テンプレートフォルダを選ぶ", flat: false) { Margin = new Thickness(4, 0, 0, 0) };
+        pickShared.Click += async (_, _) =>
+        {
+            var folders = await StorageProvider.OpenFolderPickerAsync(new Avalonia.Platform.Storage.FolderPickerOpenOptions { Title = "共有テンプレートフォルダ" });
+            var path = folders.Count > 0 ? Avalonia.Platform.Storage.StorageProviderExtensions.TryGetLocalPath(folders[0]) : null;
+            if (path != null) SetShared(path);
+        };
+        var clearShared = new IconButton("Close", "共有テンプレートフォルダを使わない", flat: false) { Margin = new Thickness(4, 0, 0, 0) };
+        clearShared.Click += (_, _) => SetShared("");
+        var sharedRow = new DockPanel();
+        DockPanel.SetDock(clearShared, Dock.Right); DockPanel.SetDock(pickShared, Dock.Right);
+        sharedRow.Children.Add(clearShared); sharedRow.Children.Add(pickShared); sharedRow.Children.Add(shared);
+        Body.Children.Add(Row("共有フォルダ", sharedRow));
+        var sharedNote = new TextBlock { Text = "チームの共有ドライブなどを指定すると、そこのテンプレートもライブラリに並びます (読むだけ)。", TextWrapping = TextWrapping.Wrap };
+        sharedNote.Classes.Add("secondary");
+        Body.Children.Add(sharedNote);
+
         Body.Children.Add(Heading("プラグイン"));
         var plugins = VideoBuilder.Rendering.PluginLoader.Loaded;
         var pluginText = new TextBlock

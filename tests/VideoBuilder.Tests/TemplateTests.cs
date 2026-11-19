@@ -236,6 +236,35 @@ public class TemplateTests : IDisposable
     }
 
     [Fact]
+    public void Shared_folder_templates_are_listed_read_only_and_can_receive_copies()
+    {
+        var (s, text, _, _) = LowerThird();
+        var shared = Path.Combine(_dir, "shared");
+        var store = new TemplateStore(Path.Combine(_dir, "templates"), Path.Combine(_dir, "assets")) { SharedDirectory = shared };
+        Assert.Empty(store.List());                      // 共有フォルダがまだなくても動く
+        store.Save(TemplatePackage.Create(s.Project, new[] { text }, new TemplateOptions { Name = "自分の" }));
+        var mine = Assert.Single(store.List());
+        Assert.False(mine.Shared);
+
+        store.CopyToShared(mine);
+        var all = store.List();
+        Assert.Equal(2, all.Count);
+        var sharedEntry = all.Single(e => e.Shared);
+        Assert.Equal("自分の", sharedEntry.Name);
+        Assert.Throws<InvalidOperationException>(() => store.Delete(sharedEntry));
+        Assert.Throws<InvalidOperationException>(() => store.CopyToShared(sharedEntry));
+        // 共有のものも挿入できる
+        Assert.Equal(1, s.InsertTemplate(store.Instantiate(sharedEntry, s.Project, TemplateInsertMode.Scene), 0, 500));
+
+        // 共有フォルダが読めなくても、自分のものは並ぶ
+        store.SharedDirectory = Path.Combine(_dir, "does-not-exist");
+        Assert.Single(store.List());
+        // 共有フォルダが自分のフォルダと同じなら、重ねて並べない
+        store.SharedDirectory = Path.Combine(_dir, "templates");
+        Assert.Single(store.List());
+    }
+
+    [Fact]
     public void Legacy_presets_are_listed_and_expanded()
     {
         var legacyDir = Path.Combine(_dir, "aliases");

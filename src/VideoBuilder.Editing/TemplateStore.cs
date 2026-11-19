@@ -2,8 +2,8 @@ using VideoBuilder.Core;
 
 namespace VideoBuilder.Editing;
 
-/// <summary>テンプレートの一覧の 1 行。Legacy は旧形式 (.vbalias) のプリセット。</summary>
-public sealed record TemplateEntry(string Path, string Name, string Category, string Description, bool Legacy, TemplateInsertMode InsertAs);
+/// <summary>テンプレートの一覧の 1 行。Legacy は旧形式 (.vbalias) のプリセット。Shared は共有フォルダのもの (読むだけ)。</summary>
+public sealed record TemplateEntry(string Path, string Name, string Category, string Description, bool Legacy, TemplateInsertMode InsertAs, bool Shared = false);
 
 /// <summary>
 /// テンプレート (.vbtemplate) の置き場所。1 つのテンプレートが 1 つのファイルになる。
@@ -23,6 +23,9 @@ public sealed class TemplateStore
     public string AssetDirectory { get; }
     public string Directory => _directory;
 
+    /// <summary>共有テンプレートフォルダ (チームの共有ドライブなど)。読むだけ。null なら使わない。</summary>
+    public string? SharedDirectory { get; set; }
+
     public TemplateStore(string directory, string assetDirectory, string? legacyDirectory = null)
     {
         _directory = directory;
@@ -34,16 +37,25 @@ public sealed class TemplateStore
     public IReadOnlyList<TemplateEntry> List()
     {
         var result = new List<TemplateEntry>();
-        if (System.IO.Directory.Exists(_directory))
+        void AddFrom(string? dir, bool shared)
         {
-            foreach (var path in System.IO.Directory.EnumerateFiles(_directory, "*" + TemplatePackage.Extension))
+            if (string.IsNullOrEmpty(dir)) return;
+            try
             {
-                var meta = ReadMeta(path);
-                if (meta == null) continue;
-                var name = meta.Name.Length > 0 ? meta.Name : System.IO.Path.GetFileNameWithoutExtension(path);
-                result.Add(new TemplateEntry(path, name, meta.Category, meta.Description, false, meta.InsertAs));
+                if (!System.IO.Directory.Exists(dir)) return;
+                foreach (var path in System.IO.Directory.EnumerateFiles(dir, "*" + TemplatePackage.Extension))
+                {
+                    var meta = ReadMeta(path);
+                    if (meta == null) continue;
+                    var name = meta.Name.Length > 0 ? meta.Name : System.IO.Path.GetFileNameWithoutExtension(path);
+                    result.Add(new TemplateEntry(path, name, meta.Category, meta.Description, false, meta.InsertAs, shared));
+                }
             }
+            // 共有フォルダが読めない (ネットワークが切れているなど) ときは、自分のものだけを並べる
+            catch (Exception e) when (shared && e is IOException or UnauthorizedAccessException) { }
         }
+        AddFrom(_directory, false);
+        if (SharedDirectory != null && !SamePath(SharedDirectory, _directory)) AddFrom(SharedDirectory, true);
         if (_legacy != null && _legacyDirectory != null)
         {
             foreach (var name in _legacy.List())
@@ -51,7 +63,26 @@ public sealed class TemplateStore
                     name, LegacyCategory, "", true, TemplateInsertMode.Objects));
         }
         return result.OrderBy(e => e.Legacy).ThenBy(e => e.Category, StringComparer.CurrentCulture)
-            .ThenBy(e => e.Name, StringComparer.CurrentCulture).ToList();
+            .ThenBy(e => e.Name, StringComparer.CurrentCulture).ThenBy(e => e.Shared).ToList();
+    }
+
+    private static bool SamePath(string a, string b)
+    {
+        try { return System.IO.Path.GetFullPath(a).TrimEnd('/', '\\') == System.IO.Path.GetFullPath(b).TrimEnd('/', '\\'); }
+        catch { return false; }
+    }
+
+    /// <summary>自分のテンプレートを共有フォルダにコピーする (同じ名前のものは上書き)。コピーした先のパスを返す。</summary>
+    public string CopyToShared(TemplateEntry entry)
+    {
+        if (string.IsNullOrEmpty(SharedDirectory)) throw new InvalidOperationException("共有テンプレートフォルダが設定されていません");
+        if (entry.Shared) throw new InvalidOperationException("共有フォルダのテンプレートです");
+        System.IO.Directory.CreateDirectory(SharedDirectory);
+        var dest = System.IO.Path.Combine(SharedDirectory, AliasStore.SafeName(entry.Name) + TemplatePackage.Extension);
+        if (entry.Legacy) Load(entry).Save(dest);
+        else File.Copy(entry.Path, dest, overwrite: true);
+        _metaCache.Remove(dest);
+        return dest;
     }
 
     public IReadOnlyList<string> Categories() =>
@@ -97,6 +128,7 @@ public sealed class TemplateStore
 
     public void Delete(TemplateEntry entry)
     {
+        if (entry.Shared) throw new InvalidOperationException("共有フォルダのテンプレートは削除できません");
         if (entry.Legacy) { _legacy?.Delete(entry.Name); return; }
         if (File.Exists(entry.Path)) File.Delete(entry.Path);
         _metaCache.Remove(entry.Path);

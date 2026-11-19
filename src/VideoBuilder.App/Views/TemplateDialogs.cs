@@ -131,6 +131,7 @@ public sealed class TemplateLibraryDialog : DialogBase
     // 説明 (利用者が書いたもの) とアプリの文言を混ぜて出すので、アプリの文言はそれぞれ L.T で訳してから入れる
     private readonly TextBlock _detail = L.Verbatim("");
     private readonly List<Button> _needsSelection = new();
+    private readonly Button _delete, _toShared;
     private List<TemplateEntry> _shown = new();
     private readonly Dictionary<string, Bitmap?> _thumbs = new();
 
@@ -160,7 +161,8 @@ public sealed class TemplateLibraryDialog : DialogBase
 
         AddButton("読み込み...", () => _ = ImportAsync(), icon: "Upload");
         _needsSelection.Add(AddButton("書き出し...", () => _ = ExportAsync(), icon: "Download"));
-        _needsSelection.Add(AddButton("削除", () => _ = DeleteAsync(), icon: "Delete"));
+        _delete = AddButton("削除", () => _ = DeleteAsync(), icon: "Delete");
+        _toShared = AddButton("共有フォルダにコピー", () => _ = CopyToSharedAsync(), icon: "Upload");
         AddButton("閉じる", Close);
         _needsSelection.Add(AddButton("展開して挿入", () => InsertSelected(TemplateInsertMode.Objects)));
         _needsSelection.Add(AddButton("挿入", () => InsertSelected(null), accent: true));
@@ -206,7 +208,16 @@ public sealed class TemplateLibraryDialog : DialogBase
         Control picture = bmp != null
             ? new Image { Source = bmp, Stretch = Stretch.Uniform, Width = 160, Height = 90 }
             : new Border { Width = 160, Height = 90, Child = new Icon(e.Legacy ? "Layers" : "Template", 32) { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center } };
-        var frame = new Border { Child = picture, BorderThickness = new Thickness(1) };
+        Control content = picture;
+        if (e.Shared)
+        {
+            // 共有フォルダのものには「共有」の印を付ける
+            var badge = new Border { Padding = new Thickness(4, 1), Margin = new Thickness(3), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
+                Child = new TextBlock { Text = "共有", FontSize = 10, Foreground = Brushes.White } };
+            badge[!Border.BackgroundProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Accent");
+            content = new Panel { Children = { picture, badge } };
+        }
+        var frame = new Border { Child = content, BorderThickness = new Thickness(1) };
         frame[!Border.BorderBrushProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Border.Default");
         frame[!Border.BackgroundProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Bg.Base");
         // 名前は利用者が付けたものなので訳さない (旧形式のプリセットの名前も同じ)
@@ -223,6 +234,10 @@ public sealed class TemplateLibraryDialog : DialogBase
     {
         var e = Selected;
         foreach (var b in _needsSelection) b.IsEnabled = e != null;
+        // 共有フォルダのものは削除できない。共有フォルダへのコピーは、共有フォルダを設定しているときの自分のものだけ
+        _delete.IsEnabled = e is { Shared: false };
+        _toShared.IsVisible = Svc.Templates.SharedDirectory != null;
+        _toShared.IsEnabled = e is { Shared: false };
         if (e == null) { _detail.Text = _shown.Count == 0 ? L.T("テンプレートがありません。タイムラインでオブジェクトを選び、右クリックの「テンプレートとして保存...」で作れます。") : ""; return; }
         if (e.Legacy) { _detail.Text = L.T("旧形式のプリセットです (展開して挿入します)。"); return; }
         var meta = TemplatePackage.ReadMeta(e.Path);
@@ -287,6 +302,18 @@ public sealed class TemplateLibraryDialog : DialogBase
             else File.Copy(e.Path, path, overwrite: true);
         }
         catch (Exception ex) { await MessageDialog.Show(this, "テンプレートを書き出す", ex.Message); }
+    }
+
+    private async Task CopyToSharedAsync()
+    {
+        var e = Selected;
+        if (e == null || e.Shared) return;
+        try
+        {
+            Svc.Templates.CopyToShared(e);
+            Reload();
+        }
+        catch (Exception ex) { await MessageDialog.Show(this, "共有フォルダにコピー", ex.Message); }
     }
 
     private async Task DeleteAsync()
