@@ -428,12 +428,16 @@ public class ProxyTests : IDisposable
         if (!_ready) return;
         var reported = new List<double>();
         ProxyStore.Divisor = 2;
-        var path = ProxyStore.PathFor(_clip)!;
-        Assert.Null(ProxyStore.FindReady(_clip));
-        ProxyGenerator.Create(_clip, path, 2, new SyncProgress(reported.Add), CancellationToken.None);
-        Assert.Equal(path, ProxyStore.FindReady(_clip));
+        var folder = ProxyStore.PathFor(_clip)!;
+        Assert.Null(ProxyStore.FindSegment(_clip, 0));
+        ProxyGenerator.Create(_clip, folder, 2, new SyncProgress(reported.Add), CancellationToken.None);
+        // 2 秒の動画は区切り 1 つ
+        var path = ProxyStore.SegmentPath(folder, 0);
+        Assert.Equal(path, ProxyStore.FindSegment(_clip, 0));
+        Assert.Equal(path, ProxyStore.FindSegment(_clip, 1.9));
+        Assert.True(ProxyStore.Exists(_clip));
         Assert.Equal(1.0, reported[^1]);
-        Assert.False(File.Exists(path + ".part"));
+        Assert.Empty(Directory.GetFiles(folder, "*.part"));
 
         var info = MediaInfo.Probe(path)!;
         Assert.Equal((320, 180, "mjpeg"), (info.Width, info.Height, info.VideoCodec));
@@ -442,7 +446,7 @@ public class ProxyTests : IDisposable
 
         // 同じ時刻のフレームが、元の動画を縮小したものとほぼ同じ (別の時刻のフレームとは違う)
         using var original = new VideoReader(_clip);
-        using var proxy = new VideoReader(path);
+        using var proxy = new VideoReader(path, absoluteTime: true);
         byte[] Shrunk(double t)
         {
             using var src = new SKBitmap(new SKImageInfo(640, 360, SKColorType.Bgra8888, SKAlphaType.Opaque));
@@ -470,19 +474,19 @@ public class ProxyTests : IDisposable
         using var cts = new CancellationTokenSource();
         cts.Cancel();
         Assert.ThrowsAny<OperationCanceledException>(() => ProxyGenerator.Create(_clip, path, 2, null, cts.Token));
-        Assert.False(File.Exists(path));
-        Assert.False(File.Exists(path + ".part"));
+        Assert.True(!Directory.Exists(path) || Directory.GetFiles(path).Length == 0);
 
         MakeProxy();
-        Assert.NotNull(ProxyStore.FindReady(_clip));
+        Assert.NotNull(ProxyStore.FindSegment(_clip, 0));
         File.SetLastWriteTimeUtc(_clip, DateTime.UtcNow.AddMinutes(1));     // 元の動画が書き換えられた
         ProxyStore.NotifyChanged();
         Assert.NotEqual(path, ProxyStore.PathFor(_clip));
-        Assert.Null(ProxyStore.FindReady(_clip));                          // 古いプロキシは使わない
+        Assert.Null(ProxyStore.FindSegment(_clip, 0));                     // 古いプロキシは使わない
 
         MakeProxy();
         Assert.Equal(1, ProxyStore.Delete(_clip));
-        Assert.Null(ProxyStore.FindReady(_clip));
+        Assert.Null(ProxyStore.FindSegment(_clip, 0));
+        Assert.False(Directory.Exists(ProxyStore.PathFor(_clip)));
     }
 
     [Fact]
@@ -491,8 +495,9 @@ public class ProxyTests : IDisposable
         if (!_ready) return;
         // 目印として、プロキシの代わりに「真っ赤な動画」をプロキシの場所に置く
         ProxyStore.Divisor = 2;
-        var proxyPath = ProxyStore.PathFor(_clip)!;
-        Directory.CreateDirectory(ProxyStore.Directory);
+        var folder = ProxyStore.PathFor(_clip)!;
+        Directory.CreateDirectory(folder);
+        var proxyPath = ProxyStore.SegmentPath(folder, 0);
         Assert.True(MediaTests.RunFfmpeg($"-f lavfi -i color=c=red:size=320x180:rate=30:duration=2 -c:v mjpeg -pix_fmt yuvj420p \"{proxyPath}\""));
         ProxyStore.NotifyChanged();
 

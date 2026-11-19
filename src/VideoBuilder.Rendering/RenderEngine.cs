@@ -532,7 +532,7 @@ public sealed class RenderEngine : IDisposable
     {
         var project = ctx.Project;
         List<(string, string, double, bool, float)>? requests = null;
-        List<(string, double, bool)>? next = null;
+        List<(string, string, double, bool)>? next = null;
         // 細かさ (Detail) を合成のときと同じに求めるため、グループ制御・カメラ制御を同じ順にたどる
         var groups = new List<GroupState>();
         bool camera = false;
@@ -549,7 +549,7 @@ public sealed class RenderEngine : IDisposable
             (requests ??= new()).Add((o.Id, file, SourceTime(project, o, bounds, frame), loop, Detail(ctx, o, bounds, frame, groups, camera)));
             // 入れ子のシーンの中は、次に描くフレームが 1 つ先とは限らないので先読みしない
             if (Lookahead && depth == 0 && o.Contains(frame + 1))
-                (next ??= new()).Add((o.Id, SourceTime(project, o, bounds, frame + 1), loop));
+                (next ??= new()).Add((o.Id, file, SourceTime(project, o, bounds, frame + 1), loop));
         }
         if (requests == null) return;
         if (requests.Count >= 2 || next != null) Media.Prefetch(requests);

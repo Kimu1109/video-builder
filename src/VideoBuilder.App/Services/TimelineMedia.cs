@@ -137,10 +137,10 @@ public sealed class ThumbnailCache
     private static readonly Dictionary<string, VideoReader> Readers = new();
     private static readonly Queue<string> ReaderOrder = new();
 
-    private static VideoReader OpenCached(string path)
+    private static VideoReader OpenCached(string path, bool absoluteTime)
     {
         if (Readers.TryGetValue(path, out var r)) return r;
-        r = new VideoReader(path);
+        r = new VideoReader(path, absoluteTime);
         Readers[path] = r;
         ReaderOrder.Enqueue(path);
         while (ReaderOrder.Count > 4) { var old = ReaderOrder.Dequeue(); Readers[old].Dispose(); Readers.Remove(old); }
@@ -151,8 +151,8 @@ public sealed class ThumbnailCache
     {
         if (!File.Exists(path) || !FFmpegLoader.EnsureLoaded()) return null;
         // プロキシがあれば、小さいプロキシから作る (元の動画をデコードするより速い)
-        var source = ProxyStore.FindReady(path) ?? path;
-        var reader = OpenCached(source);
+        var segment = ProxyStore.FindSegment(path, seconds);
+        var reader = OpenCached(segment ?? path, absoluteTime: segment != null);
         // サムネイルは小さいので、縮めて変換する (縮小に使う大きさの 2 倍は残す)
         reader.OutputDivisor = Math.Max(1, reader.Height / (Height * 2));
         var frame = reader.GetFrame(seconds);

@@ -53,6 +53,11 @@ public static class Svc
         Performance = new PerformanceMonitor(Preview, Settings);
         // プロキシができたら、プレビューを描き直す (開いている動画は次の描画でプロキシに切り替わる)
         VideoBuilder.Media.ProxyStore.Changed += () => Avalonia.Threading.Dispatcher.UIThread.Post(() => Preview.Request());
+        // プロキシは今見ている位置から先に作る
+        void Focus() => Proxies.UpdateFocus(Session.Project, Session.Scene, Session.CurrentFrame);
+        Session.FrameChanged += Focus;
+        Session.SceneChanged += Focus;
+        Proxies.FocusChanged += Focus;
     }
 
     /// <summary>設定の「使う GPU」を描画に伝える (環境変数 VIDEO_BUILDER_GPU があれば、そちらを優先)。</summary>

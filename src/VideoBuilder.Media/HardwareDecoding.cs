@@ -126,6 +126,54 @@ public static unsafe class HardwareDecoding
         }
     }
 
+    /// <summary>
+    /// 使えるデバイスを順に試して、ハードウェアのデコーダを開く。開けなければ null (error に理由)。
+    /// format は、デコードしたフレームの (GPU 上の) ピクセル形式。name はデバイスの名前 ("VAAPI" など)。
+    /// </summary>
+    internal static AVCodecContext* Open(AVCodec* codec, AVStream* st, out AVPixelFormat format, out string name, out string? error, int extraFrames = 0)
+    {
+        format = AVPixelFormat.AV_PIX_FMT_NONE; name = ""; error = null;
+        var reasons = new List<string>();
+        foreach (var type in DeviceOrder())
+        {
+            var wanted = HardwareFormatFor(codec, type);
+            if (wanted == null) { reasons.Add($"{NameOf(type)}: この形式には対応していません"); continue; }
+            var device = SharedDevice(type, out var deviceError);
+            if (device == null) { reasons.Add(deviceError ?? NameOf(type)); continue; }
+
+            var ctx = ffmpeg.avcodec_alloc_context3(codec);
+            int level = ffmpeg.av_log_get_level();
+            ffmpeg.av_log_set_level(ffmpeg.AV_LOG_QUIET);
+            try
+            {
+                if (ffmpeg.avcodec_parameters_to_context(ctx, st->codecpar) < 0) { reasons.Add("デコーダの設定に失敗"); continue; }
+                ctx->hw_device_ctx = ffmpeg.av_buffer_ref(device);
+                ctx->get_format = GetFormatPointer;
+                ctx->opaque = (void*)(nint)(int)wanted.Value;     // GetFormat で読む
+                // GPU がデコードするので、CPU のスレッドは少なくてよい
+                ctx->thread_count = 1;
+                if (extraFrames > 0) ctx->extra_hw_frames = extraFrames;
+                int ret = ffmpeg.avcodec_open2(ctx, codec, null);
+                if (ret < 0) { reasons.Add($"{NameOf(type)}: {FFmpegLoader.ErrorText(ret)}"); continue; }
+                var opened = ctx;
+                ctx = null;
+                format = wanted.Value;
+                name = NameOf(type);
+                return opened;
+            }
+            finally
+            {
+                ffmpeg.av_log_set_level(level);
+                if (ctx != null) ffmpeg.avcodec_free_context(&ctx);
+            }
+        }
+        error = reasons.Count == 0 ? "使えるデバイスがありません" : string.Join(" / ", reasons);
+        return null;
+    }
+
+    /// <summary>新しく開く動画でハードウェアデコードを試すか (設定と環境変数)。</summary>
+    internal static bool Wanted => Mode == HardwareDecodeMode.Auto && !DisabledByEnvironment;
+
     /// <summary>codec がこのデバイスでデコードできるなら、そのときの (GPU 上の) ピクセル形式を返す。</summary>
     internal static AVPixelFormat? HardwareFormatFor(AVCodec* codec, AVHWDeviceType type)
     {

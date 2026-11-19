@@ -1059,7 +1059,7 @@ public class UiTests
             Svc.Settings.AutoProxy = true;
             Assert.Null(MediaImport.AddFile(clip, 0, 0));       // 2560x1440 は「重い動画」→ 自動でプロキシを作る
             string? statusSeen = null;
-            for (int i = 0; i < 500 && !VideoBuilder.Media.ProxyStore.Exists(clip); i++)
+            for (int i = 0; i < 500 && (!VideoBuilder.Media.ProxyStore.Exists(clip) || Svc.Proxies.Pending > 0); i++)
             {
                 await Task.Delay(20);
                 Pump();
@@ -1068,7 +1068,7 @@ public class UiTests
             Assert.True(VideoBuilder.Media.ProxyStore.Exists(clip), Svc.Proxies.LastError ?? "プロキシができない");
             Assert.Contains("big.mp4", statusSeen ?? "big.mp4");
             Assert.Equal(0, Svc.Proxies.Pending);
-            var info = VideoBuilder.Media.MediaInfo.Probe(VideoBuilder.Media.ProxyStore.FindReady(clip)!)!;
+            var info = VideoBuilder.Media.MediaInfo.Probe(VideoBuilder.Media.ProxyStore.FindSegment(clip, 0)!)!;
             Assert.Equal(1280, info.Width);
             VideoBuilder.Media.ProxyStore.Delete(clip);
             Assert.False(VideoBuilder.Media.ProxyStore.Exists(clip));
