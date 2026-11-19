@@ -801,7 +801,8 @@ public sealed class RenderEngine : IDisposable
                 string file = main.GetString("file");
                 float size = (float)main.Eval("size", bounds, frame);
                 var palette = VectorColors.PaletteOfFile(file);
-                var info = palette.Count == 0 ? _vectors.Get(file) : _vectors.Get(file, VectorColors.MapFor(main, palette));
+                var hidden = VectorFiles.ParseIds(main.GetString("hide"));
+                var info = palette.Count == 0 && hidden.Count == 0 ? _vectors.Get(file) : _vectors.Get(file, VectorColors.MapFor(main, palette), hidden);
                 if (info == null) return null;
                 if (!info.Animated)
                     return Cached($"V|{file}|{info.Version}|{Generators.F(size)}", () => _vectors.Render(info, size, 0));

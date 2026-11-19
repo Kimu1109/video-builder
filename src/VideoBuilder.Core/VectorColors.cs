@@ -72,8 +72,8 @@ public static class VectorColors
 
     private static readonly Dictionary<string, (DateTime Time, List<string> Palette)> Cache = new();
 
-    private static bool IsSvg(string path) => path.EndsWith(".svg", StringComparison.OrdinalIgnoreCase);
-    private static bool IsLottie(string path) => path.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+    private static bool IsSvg(string path) => VectorFiles.IsSvg(path);
+    private static bool IsLottie(string path) => VectorFiles.IsLottie(path);
 
     /// <summary>ファイルのパレット。ベクター画像でない・読めないときは空。</summary>
     public static IReadOnlyList<string> PaletteOfFile(string path)
@@ -84,7 +84,7 @@ public static class VectorColors
             var time = File.GetLastWriteTimeUtc(path);
             lock (Cache)
                 if (Cache.TryGetValue(path, out var hit) && hit.Time == time) return hit.Palette;
-            var text = File.ReadAllText(path);
+            var text = VectorFiles.ReadText(path);
             var palette = IsSvg(path) ? SvgPalette(text) : LottiePalette(text);
             lock (Cache)
             {
@@ -93,13 +93,13 @@ public static class VectorColors
             }
             return palette;
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return Array.Empty<string>(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { return Array.Empty<string>(); }
     }
 
     /// <summary>ファイルを読んで、色を置き換えた中身 (SVG / JSON の文字列) を返す。</summary>
     public static string RecolorFile(string path, IReadOnlyDictionary<string, string> map)
     {
-        var text = File.ReadAllText(path);
+        var text = VectorFiles.ReadText(path);
         return IsSvg(path) ? RecolorSvg(text, map) : RecolorLottie(text, map);
     }
 

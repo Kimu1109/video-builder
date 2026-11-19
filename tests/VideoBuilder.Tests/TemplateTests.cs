@@ -722,3 +722,77 @@ public class SubtitleTests
     }
 }
 
+public class VectorFileTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), $"vb-vfile-{Guid.NewGuid():N}");
+    public VectorFileTests() => Directory.CreateDirectory(_dir);
+    public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
+
+    private static SKColor Pixel(Project p, int frame, int x, int y)
+    {
+        using var engine = new RenderEngine();
+        using var img = engine.RenderImage(p, p.Root, frame);
+        using var bmp = SKBitmap.FromImage(img);
+        return bmp.GetPixel(x, y);
+    }
+
+    private static Project Small() => new() { Settings = { Width = 320, Height = 240 } };
+
+    [Fact]
+    public void Svg_parts_are_hidden_by_id()
+    {
+        var svg = Path.Combine(_dir, "two.svg");
+        File.WriteAllText(svg, "<?xml version='1.0'?><svg xmlns='http://www.w3.org/2000/svg' width='100' height='50'><rect id='left' width='50' height='50' fill='red'/><g id='right'><rect x='50' width='50' height='50' style='fill:#00ff00'/></g></svg>");
+        Assert.Equal(new[] { "left", "right" }, VectorFiles.SvgIds(File.ReadAllText(svg)));
+        Assert.Equal(new[] { "a", "b", "c" }, VectorFiles.ParseIds(" a, b c,").Order().ToArray());
+        var p = Small();
+        var o = ObjectFactory.Create(EffectRegistry.Vector, 0, 0, 30);
+        o.Main.Values["file"] = svg;
+        p.Root.Objects.Add(o);
+        var bg = Pixel(new Project { Settings = { Width = 320, Height = 240 } }, 0, 0, 0);
+        Assert.Equal(new SKColor(0, 255, 0), Pixel(p, 0, 185, 120));
+        o.Main.Values["hide"] = "right";
+        Assert.Equal(bg, Pixel(p, 0, 185, 120));
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 135, 120));
+        // 色の置き換えと一緒に使える
+        o.Main.Values["color1"] = "#0000FF";
+        Assert.Equal(new SKColor(0, 0, 255), Pixel(p, 0, 135, 120));
+        Assert.Equal(bg, Pixel(p, 0, 185, 120));
+        // 壊れた SVG はそのまま
+        Assert.Equal("<svg", VectorFiles.HideSvgElements("<svg", new HashSet<string> { "x" }));
+    }
+
+    [Fact]
+    public void DotLottie_is_played_with_embedded_images_and_recolored()
+    {
+        // 赤い丸の Lottie と、使われない画像 1 つを入れた dotLottie (版 1 の並び)
+        const string anim = """{"v":"5.7.4","fr":30,"ip":0,"op":30,"w":100,"h":100,"assets":[{"id":"img_0","w":4,"h":4,"u":"/images/","p":"img_0.png","e":0}],"layers":[{"ty":4,"ip":0,"op":30,"st":0,"ks":{"o":{"a":0,"k":100},"r":{"a":0,"k":0},"p":{"a":0,"k":[50,50,0]},"a":{"a":0,"k":[0,0,0]},"s":{"a":0,"k":[100,100,100]}},"shapes":[{"ty":"el","p":{"a":0,"k":[0,0]},"s":{"a":0,"k":[60,60]}},{"ty":"fl","c":{"a":0,"k":[1,0,0,1]},"o":{"a":0,"k":100}}]}]}""";
+        var path = Path.Combine(_dir, "circle.lottie");
+        using (var zip = System.IO.Compression.ZipFile.Open(path, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            using (var w = new StreamWriter(zip.CreateEntry("manifest.json").Open())) w.Write("""{"version":"1","animations":[{"id":"main"}]}""");
+            using (var w = new StreamWriter(zip.CreateEntry("animations/main.json").Open())) w.Write(anim);
+            using (var s = zip.CreateEntry("images/img_0.png").Open())
+            {
+                using var bmp = new SKBitmap(4, 4);
+                using var data = bmp.Encode(SKEncodedImageFormat.Png, 100);
+                data.SaveTo(s);
+            }
+        }
+        var json = VectorFiles.ReadText(path);
+        Assert.Contains("data:image/png;base64,", json);
+        Assert.Equal(new[] { "#FF0000" }, VectorColors.PaletteOfFile(path));
+        Assert.Equal(EffectRegistry.Vector, ObjectFactory.DefinitionForFile(path));
+
+        var p = Small();
+        var o = ObjectFactory.Create(EffectRegistry.Vector, 0, 0, 30);
+        o.Main.Values["file"] = path;
+        p.Root.Objects.Add(o);
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(p, 0, 160, 120));
+        o.Main.Values["color1"] = "#00FF00";
+        Assert.Equal(new SKColor(0, 255, 0), Pixel(p, 0, 160, 120));
+        o.Main.Values["hide"] = "x";   // Lottie では非表示の指定は使わない (描ける)
+        Assert.Equal(new SKColor(0, 255, 0), Pixel(p, 0, 160, 120));
+    }
+}
+

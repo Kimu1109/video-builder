@@ -43,11 +43,14 @@ internal sealed class VectorSources : IDisposable
     /// 色を置き換えたベクター画像 (SVG / Lottie) を返す。map が空なら Get(path) と同じ。
     /// 元のファイルが書き換わったら作り直す。
     /// </summary>
-    public Item? Get(string path, IReadOnlyDictionary<string, string> map)
+    public Item? Get(string path, IReadOnlyDictionary<string, string> map, IReadOnlySet<string>? hidden = null)
     {
         var item = Get(path);
-        if (item == null || map.Count == 0) return item;
-        string key = path + "|" + string.Join(",", map.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => kv.Key + ">" + kv.Value));
+        // 部品の非表示は SVG だけ
+        if (item == null || item.Animated) hidden = null;
+        if (item == null || (map.Count == 0 && (hidden == null || hidden.Count == 0))) return item;
+        string key = path + "|" + string.Join(",", map.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => kv.Key + ">" + kv.Value))
+                   + "|" + (hidden == null ? "" : string.Join(",", hidden.Order(StringComparer.Ordinal)));
         _tick++;
         if (_recolored.TryGetValue(key, out var hit) && hit.Version == item.Version)
         {
@@ -58,7 +61,8 @@ internal sealed class VectorSources : IDisposable
         Item? made;
         try
         {
-            var text = VectorColors.RecolorFile(path, map);
+            var text = map.Count > 0 ? VectorColors.RecolorFile(path, map) : VectorFiles.ReadText(path);
+            if (hidden is { Count: > 0 }) text = VectorFiles.HideSvgElements(text, hidden);
             // 書き換えた SVG は文字列から読む (中から相対パスで参照している画像は読めない)
             made = item.Animated ? LoadLottie(text) : LoadSvg(svg => svg.Load(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(text))));
         }
@@ -125,7 +129,7 @@ internal sealed class VectorSources : IDisposable
         try
         {
             if (Path.GetExtension(path).Equals(".svg", StringComparison.OrdinalIgnoreCase)) return LoadSvg(svg => svg.Load(path));
-            return LoadLottie(File.ReadAllText(path));
+            return LoadLottie(VectorFiles.ReadText(path));
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {

@@ -543,5 +543,9 @@ internal static class TranslationsEn
         ("レイヤー {0} にテキストオブジェクトがありません", "There are no text objects on layer {0}"),
         ("字幕を書き出せませんでした。\n{0}", "Could not export the subtitles.\n{0}"),
         ("字幕の読み込み", "Import subtitles"),
+        ("非表示にする部品 (id)", "Hidden parts (id)"),
+        ("SVG の要素の id をカンマ区切りで書きます", "Enter SVG element ids, separated by commas"),
+        ("この SVG にある id:", "Ids in this SVG:"),
+        ("dotLottie の中にアニメーションがありません", "There is no animation in the dotLottie file"),
     };
 }

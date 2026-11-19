@@ -445,8 +445,32 @@ public sealed class ObjectSettingsView : UserControl
         ParamKind.File => Labeled(Caption(slot, p.Name), BuildFile(slot, p)),
         ParamKind.Font => Labeled(Caption(slot, p.Name), BuildFont(slot, p)),
         ParamKind.MultilineText => BuildMultiline(slot, p),
-        _ => p.Key == "scene" ? Labeled(Caption(slot, p.Name), BuildScene(slot, p)) : Labeled(Caption(slot, p.Name), BuildText(slot, p, false)),
+        _ => p.Key == "scene" ? Labeled(Caption(slot, p.Name), BuildScene(slot, p))
+           : p.Key == "hide" ? BuildHiddenParts(slot, p)
+           : Labeled(Caption(slot, p.Name), BuildText(slot, p, false)),
     };
+
+    /// <summary>ベクター画像の「非表示にする部品 (id)」。SVG のときだけ出し、SVG にある id を説明に出す。</summary>
+    private Control BuildHiddenParts(Slot slot, ParamDefinition p)
+    {
+        var box = BuildText(slot, p, false);
+        var row = Labeled(Caption(slot, p.Name), box);
+        string? lastFile = null;
+        _refreshers.Add(() =>
+        {
+            var e = slot.Effect(); if (e == null) return;
+            var file = e.GetString("file");
+            bool svg = e.DefinitionId != EffectRegistry.Vector || VectorFiles.IsSvg(file);
+            row.IsVisible = svg;
+            if (!svg || file == lastFile) return;
+            lastFile = file;
+            List<string> ids;
+            try { ids = File.Exists(file) ? VectorFiles.SvgIds(File.ReadAllText(file)) : new(); }
+            catch (IOException) { ids = new(); }
+            ToolTip.SetTip(box, ids.Count == 0 ? L.T("SVG の要素の id をカンマ区切りで書きます") : L.Verbatim(L.T("この SVG にある id:") + "\n" + string.Join(", ", ids.Take(60))));
+        });
+        return row;
+    }
 
     /// <summary>複数行のテキスト。テンプレートの項目では、名前がわかるよう見出しを付ける。</summary>
     private Control BuildMultiline(Slot slot, ParamDefinition p)

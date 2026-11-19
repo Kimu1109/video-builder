@@ -55,17 +55,16 @@ public static class MediaImport
     /// <summary>Lottie (JSON) のアニメーションの長さ (秒)。Lottie でなければ null。</summary>
     public static double? LottieSeconds(string path)
     {
-        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) return null;
+        if (!VectorFiles.IsLottie(path)) return null;
         try
         {
-            using var fs = File.OpenRead(path);
-            using var doc = System.Text.Json.JsonDocument.Parse(fs);
+            using var doc = System.Text.Json.JsonDocument.Parse(VectorFiles.ReadText(path));
             var root = doc.RootElement;
             if (!root.TryGetProperty("fr", out var fr) || !root.TryGetProperty("op", out var op)) return null;
             double ip = root.TryGetProperty("ip", out var ipEl) ? ipEl.GetDouble() : 0;
             double rate = fr.GetDouble(), frames = op.GetDouble() - ip;
             return rate > 0 && frames > 0 ? frames / rate : null;
         }
-        catch (Exception e) when (e is IOException or System.Text.Json.JsonException or InvalidOperationException or UnauthorizedAccessException) { return null; }
+        catch (Exception e) when (e is IOException or System.Text.Json.JsonException or InvalidOperationException or UnauthorizedAccessException or InvalidDataException) { return null; }
     }
 }
