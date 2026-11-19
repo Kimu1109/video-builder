@@ -218,7 +218,7 @@ public sealed class MainWindow : Window
                 if (_xdnd != null)
                 {
                     _xdnd.Moved += (w, x, y) => Avalonia.Threading.Dispatcher.UIThread.Post(() => OnExternalDrag(w, x, y, null));
-                    _xdnd.Left += _ => Avalonia.Threading.Dispatcher.UIThread.Post(() => Timeline.Canvas.ShowDropTarget(null));
+                    _xdnd.Left += _ => Avalonia.Threading.Dispatcher.UIThread.Post(() => { Timeline.Canvas.ShowDropTarget(null); FileDropZone.Highlight(null); });
                     _xdnd.Dropped += (w, x, y, files) => Avalonia.Threading.Dispatcher.UIThread.Post(() => OnExternalDrag(w, x, y, files));
                 }
             }
@@ -237,6 +237,13 @@ public sealed class MainWindow : Window
         {
             // X11 の位置は物理ピクセルなので、画面の拡大率で割って Avalonia の座標にする
             var p = new Point(x / window.RenderScaling, y / window.RenderScaling);
+            // プロパティのファイルの欄などの上なら、そちらに渡す
+            if (FileDropZone.HandleExternal(window, p, files))
+            {
+                canvas.ShowDropTarget(null);
+                if (files != null) window.Activate();
+                return;
+            }
             if (canvas.IsEffectivelyVisible && window.TranslatePoint(p, canvas) is { } c && new Rect(canvas.Bounds.Size).Contains(c)) onCanvas = c;
         }
         if (files == null) { canvas.ShowDropTarget(onCanvas); return; }

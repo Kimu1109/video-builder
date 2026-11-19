@@ -509,5 +509,16 @@ internal static class TranslationsEn
         ("色 8", "Color 8"),
         ("ファイルの色に戻す", "Reset to the file's color"),
         (" (ファイルの色)", " (file color)"),
+        ("テンプレートの項目を編集", "Edit template items"),
+        ("テンプレートの項目を編集...", "Edit template items..."),
+        ("テンプレートの項目を編集 (並べ替え・グループ・表示名)", "Edit template items (order, groups, names)"),
+        ("テンプレートの項目の編集", "Edit template items"),
+        ("グループ", "Group"),
+        ("パラメータ", "Parameter"),
+        ("公開をやめる", "Stop exposing"),
+        ("公開している項目はありません。", "No items are exposed."),
+        ("(見つかりません)", "(not found)"),
+        ("同じグループの項目は、プロパティでまとめて小見出しの下に並びます (グループの順は、それぞれの最初の項目の順)。", "Items in the same group are listed together under a heading in the properties (groups appear in the order of their first item)."),
+        ("ファイルを選択 (ファイルをドロップしても差し替えられます)", "Choose a file (you can also drop a file here)"),
     };
 }

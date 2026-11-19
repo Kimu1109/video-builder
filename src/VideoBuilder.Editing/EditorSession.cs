@@ -394,6 +394,22 @@ public sealed class EditorSession
         });
     }
 
+    /// <summary>
+    /// シーンの公開項目を items に置き換える (並べ替え・グループ・表示名の変更・削除)。
+    /// 同じグループの項目はまとめる。1 回で取り消せる。
+    /// </summary>
+    public void ReplaceExposed(string sceneId, IEnumerable<ExposedParam> items)
+    {
+        var scene = Project.FindScene(sceneId);
+        if (scene == null) return;
+        var list = ExposedParam.GroupTogether(items.Select(x => x.Clone()));
+        Edit("テンプレートの項目の編集", () =>
+        {
+            var target = Project.FindScene(sceneId)!;
+            target.Exposed = list.Count == 0 ? null : list;
+        });
+    }
+
     /// <summary>選んだオブジェクトにスタイルを当てる。当てた数を返す。</summary>
     public int ApplyStyle(EffectStyle style)
     {

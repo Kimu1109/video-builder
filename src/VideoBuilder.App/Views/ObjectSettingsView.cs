@@ -138,7 +138,7 @@ public sealed class ObjectSettingsView : UserControl
     private string ExposedSignature(TimelineObject o)
     {
         if (ExposedOf(o) is not { } x) return "";
-        return string.Join(";", x.Items.Select(i => i.Resolve(x.Scene) is { } r ? $"{r.Effect.DefinitionId}/{r.Param.Key}/{i.Label}" : "-"));
+        return string.Join(";", x.Items.Select(i => i.Resolve(x.Scene) is { } r ? $"{r.Effect.DefinitionId}/{r.Param.Key}/{i.Label}/{i.Group}" : "-"));
     }
 
     private Slot ExposedSlot(int index)
@@ -168,12 +168,26 @@ public sealed class ObjectSettingsView : UserControl
     {
         if (ExposedOf(o) is not { } x) return null;
         var rows = new StackPanel { Margin = new Thickness(8, 4, 18, 8), Spacing = 2 };
+        string? group = null;
         for (int i = 0; i < x.Items.Count; i++)
         {
             if (x.Items[i].Resolve(x.Scene) is not { } r) continue;
+            // グループが変わる所に小見出しを出す (グループなしの項目には出さない)
+            var g = x.Items[i].Group;
+            if (g != group && g.Length > 0)
+            {
+                var sub = new TextBlock { Text = g, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, group == null ? 0 : 8, 0, 2) };
+                sub.Classes.Add("secondary");
+                rows.Children.Add(sub);
+            }
+            group = g;
             rows.Children.Add(BuildParam(ExposedSlot(i), Relabel(r.Param, x.Items[i].Label)));
         }
         var head = new DockPanel { Margin = new Thickness(4, 0, 16, 0), Height = 24 };
+        var edit = new IconButton("Tune", "テンプレートの項目を編集 (並べ替え・グループ・表示名)");
+        edit.Click += (_, _) => { if (ExposedOf(Target) is { } cur) _ = EditExposedAsync(cur.Scene.Id); };
+        DockPanel.SetDock(edit, Dock.Right);
+        head.Children.Add(edit);
         var icon = new Icon("Template", 14) { Margin = new Thickness(26, 0, 6, 0) };
         DockPanel.SetDock(icon, Dock.Left);
         head.Children.Add(icon);
@@ -215,9 +229,25 @@ public sealed class ObjectSettingsView : UserControl
                     if (label != null && Target is { } t) _session.SetExposed(t, effectIndex, p.Key, label.Trim());
                 }));
             }
+            if (_session.Scene.Exposed is { Count: > 0 })
+            {
+                menu.Items.Add(Menus.Sep());
+                menu.Items.Add(Menus.Item("テンプレートの項目を編集...", "Tune", () => _ = EditExposedAsync(_session.Scene.Id)));
+            }
             menu.Open(row);
         };
         return row;
+    }
+
+    /// <summary>シーンの公開項目の並べ替え・グループ・表示名・削除のダイアログを開く。</summary>
+    private async Task EditExposedAsync(string sceneId)
+    {
+        if (TopLevel.GetTopLevel(this) is not Window w) return;
+        var scene = _session.Project.FindScene(sceneId);
+        if (scene?.Exposed is not { Count: > 0 }) return;
+        var d = new ExposedItemsDialog(scene);
+        await d.ShowDialog(w);
+        if (d.Result != null) _session.ReplaceExposed(sceneId, d.Result);
     }
 
     // ---------------- スタイル ----------------
@@ -686,7 +716,14 @@ public sealed class ObjectSettingsView : UserControl
         DockPanel.SetDock(browse, Dock.Right);
         dock.Children.Add(browse);
         dock.Children.Add(box);
-        return dock;
+        // ほかのアプリからファイルをドロップして差し替えられる。ドラッグ中は枠をアクセントカラーにする
+        var zone = new Border { Child = dock, BorderThickness = new Thickness(1), BorderBrush = Brushes.Transparent };
+        FileDropZone.Attach(zone,
+            path => p.FileExtensions.Length == 0 || p.FileExtensions.Contains(Path.GetExtension(path).TrimStart('.').ToLowerInvariant()),
+            path => SetValue(slot, p.Key, path),
+            on => zone.BorderBrush = on ? Svc.Brush("Accent") : Brushes.Transparent);
+        ToolTip.SetTip(browse, L.T("ファイルを選択 (ファイルをドロップしても差し替えられます)"));
+        return zone;
     }
 
     private static IReadOnlyList<string>? _fonts;

@@ -296,3 +296,90 @@ public sealed class TemplateLibraryDialog : DialogBase
         Reload();
     }
 }
+
+/// <summary>シーンの公開項目の編集: 表示名・グループ・並び順・削除。</summary>
+public sealed class ExposedItemsDialog : DialogBase
+{
+    /// <summary>OK を押したときの並び (同じグループの項目をまとめる前)。キャンセルなら null。</summary>
+    public List<ExposedParam>? Result { get; private set; }
+
+    private readonly Scene _scene;
+    private readonly List<ExposedParam> _items;
+    private readonly StackPanel _rows = new() { Spacing = 4 };
+
+    public ExposedItemsDialog(Scene scene) : base("テンプレートの項目を編集", 640)
+    {
+        _scene = scene;
+        _items = (scene.Exposed ?? new()).Select(x => x.Clone()).ToList();
+
+        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("160,140,*,Auto") };
+        void Col(string text, int col)
+        {
+            var t = new TextBlock { Text = text, Margin = new Thickness(2, 0) };
+            t.Classes.Add("secondary");
+            Grid.SetColumn(t, col);
+            header.Children.Add(t);
+        }
+        Col("表示名", 0); Col("グループ", 1); Col("パラメータ", 2);
+        Body.Children.Add(header);
+        Body.Children.Add(new ScrollViewer { Content = _rows, MaxHeight = 360, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled });
+        var note = new TextBlock { Text = "同じグループの項目は、プロパティでまとめて小見出しの下に並びます (グループの順は、それぞれの最初の項目の順)。", TextWrapping = TextWrapping.Wrap };
+        note.Classes.Add("secondary");
+        Body.Children.Add(note);
+        Fill();
+
+        AddButton("キャンセル", Close);
+        AddButton("OK", () => { Result = _items.Select(x => x.Clone()).ToList(); Close(); }, accent: true);
+    }
+
+    private void Fill()
+    {
+        _rows.Children.Clear();
+        var groups = _items.Select(x => x.Group).Where(g => g.Length > 0).Distinct().ToList();
+        for (int i = 0; i < _items.Count; i++)
+        {
+            int index = i;
+            var item = _items[i];
+            var label = new TextBox { Text = item.Label, Margin = new Thickness(0, 0, 4, 0) };
+            label.TextChanged += (_, _) => item.Label = label.Text?.Trim() ?? "";
+            var group = new AutoCompleteBox { Text = item.Group, ItemsSource = groups, FilterMode = AutoCompleteFilterMode.StartsWith, MinimumPrefixLength = 0, Watermark = "(なし)", Margin = new Thickness(0, 0, 4, 0) };
+            group.TextChanged += (_, _) => item.Group = group.Text?.Trim() ?? "";
+            var where = new TextBlock { Text = Describe(item), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(4, 0) };
+            where.Classes.Add("secondary");
+            ToolTip.SetTip(where, where.Text);
+            var buttons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Children =
+                {
+                    new IconButton("ArrowUp", "上へ", () => Move(index, -1)) { IsEnabled = index > 0 },
+                    new IconButton("ArrowDown", "下へ", () => Move(index, 1)) { IsEnabled = index < _items.Count - 1 },
+                    new IconButton("Delete", "公開をやめる", () => { _items.RemoveAt(index); Fill(); }),
+                },
+            };
+            var row = new Grid { ColumnDefinitions = new ColumnDefinitions("160,140,*,Auto") };
+            Grid.SetColumn(group, 1); Grid.SetColumn(where, 2); Grid.SetColumn(buttons, 3);
+            row.Children.Add(label); row.Children.Add(group); row.Children.Add(where); row.Children.Add(buttons);
+            _rows.Children.Add(row);
+        }
+        if (_items.Count == 0)
+        {
+            var empty = new TextBlock { Text = "公開している項目はありません。" };
+            empty.Classes.Add("secondary");
+            _rows.Children.Add(empty);
+        }
+    }
+
+    private void Move(int index, int direction)
+    {
+        int j = index + direction;
+        if (j < 0 || j >= _items.Count) return;
+        (_items[index], _items[j]) = (_items[j], _items[index]);
+        Fill();
+    }
+
+    private string Describe(ExposedParam x) =>
+        x.Resolve(_scene) is { } r
+            ? $"{TimelineCanvas.ObjectLabel(r.Object)} › {L.T(r.Effect.Definition.Name)} › {L.T(r.Param.Name)}"
+            : L.T("(見つかりません)");
+}

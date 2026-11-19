@@ -49,8 +49,21 @@ public sealed class ExposedParam
     public int Effect { get; set; }
     public string Key { get; set; } = "";
     public string Label { get; set; } = "";
+    /// <summary>グループ名 (プロパティで小見出しを付けてまとめる)。空ならグループなし。</summary>
+    public string Group { get; set; } = "";
 
     public ExposedParam Clone() => (ExposedParam)MemberwiseClone();
+
+    /// <summary>
+    /// 同じグループの項目を、そのグループが最初に出てくる位置にまとめる。
+    /// グループの順はそれぞれの最初の項目の順、グループの中の順は元の並びのまま。
+    /// </summary>
+    public static List<ExposedParam> GroupTogether(IEnumerable<ExposedParam> items)
+    {
+        var list = items.ToList();
+        var groups = list.Select(x => x.Group).Distinct().ToList();
+        return groups.SelectMany(g => list.Where(x => x.Group == g)).ToList();
+    }
 
     public bool SameTarget(ExposedParam other) => ObjectId == other.ObjectId && Effect == other.Effect && Key == other.Key;
 

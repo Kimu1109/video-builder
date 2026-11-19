@@ -198,6 +198,44 @@ public class TemplateTests : IDisposable
     }
 
     [Fact]
+    public void Exposed_items_are_reordered_grouped_and_kept_in_templates()
+    {
+        var s = new EditorSession();
+        var scene = s.AddScene();
+        var a = s.AddObject(EffectRegistry.Text, 0, 0, 30)!;
+        var b = s.AddObject(EffectRegistry.Shape, 1, 0, 30)!;
+        s.SetExposed(a, 0, "text", "本文");
+        s.SetExposed(a, 0, "color", "文字の色");
+        s.SetExposed(b, 0, "color", "帯の色");
+        var items = scene.Exposed!.Select(x => x.Clone()).ToList();
+        // 「色」グループを作り、本文を最後にする。グループの項目は最初に出てくる位置にまとまる
+        items[1].Group = "色"; items[2].Group = "色";
+        var reordered = new List<ExposedParam> { items[1], items[0], items[2] };
+        s.ReplaceExposed(scene.Id, reordered);
+        Assert.Equal(new[] { "文字の色", "帯の色", "本文" }, s.Scene.Exposed!.Select(x => x.Label).ToArray());
+        Assert.Equal(new[] { "色", "色", "" }, s.Scene.Exposed!.Select(x => x.Group).ToArray());
+
+        // 1 回で取り消せる
+        s.Undo();
+        Assert.Equal(new[] { "本文", "文字の色", "帯の色" }, s.Scene.Exposed!.Select(x => x.Label).ToArray());
+        s.Redo();
+
+        // テンプレートにしても並びとグループが残る
+        s.SwitchScene("root");
+        var so = s.AddObject(EffectRegistry.SceneRef, 0, 0, 30, o => o.Main.Values["scene"] = scene.Id)!;
+        var pkg = TemplatePackage.Create(s.Project, new[] { so }, new TemplateOptions { Name = "並び" });
+        var path = Path.Combine(_dir, "order" + TemplatePackage.Extension);
+        pkg.Save(path);
+        var inst = TemplatePackage.Load(path).Instantiate(new Project(), Path.Combine(_dir, "assets"), TemplateInsertMode.Scene);
+        Assert.Equal(new[] { "色/文字の色", "色/帯の色", "/本文" }, inst.Scenes[0].Exposed!.Select(x => x.Group + "/" + x.Label).ToArray());
+
+        // 全部消すと null になる
+        s.ReplaceExposed(scene.Id, Array.Empty<ExposedParam>());
+        Assert.Null(s.Project.FindScene(scene.Id)!.Exposed);
+        Assert.Equal(new[] { "b", "b", "a", "c" }, ExposedParam.GroupTogether(new[] { "b", "a", "b", "c" }.Select(g => new ExposedParam { Group = g })).Select(x => x.Group).ToArray());
+    }
+
+    [Fact]
     public void Legacy_presets_are_listed_and_expanded()
     {
         var legacyDir = Path.Combine(_dir, "aliases");

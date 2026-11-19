@@ -628,6 +628,87 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public void Template_items_are_grouped_reordered_and_files_are_dropped_on_them()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-ui-drop-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string Png(string name)
+            {
+                var path = Path.Combine(dir, name);
+                using var bmp = new SkiaSharp.SKBitmap(4, 4);
+                using var data = bmp.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100);
+                File.WriteAllBytes(path, data.ToArray());
+                return path;
+            }
+            var scene = s.AddScene();
+            var text = s.AddObject(EffectRegistry.Text, 0, 0, 60)!;
+            var image = s.AddObject(EffectRegistry.Image, 1, 0, 60, o => o.Main.Values["file"] = Png("logo.png"))!;
+            s.SetExposed(text, 0, "text", "名前");
+            s.SetExposed(image, 0, "file", "ロゴ");
+            s.SetExposed(text, 0, "color", "文字色");
+            s.SwitchScene("root");
+            var so = s.AddObject(EffectRegistry.SceneRef, 0, 0, 60, o => o.Main.Values["scene"] = scene.Id)!;
+            Pump();
+
+            // 編集のダイアログ: 1 行目 (名前) を下へ、文字色をグループ「文字」に
+            var d = new ExposedItemsDialog(s.Project.FindScene(scene.Id)!);
+            d.Show(w);
+            Pump();
+            // 各行のボタンは 上へ・下へ・削除 の順。1 行目の「上へ」は使えないので、最初に使えるボタンが 1 行目の「下へ」
+            d.GetVisualDescendants().OfType<IconButton>().First(b => b.IsEnabled)
+                .RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+            Pump();
+            var groups = d.GetVisualDescendants().OfType<AutoCompleteBox>().ToList();
+            Assert.Equal(3, groups.Count);
+            groups[0].Text = "文字";   // 並べ替えたあとの 1 行目 = ロゴ
+            groups[2].Text = "文字";   // 3 行目 = 文字色
+            Shot(d, "exposed-items-dialog");
+            d.GetVisualDescendants().OfType<Button>().Single(b => b.Content as string == L.T("OK"))
+                .RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+            Pump();
+            Assert.NotNull(d.Result);
+            s.ReplaceExposed(scene.Id, d.Result!);
+            Assert.Equal(new[] { "文字/ロゴ", "文字/文字色", "/名前" }, s.Project.FindScene(scene.Id)!.Exposed!.Select(x => x.Group + "/" + x.Label).ToArray());
+
+            // プロパティにはグループの小見出しが出る
+            s.Select(so.Id);
+            Pump();
+            var settings = w.GetVisualDescendants().OfType<ObjectSettingsView>().Single();
+            var texts = settings.GetVisualDescendants().OfType<TextBlock>().Where(t => t.IsEffectivelyVisible).Select(t => t.Text).ToList();
+            Assert.Contains("文字", texts);
+
+            // ロゴの欄にファイルをドロップすると差し替わる (X11 の受け取り口と同じ道筋)
+            var fileBox = settings.GetVisualDescendants().OfType<TextBox>().First(b => b.Text == "logo.png" && b.IsEffectivelyVisible);
+            var point = fileBox.TranslatePoint(new Point(fileBox.Bounds.Width / 2, fileBox.Bounds.Height / 2), w)!.Value;
+            // 当たり判定は描いた画面で行うので、いまの配置を 1 回描いておく (実際のアプリでは常に描かれている)
+            w.CaptureRenderedFrame()?.Dispose();
+            Assert.True(FileDropZone.HandleExternal(w, point, null));        // ドラッグ中: 欄の上
+            var other = Png("other.png");
+            Assert.True(FileDropZone.HandleExternal(w, point, new[] { Path.Combine(dir, "memo.txt"), other }));
+            Pump();
+            var inner = s.Project.FindScene(scene.Id)!.Objects.Single(o => o.Main.DefinitionId == EffectRegistry.Image);
+            Assert.Equal(other, inner.Main.GetString("file"));
+            // 合わないファイルだけなら何もしない (タイムラインにも置かない)
+            int count = s.Scene.Objects.Count;
+            Assert.True(FileDropZone.HandleExternal(w, point, new[] { Path.Combine(dir, "memo.txt") }));
+            Assert.Equal(other, s.Project.FindScene(scene.Id)!.Objects.Single(o => o.Main.DefinitionId == EffectRegistry.Image).Main.GetString("file"));
+            Assert.Equal(count, s.Scene.Objects.Count);
+            // 取り消せる
+            s.Undo();
+            Assert.EndsWith("logo.png", s.Project.FindScene(scene.Id)!.Objects.Single(o => o.Main.DefinitionId == EffectRegistry.Image).Main.GetString("file"));
+            // ファイルの欄以外 (タイムライン) の上では受け取らない
+            var canvasPoint = w.Timeline.Canvas.TranslatePoint(new Point(200, 40), w)!.Value;
+            Assert.False(FileDropZone.HandleExternal(w, canvasPoint, null));
+            Shot(w, "exposed-groups");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    [AvaloniaFact]
     public void Style_is_saved_and_applied_to_the_selection()
     {
         Open();
