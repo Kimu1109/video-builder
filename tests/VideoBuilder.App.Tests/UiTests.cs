@@ -38,6 +38,15 @@ public static class TestApp
 
 public class UiTests
 {
+    /// <summary>画面のキャプチャの、ウィンドウ座標 p のピクセル (BGRA)。</summary>
+    private static unsafe Color ScreenPixel(Avalonia.Media.Imaging.WriteableBitmap shot, Point p)
+    {
+        using var fb = shot.Lock();
+        int x = Math.Clamp((int)p.X, 0, fb.Size.Width - 1), y = Math.Clamp((int)p.Y, 0, fb.Size.Height - 1);
+        byte* px = (byte*)fb.Address + (long)y * fb.RowBytes + x * 4;
+        return fb.Format == Avalonia.Platform.PixelFormat.Rgba8888 ? Color.FromArgb(px[3], px[0], px[1], px[2]) : Color.FromArgb(px[3], px[2], px[1], px[0]);
+    }
+
     private static MainWindow? _window;
 
     /// <summary>テスト間でウィンドウを使い回し、プロジェクトだけ新しくする。</summary>
@@ -270,6 +279,14 @@ public class UiTests
         preview.InvalidateVisual();
         w.CaptureRenderedFrame()?.Dispose();    // 描画して、表示位置を確定させる
         var c = preview.TranslatePoint(new Point(preview.Bounds.Width / 2, preview.Bounds.Height / 2), w)!.Value;
+        // 画面に出たプレビュー (描画のスレッドのフレームを、複製せずにそのまま描いたもの) も赤い
+        preview.InvalidateVisual();
+        using (var shot = w.CaptureRenderedFrame())
+        {
+            Assert.NotNull(shot);
+            var px = ScreenPixel(shot!, c);
+            Assert.True(px.R > 200 && px.G < 60 && px.B < 60, $"画面のプレビューが赤くない: {px}");
+        }
         w.MouseDown(c, MouseButton.Left);
         w.MouseMove(new Point(c.X + 5, c.Y));
         w.MouseMove(new Point(c.X + 50, c.Y + 20));

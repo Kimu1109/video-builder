@@ -25,6 +25,10 @@ public sealed class MediaCache : IDisposable
         public Task? Pending;
         /// <summary>先読みしている位置 (秒)。</summary>
         public double PendingPosition;
+        /// <summary>直前の Fetch で取り出したフレーム (デコーダの置き場)。取り出せなければ IntPtr.Zero。</summary>
+        public IntPtr Data;
+        /// <summary>直前の Fetch で、前の画像が指していた置き場の中身が失われた (zeroCopy で取り出しに失敗した)。</summary>
+        public bool Lost;
     }
 
     // デコーダはファイルごとに持ち、オブジェクトには描画のたびに「いちばん都合のよいもの」を貸す。
@@ -44,7 +48,20 @@ public sealed class MediaCache : IDisposable
     /// 動画フレームを複製せず、デコーダのバッファを直接指す画像を作る。
     /// 画像は「次のフレームを取り出すまで」しか正しくないので、すぐに描き切る CPU 描画でだけ使う。
     /// </param>
-    public MediaCache(bool zeroCopy = false) => _zeroCopy = zeroCopy;
+    /// <param name="gpu">
+    /// GPU 描画のときのコンテキスト。動画のフレームを、デコーダの置き場から直接 GPU に送る
+    /// (メモリ上で複製してから送るより 1 回少ない)。描画のスレッドからだけ使う。
+    /// </param>
+    public MediaCache(bool zeroCopy = false, GRContext? gpu = null)
+    {
+        _zeroCopy = zeroCopy;
+        _gpu = gpu;
+    }
+
+    private readonly GRContext? _gpu;
+
+    /// <summary>今の描画が GPU で描かれるか (GPU の描画先を作れずに CPU で描くときは false にして、GPU へ送らない)。</summary>
+    public bool DrawingOnGpu { get; set; } = true;
 
     /// <summary>プレビュー用: プロキシがあれば元の動画の代わりに使う。</summary>
     public bool UseProxies { get; set; }
@@ -76,7 +93,8 @@ public sealed class MediaCache : IDisposable
         scale = 1;
         seconds = Wrap(path, seconds, loop);
         var e = Acquire(key, EffectivePath(path, seconds), path, seconds);
-        var image = e == null ? null : Decode(e, seconds, detail, path);
+        if (e != null) Fetch(e, seconds, detail, path);
+        var image = e == null ? null : ImageOf(e);
         if (image != null) scale = OriginalWidth(e!, path) / (float)image.Width;
         return image;
     }
@@ -126,8 +144,10 @@ public sealed class MediaCache : IDisposable
             var e = Acquire(key, EffectivePath(path, seconds), path, seconds);
             if (e?.Reader != null && jobs.All(j => !ReferenceEquals(j.Entry, e))) jobs.Add((e, seconds, false, detail, path));
         }
-        if (jobs.Count == 1) Decode(jobs[0].Entry, jobs[0].Seconds, jobs[0].Detail, jobs[0].Original);
-        else if (jobs.Count >= 2) Parallel.ForEach(jobs, job => Decode(job.Entry, job.Seconds, job.Detail, job.Original));
+        // デコードは並列に、画像を作る (GPU なら送る) のはこのスレッドで (GPU のコンテキストはこのスレッドのもの)
+        if (jobs.Count == 1) Fetch(jobs[0].Entry, jobs[0].Seconds, jobs[0].Detail, jobs[0].Original);
+        else if (jobs.Count >= 2) Parallel.ForEach(jobs, job => Fetch(job.Entry, job.Seconds, job.Detail, job.Original));
+        foreach (var job in jobs) ImageOf(job.Entry);
     }
 
     /// <summary>最後に取り出した動画フレームの大きさ (縮めてデコードしたときは縮めた大きさ。計測・テスト用)。</summary>
@@ -251,29 +271,59 @@ public sealed class MediaCache : IDisposable
         }
     }
 
-    private SKImage? Decode(VideoEntry e, double seconds, float detail = 1, string? original = null)
+    /// <summary>デコーダから seconds のフレームを取り出す (Data に入れる)。どのスレッドからでもよい (1 つの entry を同時に使わなければ)。</summary>
+    private void Fetch(VideoEntry e, double seconds, float detail = 1, string? original = null)
     {
         var r = e.Reader;
-        if (r == null) return null;
         // 先読み中のデコーダには触らない (この描画のフレームは、先読みを始める前に取り出してある)
-        if (e.Pending != null) return e.Image;
+        if (r == null || e.Pending != null) { e.Data = IntPtr.Zero; e.Lost = false; return; }
         e.Position = seconds;
         r.OutputDivisor = DivisorFor(e, original ?? e.Path, detail);
         long before = r.CurrentFrameId;
-        var data = r.GetFramePointer(seconds);
-        if (data == IntPtr.Zero) return _zeroCopy && r.CurrentFrameId != before ? null : e.Image;
+        e.Data = r.GetFramePointer(seconds);
+        e.Lost = e.Data == IntPtr.Zero && _zeroCopy && r.CurrentFrameId != before;
+    }
+
+    /// <summary>直前の Fetch で取り出したフレームの画像を返す (同じフレームなら前の画像)。描画のスレッドから呼ぶ。</summary>
+    private SKImage? ImageOf(VideoEntry e)
+    {
+        var r = e.Reader;
+        if (r == null) return null;
+        if (e.Data == IntPtr.Zero) return e.Lost ? null : e.Image;
         if (e.Image == null || e.FrameId != r.CurrentFrameId || e.Image.Width != r.FrameWidth || e.Image.Height != r.FrameHeight)
         {
             // zeroCopy の古い画像は、デコーダの置き場を指しているだけなので、取り出した後に手放してよい
             e.Image?.Dispose();
             var info = new SKImageInfo(r.FrameWidth, r.FrameHeight, SKColorType.Bgra8888, SKAlphaType.Opaque);
-            e.Image = _zeroCopy
-                ? SKImage.FromPixels(info, data, r.FrameWidth * 4)
-                : SKImage.FromPixelCopy(info, data, r.FrameWidth * 4);
+            e.Image = _zeroCopy ? SKImage.FromPixels(info, e.Data, r.FrameWidth * 4) : Upload(info, e.Data);
             e.FrameId = r.CurrentFrameId;
         }
+        e.Data = IntPtr.Zero;
         LastFrameSize = (e.Image.Width, e.Image.Height);
         return e.Image;
+    }
+
+    /// <summary>GPU へ送った回数 (メモリ上で複製せずに直接送ったもの。計測・テスト用)。</summary>
+    public long DirectUploads { get; private set; }
+
+    /// <summary>
+    /// フレームを、描画が終わるまで使える画像にする。GPU 描画なら、デコーダの置き場から直接 GPU のテクスチャに送る。
+    /// 送るのは Flush の中で済むので、そのあとは置き場が書き換わってもよい。GPU に送れなければ、メモリ上に複製する。
+    /// </summary>
+    private SKImage Upload(SKImageInfo info, IntPtr data)
+    {
+        if (_gpu != null && DrawingOnGpu)
+        {
+            using var view = SKImage.FromPixels(info, data, info.Width * 4);
+            var texture = view?.ToTextureImage(_gpu);
+            if (texture != null)
+            {
+                _gpu.Flush(true, false);
+                DirectUploads++;
+                return texture;
+            }
+        }
+        return SKImage.FromPixelCopy(info, data, info.Width * 4);
     }
 
     public SKImage? GetImage(string path)

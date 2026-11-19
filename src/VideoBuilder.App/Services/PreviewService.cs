@@ -231,6 +231,28 @@ public sealed class PreviewService : IDisposable
         }, DispatcherPriority.Render);
     }
 
+    /// <summary>描いたフレームがあるか。</summary>
+    public bool HasFrame { get { lock (_frameLock) return _front != null; } }
+
+    /// <summary>
+    /// 最新のフレームを canvas の dest に描く (画面の描画のスレッドから呼ばれる)。フレームを複製せずにそのまま描く。
+    /// GPU の画面なら、描き終える前にフレームが書き換わらないよう、ここで GPU へ送り終えてから戻る。
+    /// </summary>
+    public bool DrawFrame(SKCanvas canvas, SKRect dest, SKFilterQuality quality, GRContext? gpu)
+    {
+        lock (_frameLock)
+        {
+            if (_front == null) return false;
+            using var pixmap = _front.PeekPixels();
+            using var image = pixmap == null ? null : SKImage.FromPixels(pixmap);
+            if (image == null) return false;
+            using var paint = new SKPaint { FilterQuality = quality };
+            canvas.DrawImage(image, dest, paint);
+            gpu?.Flush();
+            return true;
+        }
+    }
+
     /// <summary>最新のフレームを受け取る。action の中でだけピクセルに触れる。</summary>
     public void WithFrame(Action<SKBitmap> action)
     {

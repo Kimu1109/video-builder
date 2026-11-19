@@ -4,6 +4,8 @@ using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using Avalonia.Rendering.SceneGraph;
+using Avalonia.Skia;
 using SkiaSharp;
 using VideoBuilder.App.Services;
 using VideoBuilder.Core;
@@ -13,7 +15,6 @@ namespace VideoBuilder.App.Controls;
 /// <summary>プレビュー画面。フレームの表示と、選択オブジェクトの枠・ドラッグ移動を受け持つ。</summary>
 public sealed class PreviewView : Control
 {
-    private WriteableBitmap? _bitmap;
     private Rect _dest;
 
     private bool _pressed, _dragging;
@@ -33,22 +34,28 @@ public sealed class PreviewView : Control
         Svc.Theme.Changed += InvalidateVisual;
     }
 
-    private unsafe void OnFrameReady()
+    // フレームは、描画のスレッドが描いたものを画面の描画でそのまま描く (以前は UI スレッドで WriteableBitmap に写していた)
+    private void OnFrameReady() => InvalidateVisual();
+
+    /// <summary>プレビューのフレームを Skia で直接描く (画面の描画のスレッドで動く)。</summary>
+    private sealed class FrameDrawOperation(Rect dest, Rect clip, SKFilterQuality quality) : ICustomDrawOperation
     {
-        Svc.Preview.WithFrame(src =>
+        public Rect Bounds => clip;
+        public bool HitTest(Point p) => false;
+        public bool Equals(ICustomDrawOperation? other) => false;   // フレームは毎回変わりうるので、いつも描き直す
+        public void Dispose() { }
+
+        public void Render(ImmediateDrawingContext context)
         {
-            if (_bitmap == null || _bitmap.PixelSize.Width != src.Width || _bitmap.PixelSize.Height != src.Height)
-            {
-                _bitmap?.Dispose();
-                _bitmap = new WriteableBitmap(new PixelSize(src.Width, src.Height), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Premul);
-            }
-            using var fb = _bitmap.Lock();
-            byte* s = (byte*)src.GetPixels(), d = (byte*)fb.Address;
-            int rowBytes = Math.Min(src.RowBytes, fb.RowBytes);
-            for (int y = 0; y < src.Height; y++)
-                Buffer.MemoryCopy(s + (long)y * src.RowBytes, d + (long)y * fb.RowBytes, rowBytes, rowBytes);
-        });
-        InvalidateVisual();
+            var feature = context.TryGetFeature<ISkiaSharpApiLeaseFeature>();
+            if (feature == null) return;
+            using var lease = feature.Lease();
+            var canvas = lease.SkCanvas;
+            var rect = new SKRect((float)dest.Left, (float)dest.Top, (float)dest.Right, (float)dest.Bottom);
+            if (Svc.Preview.DrawFrame(canvas, rect, quality, lease.GrContext)) return;
+            using var black = new SKPaint { Color = SKColors.Black };
+            canvas.DrawRect(rect, black);
+        }
     }
 
     public override void Render(DrawingContext context)
@@ -64,12 +71,11 @@ public sealed class PreviewView : Control
         double scaling = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1;
         Svc.Preview.DisplaySize = ((int)Math.Ceiling(w * scaling), (int)Math.Ceiling(h * scaling));
 
-        if (_bitmap != null)
+        if (Svc.Preview.HasFrame)
         {
             // 再生中は軽い補間にして、止まっているときだけ高品質にする
-            var mode = Svc.Preview.IsPlaying ? BitmapInterpolationMode.LowQuality : BitmapInterpolationMode.HighQuality;
-            using (context.PushRenderOptions(new RenderOptions { BitmapInterpolationMode = mode }))
-                context.DrawImage(_bitmap, new Rect(_bitmap.Size), _dest);
+            var quality = Svc.Preview.IsPlaying ? SKFilterQuality.Low : SKFilterQuality.High;
+            context.Custom(new FrameDrawOperation(_dest, new Rect(Bounds.Size), quality));
         }
         else context.FillRectangle(Brushes.Black, _dest);
         context.DrawRectangle(null, new Pen(Svc.Brush("Border.Default")), _dest.Inflate(0.5));

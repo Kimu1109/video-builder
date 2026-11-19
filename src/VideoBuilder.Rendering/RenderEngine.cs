@@ -21,7 +21,7 @@ public sealed class RenderEngine : IDisposable
     {
         Gpu = gpu;
         // CPU 描画では動画フレームを複製せずに使う。GPU 描画は描画が後回しになることがあるので複製する
-        Media = new MediaCache(zeroCopy: gpu == null);
+        Media = new MediaCache(zeroCopy: gpu == null, gpu: gpu?.Context);
     }
 
     /// <summary>
@@ -102,6 +102,7 @@ public sealed class RenderEngine : IDisposable
         {
             var canvas = surface.Canvas;
             Media.BeginFrame();
+            Media.DrawingOnGpu = ctx.Gpu != null;
             _frameStartTick = _tick + 1;
             LastQuads.Clear();
             canvas.ResetMatrix();
