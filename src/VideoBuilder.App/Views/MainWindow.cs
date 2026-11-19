@@ -308,6 +308,8 @@ public sealed class MainWindow : Window
             }),
             Menus.Sep(),
             Menus.Item("メディアファイルを読み込む...", "Movie", () => _ = EditorCommands.ImportFilesAsync(Timeline.LastLayer, _session.CurrentFrame)),
+            Menus.Item("字幕を読み込む...", "Title", () => _ = EditorCommands.ImportSubtitlesAsync()),
+            Menus.Item("字幕を書き出す...", "Title", () => _ = EditorCommands.ExportSubtitlesAsync()),
             Menus.Item("動画の出力...", "Output", () => _ = EditorCommands.ExportAsync(), Shortcuts.First("file.export")),
             Menus.Sep(),
             Menus.Item("終了", "Exit", Close),

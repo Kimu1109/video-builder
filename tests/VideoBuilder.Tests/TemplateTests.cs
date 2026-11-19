@@ -653,3 +653,72 @@ public class SvgColorTests : IDisposable
     }
 }
 
+public class SubtitleTests
+{
+    private const string Srt = "﻿1\r\n00:00:01,000 --> 00:00:02,500\r\n<i>こんにちは</i>\r\n世界\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,000\r\n{\\an8}次 &amp; 最後\r\n\r\n";
+    private const string Vtt = "WEBVTT\n\nNOTE comment\n\nintro\n00:01.000 --> 00:02.000 align:middle\n<v 話者>一行目\n\n00:00:05.250 --> 00:00:06.000\n二つ目\n";
+
+    [Fact]
+    public void Srt_and_vtt_are_parsed_and_tags_removed()
+    {
+        var srt = Subtitles.Parse(Srt);
+        Assert.Equal(2, srt.Count);
+        Assert.Equal(TimeSpan.FromSeconds(1), srt[0].Start);
+        Assert.Equal(TimeSpan.FromSeconds(2.5), srt[0].End);
+        Assert.Equal("こんにちは\n世界", srt[0].Text);
+        Assert.Equal("次 & 最後", srt[1].Text);
+        var vtt = Subtitles.Parse(Vtt);
+        Assert.Equal(new[] { "一行目", "二つ目" }, vtt.Select(c => c.Text).ToArray());
+        Assert.Equal(TimeSpan.FromSeconds(5.25), vtt[1].Start);
+    }
+
+    [Fact]
+    public void Writers_round_trip()
+    {
+        var cues = Subtitles.Parse(Srt);
+        var srt = Subtitles.ToSrt(cues);
+        Assert.Contains("00:00:01,000 --> 00:00:02,500", srt);
+        Assert.Equal(cues, Subtitles.Parse(srt));
+        var vtt = Subtitles.Write("a.vtt", cues);
+        Assert.StartsWith("WEBVTT", vtt);
+        Assert.Contains("00:00:03.000 --> 00:00:04.000", vtt);
+        Assert.Equal(cues, Subtitles.Parse(vtt));
+    }
+
+    [Fact]
+    public void Subtitles_become_text_objects_on_one_free_layer_and_are_exported_again()
+    {
+        var s = new EditorSession();
+        s.Project.Settings.FrameRate = "30";
+        s.AddObject(EffectRegistry.Shape, 0, 40, 10);              // レイヤー 1 は 2 つ目の字幕と重なる
+        var cues = Subtitles.Parse(Srt);
+        Assert.Equal(1, s.ImportSubtitles(cues, 0));
+        var texts = s.Scene.Objects.Where(o => o.Main.DefinitionId == EffectRegistry.Text).OrderBy(o => o.Start).ToList();
+        Assert.Equal(2, texts.Count);
+        Assert.Equal((30, 74), (texts[0].Start, texts[0].End));    // 1.0〜2.5 秒 (終わりは含まない)
+        Assert.Equal("こんにちは\n世界", texts[0].Main.GetString("text"));
+        Assert.NotNull(texts[0].FindEffect("filter.border"));
+        Assert.Equal(432, texts[0].Draw!.Tracks["y"].Values[0]);   // 下寄せ (高さ 1080 の 0.4)
+
+        var back = s.ExportSubtitles(1);
+        Assert.Equal(cues.Select(c => (c.Start, c.End, c.Text)), back.Select(c => (c.Start, c.End, c.Text)));
+        s.Undo();
+        Assert.DoesNotContain(s.Scene.Objects, o => o.Main.DefinitionId == EffectRegistry.Text);
+
+        // テキストを選んでいれば、その見た目をひな形にする
+        var style = s.AddObject(EffectRegistry.Text, 5, 0, 10)!;
+        style.Main.Values["color"] = "#FFFF00";
+        style.AddKeyFrame(5);
+        Assert.Equal(5, s.ImportSubtitles(cues, 5, style));
+        var styled = s.Scene.Objects.Where(o => o.Main.DefinitionId == EffectRegistry.Text && o.Id != style.Id).ToList();
+        Assert.All(styled, o => Assert.Equal("#FFFF00", o.Main.GetString("color")));
+        Assert.All(styled, o => Assert.Empty(o.KeyFrames));
+
+        // 重なった字幕は、前のものを次の手前で終わらせる
+        var t = new EditorSession();
+        var overlapping = new[] { new SubtitleCue(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3), "a"), new SubtitleCue(TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4), "b") };
+        Assert.Equal(0, t.ImportSubtitles(overlapping, 0));
+        Assert.Equal(new[] { (30, 59), (60, 119) }, t.Scene.Objects.OrderBy(o => o.Start).Select(o => (o.Start, o.End)).ToArray());
+    }
+}
+

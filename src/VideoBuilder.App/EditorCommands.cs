@@ -121,6 +121,45 @@ public static class EditorCommands
         if (errors.Count > 0) await ShowErrorAsync(string.Join("\n", errors));
     }
 
+    // ---------------- 字幕 ----------------
+
+    private static readonly FilePickerFileType SubtitleType = new("字幕 (SRT / WebVTT)") { Patterns = Subtitles.Extensions.Select(x => "*." + x).ToArray() };
+
+    /// <summary>字幕ファイルを読み込んで、テキストオブジェクトとして並べる。テキストを選んでいれば、その見た目をひな形にする。</summary>
+    public static async Task ImportSubtitlesAsync()
+    {
+        if (Main == null) return;
+        var files = await Main.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions { Title = "字幕を読み込む", FileTypeFilter = new[] { SubtitleType, FilePickerFileTypes.All } });
+        var path = files.FirstOrDefault()?.TryGetLocalPath();
+        if (path == null) return;
+        List<SubtitleCue> cues;
+        try { cues = Subtitles.Parse(await File.ReadAllTextAsync(path)); }
+        catch (Exception ex) { await ShowErrorAsync($"{L.Name(Path.GetFileName(path))} を開けませんでした。\n{ex.Message}"); return; }
+        if (cues.Count == 0) { await ShowErrorAsync($"字幕が見つかりません: {L.Name(Path.GetFileName(path))}"); return; }
+        var primary = Session.Primary;
+        var style = primary?.Main.DefinitionId == EffectRegistry.Text ? primary : null;
+        if (Session.ImportSubtitles(cues, primary?.Layer ?? 0, style) < 0) await ShowErrorAsync("空いているレイヤーがありません");
+    }
+
+    /// <summary>選んでいるオブジェクトのレイヤー (なければレイヤー 1) のテキストを、字幕ファイルに書き出す。</summary>
+    public static async Task ExportSubtitlesAsync()
+    {
+        if (Main == null) return;
+        int layer = Session.Primary?.Layer ?? 0;
+        var cues = Session.ExportSubtitles(layer);
+        if (cues.Count == 0) { await ShowErrorAsync($"レイヤー {layer + 1} にテキストオブジェクトがありません"); return; }
+        var file = await Main.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "字幕を書き出す", DefaultExtension = "srt",
+            SuggestedFileName = (Session.FilePath != null ? Path.GetFileNameWithoutExtension(Session.FilePath) : "subtitles") + ".srt",
+            FileTypeChoices = new[] { new FilePickerFileType("SRT") { Patterns = new[] { "*.srt" } }, new FilePickerFileType("WebVTT") { Patterns = new[] { "*.vtt" } } },
+        });
+        var path = file?.TryGetLocalPath();
+        if (path == null) return;
+        try { await File.WriteAllTextAsync(path, Subtitles.Write(path, cues), new System.Text.UTF8Encoding(false)); }
+        catch (Exception ex) { await ShowErrorAsync("字幕を書き出せませんでした。\n" + ex.Message); }
+    }
+
     public static Task ShowErrorAsync(string message) =>
         Main == null ? Task.CompletedTask : MessageDialog.Show(Main, "video-builder", message);
 

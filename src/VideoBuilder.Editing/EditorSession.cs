@@ -373,6 +373,70 @@ public sealed class EditorSession
         return added.Count;
     }
 
+    // ---------------- 字幕 ----------------
+
+    /// <summary>
+    /// 字幕を、1 つにつきテキストオブジェクト 1 つとして置く。layer から下に、すべての字幕が重ならずに入る最初のレイヤーを探す。
+    /// style (テキストオブジェクト) があれば、その見た目 (フォント・大きさ・色・位置・エフェクト) をひな形にする。
+    /// 置いたレイヤー (置けなければ -1) を返す。1 回で取り消せる。
+    /// </summary>
+    public int ImportSubtitles(IReadOnlyList<SubtitleCue> cues, int layer, TimelineObject? style = null)
+    {
+        if (cues.Count == 0) return -1;
+        var ranges = cues.Select(c =>
+        {
+            int start = Math.Max(0, Project.SecondsToFrames(c.Start.TotalSeconds));
+            int end = Math.Max(start, Project.SecondsToFrames(c.End.TotalSeconds) - 1);
+            return (Cue: c, Start: start, End: end);
+        }).OrderBy(r => r.Start).ToList();
+        // 字幕同士が重なっていたら、前の字幕を次の字幕の手前で終わらせる (1 つのレイヤーに並べるため)
+        for (int i = 0; i + 1 < ranges.Count; i++)
+            if (ranges[i].End >= ranges[i + 1].Start) ranges[i] = ranges[i] with { End = Math.Max(ranges[i].Start, ranges[i + 1].Start - 1) };
+        ranges.RemoveAll(r => ranges.Count(x => x.Start == r.Start) > 1 && ranges.First(x => x.Start == r.Start) != r);
+
+        int target = -1;
+        for (int l = Math.Max(0, layer); l < Scene.LayerCount && target < 0; l++)
+            if (ranges.All(r => Scene.IsFree(l, r.Start, r.End))) target = l;
+        if (target < 0) return -1;
+
+        var added = new List<string>();
+        Edit("字幕の読み込み", () =>
+        {
+            foreach (var r in ranges)
+            {
+                TimelineObject o;
+                if (style != null && style.Main.DefinitionId == EffectRegistry.Text)
+                {
+                    o = style.Clone(newId: true);
+                    o.GroupId = null;
+                    while (o.KeyFrames.Count > 0) o.RemoveKeyFrameAt(o.KeyFrames.Count - 1);
+                    o.Start = r.Start; o.End = r.End;
+                }
+                else
+                {
+                    o = ObjectFactory.Create(EffectRegistry.Text, target, r.Start, r.End - r.Start + 1);
+                    o.Main.Tracks["size"] = new AnimatedValue(48);
+                    o.Draw!.Tracks["y"] = new AnimatedValue(Math.Round(Project.Settings.Height * 0.4));
+                    var border = ObjectFactory.AddFilter(o, "filter.border");
+                    border.Tracks["size"] = new AnimatedValue(3);
+                }
+                o.Layer = target;
+                o.Main.Values["text"] = r.Cue.Text;
+                Scene.Objects.Add(o);
+                added.Add(o.Id);
+            }
+        });
+        SelectMany(added);
+        return target;
+    }
+
+    /// <summary>レイヤーのテキストオブジェクトを、時間順に字幕にする。</summary>
+    public List<SubtitleCue> ExportSubtitles(int layer) =>
+        Scene.Objects.Where(o => o.Layer == layer && o.Enabled && o.Main.DefinitionId == EffectRegistry.Text)
+            .OrderBy(o => o.Start)
+            .Select(o => new SubtitleCue(TimeSpan.FromSeconds(Project.FrameToSeconds(o.Start)), TimeSpan.FromSeconds(Project.FrameToSeconds(o.End + 1)), o.Main.GetString("text")))
+            .ToList();
+
     // ---------------- テンプレートの公開項目 ----------------
 
     /// <summary>今のシーンで、obj の effectIndex 番目のエフェクトの key が公開されていればその項目。</summary>

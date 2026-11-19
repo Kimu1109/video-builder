@@ -534,5 +534,14 @@ internal static class TranslationsEn
         ("共有フォルダのテンプレートは削除できません", "Templates in the shared folder cannot be deleted"),
         ("解像度に合わせる (作った解像度とプロジェクトの解像度が違うとき、位置と大きさを合わせる)", "Fit to resolution (adjust position and size when the template was made at a different resolution)"),
         ("このプロジェクト ({0} x {1}) に合わせて {2}% で入れます", "Will be inserted at {2}% to fit this project ({0} x {1})"),
+        ("字幕を読み込む...", "Import subtitles..."),
+        ("字幕を書き出す...", "Export subtitles..."),
+        ("字幕を読み込む", "Import subtitles"),
+        ("字幕を書き出す", "Export subtitles"),
+        ("字幕 (SRT / WebVTT)", "Subtitles (SRT / WebVTT)"),
+        ("字幕が見つかりません: {0}", "No subtitles found: {0}"),
+        ("レイヤー {0} にテキストオブジェクトがありません", "There are no text objects on layer {0}"),
+        ("字幕を書き出せませんでした。\n{0}", "Could not export the subtitles.\n{0}"),
+        ("字幕の読み込み", "Import subtitles"),
     };
 }
