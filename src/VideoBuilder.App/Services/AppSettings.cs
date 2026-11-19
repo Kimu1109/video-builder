@@ -43,6 +43,8 @@ public sealed class AppSettings
     public bool ShowThumbnails { get; set; } = true;
     /// <summary>共有テンプレートフォルダ (読むだけ)。空なら使わない。</summary>
     public string SharedTemplateDir { get; set; } = "";
+    /// <summary>テンプレートを入れるとき、作った解像度とプロジェクトの解像度が違えば、位置と大きさを合わせる。</summary>
+    public bool FitTemplateResolution { get; set; } = true;
 
     private static readonly JsonSerializerOptions Options = new()
     {

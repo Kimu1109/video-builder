@@ -22,7 +22,7 @@ public static class TemplateService
         catch (Exception ex) { return (false, $"テンプレートを読み込めませんでした。\n{ex.Message}"); }
         var useMode = mode ?? pkg.Meta.InsertAs;
         TemplateInstance inst;
-        try { inst = pkg.Instantiate(session.Project, Svc.Templates.AssetDirectory, useMode); }
+        try { inst = pkg.Instantiate(session.Project, Svc.Templates.AssetDirectory, useMode, Svc.Settings.FitTemplateResolution); }
         catch (Exception ex) { return (false, $"テンプレートの素材を取り出せませんでした。\n{ex.Message}"); }
         if (session.InsertTemplate(inst, layer, frame) == 0) return (false, "空いているレイヤーがありません");
 

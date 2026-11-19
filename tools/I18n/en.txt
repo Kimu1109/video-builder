@@ -528,3 +528,5 @@ video-builder テンプレート = video-builder template
 共有テンプレートフォルダが設定されていません = No shared template folder is set
 共有フォルダのテンプレートです = This template is in the shared folder
 共有フォルダのテンプレートは削除できません = Templates in the shared folder cannot be deleted
+解像度に合わせる (作った解像度とプロジェクトの解像度が違うとき、位置と大きさを合わせる) = Fit to resolution (adjust position and size when the template was made at a different resolution)
+このプロジェクト ({0} x {1}) に合わせて {2}% で入れます = Will be inserted at {2}% to fit this project ({0} x {1})

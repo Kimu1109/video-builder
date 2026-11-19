@@ -155,8 +155,8 @@ public sealed class TemplateStore
     }
 
     /// <summary>project に挿入するためのシーンとオブジェクトを作る。</summary>
-    public TemplateInstance Instantiate(TemplateEntry entry, Project project, TemplateInsertMode mode) =>
-        Load(entry).Instantiate(project, AssetDirectory, mode);
+    public TemplateInstance Instantiate(TemplateEntry entry, Project project, TemplateInsertMode mode, bool fitResolution = false) =>
+        Load(entry).Instantiate(project, AssetDirectory, mode, fitResolution);
 }
 
 /// <summary>スタイル (.vbstyle) の置き場所。</summary>

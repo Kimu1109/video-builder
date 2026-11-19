@@ -265,6 +265,40 @@ public class TemplateTests : IDisposable
     }
 
     [Fact]
+    public void Templates_are_scaled_to_the_target_resolution()
+    {
+        var s = new EditorSession();
+        s.Project.Settings.Width = 1920; s.Project.Settings.Height = 1080;
+        var t = s.AddObject(EffectRegistry.Text, 0, 0, 60)!;
+        t.Draw!.Tracks["x"] = new AnimatedValue(400);
+        t.Draw!.Tracks["y"] = new AnimatedValue(-200);
+        t.AddKeyFrame(30);
+        t.Draw!.Tracks["x"].Values[1] = 800;
+        t.Draw!.Tracks["scale"] = new AnimatedValue(100, 2);
+        var bg = s.AddObject(EffectRegistry.Shape, 1, 0, 60, o => o.Main.Values["type"] = "0")!;
+        var pkg = TemplatePackage.Create(s.Project, new[] { t, bg }, new TemplateOptions { Name = "縮小", InsertAs = TemplateInsertMode.Objects });
+
+        // 縦長 (1080x1920): 幅の比 0.5625 で縮める
+        var portrait = new Project { Settings = { Width = 1080, Height = 1920 } };
+        Assert.Equal(0.5625, pkg.ResolutionScale(portrait.Settings), 6);
+        var inst = pkg.Instantiate(portrait, Path.Combine(_dir, "a"), TemplateInsertMode.Objects, fitResolution: true);
+        var text = inst.Objects.Single(o => o.Main.DefinitionId == EffectRegistry.Text);
+        Assert.Equal(new[] { 225.0, 450.0 }, text.Draw!.Tracks["x"].Values.Take(2).ToArray());
+        Assert.Equal(-112.5, text.Draw!.Tracks["y"].Values[0]);
+        Assert.Equal(56.25, text.Draw!.Tracks["scale"].Values[0]);
+        // 4K: 2 倍
+        var uhd = new Project { Settings = { Width = 3840, Height = 2160 } };
+        var big = pkg.Instantiate(uhd, Path.Combine(_dir, "a"), TemplateInsertMode.Scene, fitResolution: true);
+        var inner = big.Scenes[0].Objects.Single(o => o.Main.DefinitionId == EffectRegistry.Text);
+        Assert.Equal(800, inner.Draw!.Tracks["x"].Values[0]);
+        // 合わせない・同じ解像度なら変えない
+        Assert.Equal(400, pkg.Instantiate(uhd, Path.Combine(_dir, "a"), TemplateInsertMode.Objects).Objects
+            .Single(o => o.Main.DefinitionId == EffectRegistry.Text).Draw!.Tracks["x"].Values[0]);
+        Assert.Equal(1, pkg.ResolutionScale(new ProjectSettings { Width = 1920, Height = 1080 }));
+        Assert.Equal(1, new TemplatePackage().ResolutionScale(uhd.Settings));   // 解像度の分からない古いテンプレート
+    }
+
+    [Fact]
     public void Legacy_presets_are_listed_and_expanded()
     {
         var legacyDir = Path.Combine(_dir, "aliases");

@@ -153,6 +153,9 @@ public sealed class TemplateLibraryDialog : DialogBase
         Body.Children.Add(top);
         Body.Children.Add(_list);
         Body.Children.Add(_detail);
+        var fit = new CheckBox { Content = "解像度に合わせる (作った解像度とプロジェクトの解像度が違うとき、位置と大きさを合わせる)", IsChecked = Svc.Settings.FitTemplateResolution };
+        fit.IsCheckedChanged += (_, _) => { Svc.Settings.FitTemplateResolution = fit.IsChecked == true; Svc.Settings.Save(); ShowDetail(); };
+        Body.Children.Add(fit);
 
         _search.TextChanged += (_, _) => Fill();
         _category.SelectionChanged += (_, _) => Fill();
@@ -247,6 +250,12 @@ public sealed class TemplateLibraryDialog : DialogBase
         double seconds = Rational.Parse(meta.FrameRate).Value is var fps and > 0 ? meta.Length / fps : 0;
         lines.Add(L.T($"長さ {seconds:0.##} 秒 ・ {meta.Width} x {meta.Height} で作成") +
                   (meta.InsertAs == TemplateInsertMode.Scene ? L.T(" ・ まとめて置く") : L.T(" ・ 展開して置く")));
+        var settings = Svc.Session.Project.Settings;
+        if (Svc.Settings.FitTemplateResolution && meta.Width > 0 && meta.Height > 0 && (meta.Width != settings.Width || meta.Height != settings.Height))
+        {
+            double k = new TemplatePackage { Meta = meta }.ResolutionScale(settings);
+            lines.Add(L.T($"このプロジェクト ({settings.Width} x {settings.Height}) に合わせて {k * 100:0.#}% で入れます"));
+        }
         var missing = TemplateService.MissingFonts(meta.Fonts);
         if (missing.Count > 0) lines.Add(L.T($"見つからないフォント: {string.Join(", ", missing)}"));
         var plugins = meta.Plugins.Where(p => !EffectRegistry.Exists(p)).ToList();

@@ -357,10 +357,15 @@ public sealed class TemplatePackage
     /// target に挿入するためのシーンとオブジェクトを作る。同梱の素材は assetRoot の下に取り出し、そのパスを参照させる。
     /// シーン・オブジェクトの ID と連結のグループは振り直す。オブジェクトは 0 レイヤー・0 フレームを左上として返す。
     /// </summary>
-    public TemplateInstance Instantiate(Project target, string assetRoot, TemplateInsertMode mode)
+    /// <param name="fitResolution">
+    /// true なら、テンプレートを作った解像度と target の解像度が違うとき、位置と大きさを合わせる (22.20.2)。
+    /// </param>
+    public TemplateInstance Instantiate(Project target, string assetRoot, TemplateInsertMode mode, bool fitResolution = false)
     {
         var inst = new TemplateInstance();
         var scenes = Scenes.Select(s => s.Clone()).ToList();
+        if (fitResolution && ResolutionScale(target.Settings) is var k && k != 1)
+            foreach (var s in scenes) ScaleScene(s, k);
 
         // 素材を取り出す
         var extracted = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -438,6 +443,45 @@ public sealed class TemplatePackage
         foreach (var id in Meta.Plugins.Concat(UsedPlugins(scenes)).Distinct())
             if (!EffectRegistry.Exists(id)) inst.MissingPlugins.Add(id);
         return inst;
+    }
+
+    /// <summary>
+    /// 作った解像度から target の解像度に合わせる倍率。幅・高さの比の小さいほう (はみ出さない)。
+    /// 解像度が分からない (古いテンプレート) ・同じときは 1。
+    /// </summary>
+    public double ResolutionScale(ProjectSettings target)
+    {
+        if (Meta.Width <= 0 || Meta.Height <= 0 || target.Width <= 0 || target.Height <= 0) return 1;
+        if (Meta.Width == target.Width && Meta.Height == target.Height) return 1;
+        return Math.Min((double)target.Width / Meta.Width, (double)target.Height / Meta.Height);
+    }
+
+    // 倍率をかけるパラメータ (位置と大きさ)
+    private static readonly Dictionary<string, string[]> ScaledParams = new()
+    {
+        [EffectRegistry.StandardDraw] = new[] { "x", "y", "z", "scale" },
+        [EffectRegistry.GroupControl] = new[] { "x", "y", "scale" },
+        [EffectRegistry.CameraControl] = new[] { "x", "y", "z", "tx", "ty", "tz" },
+    };
+
+    /// <summary>シーンの中の位置と大きさを k 倍する (キーフレームの値ごと)。</summary>
+    public static void ScaleScene(Scene scene, double k)
+    {
+        foreach (var o in scene.Objects)
+        foreach (var e in o.Effects)
+        {
+            if (!ScaledParams.TryGetValue(e.DefinitionId, out var keys)) continue;
+            foreach (var key in keys)
+            {
+                if (!e.Tracks.TryGetValue(key, out var v)) continue;
+                var def = e.Definition.Find(key);
+                for (int i = 0; i < v.Values.Count; i++)
+                {
+                    double x = v.Values[i] * k;
+                    v.Values[i] = def == null ? x : Math.Round(Math.Clamp(x, def.Min, def.Max), def.Decimals);
+                }
+            }
+        }
     }
 
     /// <summary>素材を assetRoot/&lt;ハッシュ&gt;/&lt;元のファイル名&gt; に取り出す。取り出し済みならそれを使う。</summary>
