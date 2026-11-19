@@ -6,5 +6,7 @@
     <PackageReference Include="MoonSharp" />
     <PackageReference Include="SkiaSharp" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
+    <PackageReference Include="SkiaSharp.Skottie" />
+    <PackageReference Include="Svg.Skia" />
   </ItemGroup>
 </Project>

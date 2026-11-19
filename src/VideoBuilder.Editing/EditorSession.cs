@@ -330,38 +330,78 @@ public sealed class EditorSession
     /// オブジェクトの並びを、相対位置を保ったまま layer / frame を左上として追加する。
     /// 重なる場合は、置けるところまで下のレイヤーにずらす。追加できた数を返す。
     /// </summary>
-    public int Insert(IReadOnlyList<TimelineObject> sources, int layer, int frame, string description)
+    public int Insert(IReadOnlyList<TimelineObject> sources, int layer, int frame, string description) =>
+        Insert(sources, layer, frame, description, null);
+
+    /// <summary>
+    /// テンプレートを挿入する。足すシーンとオブジェクトの追加を 1 回の取り消しにまとめる。
+    /// 置ける場所がなければ何もせず 0 を返す。
+    /// </summary>
+    public int InsertTemplate(TemplateInstance instance, int layer, int frame, string description = "テンプレートの追加") =>
+        Insert(instance.Objects, layer, frame, description, instance.Scenes);
+
+    private int Insert(IReadOnlyList<TimelineObject> sources, int layer, int frame, string description, IReadOnlyList<Scene>? scenes)
     {
         if (sources.Count == 0) return 0;
         int minLayer = sources.Min(o => o.Layer), minStart = sources.Min(o => o.Start);
         layer = Math.Max(0, layer); frame = Math.Max(0, frame);
+        int shift = -1;
+        for (int s = 0; s < Scene.LayerCount && shift < 0; s++)
+            if (sources.All(o => Scene.IsFree(o.Layer - minLayer + layer + s, o.Start - minStart + frame, o.End - minStart + frame))) shift = s;
+        if (shift < 0) return 0;
         var added = new List<string>();
         Edit(description, () =>
         {
-            for (int shift = 0; shift < Scene.LayerCount; shift++)
+            if (scenes != null) foreach (var sc in scenes) Project.Scenes.Add(sc);
+            var groupMap = new Dictionary<string, string>();
+            foreach (var src in sources)
             {
-                bool ok = sources.All(o => Scene.IsFree(o.Layer - minLayer + layer + shift, o.Start - minStart + frame, o.End - minStart + frame));
-                if (!ok) continue;
-                var groupMap = new Dictionary<string, string>();
-                foreach (var src in sources)
+                var o = src.Clone(newId: true);
+                int len = o.Length;
+                o.Layer = src.Layer - minLayer + layer + shift;
+                o.SetRange(src.Start - minStart + frame, src.Start - minStart + frame + len - 1);
+                if (o.GroupId != null)
                 {
-                    var o = src.Clone(newId: true);
-                    int len = o.Length;
-                    o.Layer = src.Layer - minLayer + layer + shift;
-                    o.SetRange(src.Start - minStart + frame, src.Start - minStart + frame + len - 1);
-                    if (o.GroupId != null)
-                    {
-                        if (!groupMap.TryGetValue(o.GroupId, out var g)) groupMap[o.GroupId] = g = Guid.NewGuid().ToString("N")[..8];
-                        o.GroupId = g;
-                    }
-                    Scene.Objects.Add(o);
-                    added.Add(o.Id);
+                    if (!groupMap.TryGetValue(o.GroupId, out var g)) groupMap[o.GroupId] = g = Guid.NewGuid().ToString("N")[..8];
+                    o.GroupId = g;
                 }
-                break;
+                Scene.Objects.Add(o);
+                added.Add(o.Id);
             }
         });
         if (added.Count > 0) SelectMany(added);
         return added.Count;
+    }
+
+    // ---------------- テンプレートの公開項目 ----------------
+
+    /// <summary>今のシーンで、obj の effectIndex 番目のエフェクトの key が公開されていればその項目。</summary>
+    public ExposedParam? FindExposed(TimelineObject obj, int effectIndex, string key) =>
+        Scene.Exposed?.FirstOrDefault(x => x.ObjectId == obj.Id && x.Effect == effectIndex && x.Key == key);
+
+    /// <summary>今のシーンの公開項目に加える (すでにあれば外す)。label が null なら外すだけ。</summary>
+    public void SetExposed(TimelineObject obj, int effectIndex, string key, string? label)
+    {
+        var target = new ExposedParam { ObjectId = obj.Id, Effect = effectIndex, Key = key, Label = label ?? "" };
+        Edit(label == null ? "公開の解除" : "項目の公開", () =>
+        {
+            var list = Scene.Exposed ??= new List<ExposedParam>();
+            int i = list.FindIndex(x => x.SameTarget(target));
+            if (label == null) { if (i >= 0) list.RemoveAt(i); }
+            else if (i >= 0) list[i].Label = label;
+            else list.Add(target);
+            if (list.Count == 0) Scene.Exposed = null;
+        });
+    }
+
+    /// <summary>選んだオブジェクトにスタイルを当てる。当てた数を返す。</summary>
+    public int ApplyStyle(EffectStyle style)
+    {
+        var targets = SelectedObjects.ToList();
+        int n = 0;
+        if (targets.Count == 0) return 0;
+        Edit("スタイルの適用", () => { foreach (var o in targets) if (style.ApplyTo(o)) n++; });
+        return n;
     }
 
     /// <summary>出力範囲を設定する。start / end のどちらかだけ変えるときは、もう一方に今の値を渡す。</summary>

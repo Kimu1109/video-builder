@@ -38,6 +38,33 @@ public sealed class LayerInfo
     public LayerInfo Clone() => (LayerInfo)MemberwiseClone();
 }
 
+/// <summary>
+/// テンプレートとして外から編集できるようにした項目。シーンオブジェクトのプロパティに、参照先のシーンのこの項目が並ぶ。
+/// </summary>
+public sealed class ExposedParam
+{
+    /// <summary>シーン内のオブジェクトの ID。</summary>
+    public string ObjectId { get; set; } = "";
+    /// <summary>オブジェクトの何番目のエフェクトか。</summary>
+    public int Effect { get; set; }
+    public string Key { get; set; } = "";
+    public string Label { get; set; } = "";
+
+    public ExposedParam Clone() => (ExposedParam)MemberwiseClone();
+
+    public bool SameTarget(ExposedParam other) => ObjectId == other.ObjectId && Effect == other.Effect && Key == other.Key;
+
+    /// <summary>公開元のエフェクトとパラメータ定義。消えていれば null。</summary>
+    public (TimelineObject Object, Effect Effect, ParamDefinition Param)? Resolve(Scene scene)
+    {
+        var o = scene.Find(ObjectId);
+        if (o == null || Effect < 0 || Effect >= o.Effects.Count) return null;
+        var e = o.Effects[Effect];
+        var d = EffectRegistry.Exists(e.DefinitionId) ? e.Definition.Find(Key) : null;
+        return d == null ? null : (o, e, d);
+    }
+}
+
 public sealed class Scene
 {
     public const int LayerCount = 100;
@@ -50,6 +77,8 @@ public sealed class Scene
     /// <summary>出力範囲 (フレーム, 両端を含む)。null なら先頭 / 末尾まで。</summary>
     public int? RangeStart { get; set; }
     public int? RangeEnd { get; set; }
+    /// <summary>テンプレートとして公開する項目。ないときは null (保存しない)。</summary>
+    public List<ExposedParam>? Exposed { get; set; }
 
     public LayerInfo GetLayer(int index) => Layers.TryGetValue(index, out var l) ? l : DefaultLayer;
     private static readonly LayerInfo DefaultLayer = new();
@@ -108,6 +137,7 @@ public sealed class Scene
         foreach (var o in Objects)
             s.Objects.Add(old.TryGetValue(o.Id, out var prev) && TimelineObject.SameContent(o, prev) ? prev : o.Clone());
         foreach (var (k, v) in Layers) s.Layers[k] = v.Clone();
+        s.Exposed = Exposed?.Select(x => x.Clone()).ToList();
         return s;
     }
 
@@ -116,6 +146,7 @@ public sealed class Scene
         var s = new Scene { Id = Id, Name = Name, RangeStart = RangeStart, RangeEnd = RangeEnd };
         foreach (var o in Objects) s.Objects.Add(o.Clone());
         foreach (var (k, v) in Layers) s.Layers[k] = v.Clone();
+        s.Exposed = Exposed?.Select(x => x.Clone()).ToList();
         return s;
     }
 }
