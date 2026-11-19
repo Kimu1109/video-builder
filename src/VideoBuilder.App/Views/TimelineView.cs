@@ -183,6 +183,12 @@ public sealed class TimelineView : UserControl
         menu.Items.Add(Menus.Item("コピー", "Copy", _session.CopySelected, Shortcuts.First("edit.copy")));
         menu.Items.Add(Menus.Item("削除", "Delete", _session.DeleteSelected, Shortcuts.First("edit.delete")));
         menu.Items.Add(Menus.Item("テンプレートとして保存...", "Template", () => _ = EditorCommands.SaveTemplateAsync()));
+        if (_session.TemplateOf(o) is { } src)
+        {
+            bool newer = TemplateService.NewerVersion(src) != null;
+            menu.Items.Add(Menus.Item("テンプレートの更新を反映", "Reset", () => EditorCommands.UpdateTemplate(new[] { o }), null, newer));
+            menu.Items.Add(Menus.Item("このテンプレートのものをすべて更新", null, () => EditorCommands.UpdateTemplate(_session.TemplateInstances(src.Id)), null, newer));
+        }
         bool hasNext = _session.Scene.Objects.Any(x => x.Layer == o.Layer && x.Start > o.End);
         menu.Items.Add(Menus.Item("次のクリップとつなぐ (クロスフェード)", "Gradient", () =>
         {

@@ -373,6 +373,93 @@ public sealed class EditorSession
         return added.Count;
     }
 
+    // ---------------- テンプレートの更新 ----------------
+
+    /// <summary>シーンオブジェクト o が参照しているシーンの、元のテンプレート。テンプレートから作ったものでなければ null。</summary>
+    public TemplateSource? TemplateOf(TimelineObject o) =>
+        o.Main.DefinitionId == EffectRegistry.SceneRef ? Project.FindScene(o.Main.GetString("scene"))?.Template : null;
+
+    /// <summary>今のシーンの中で、id のテンプレートから作ったシーンオブジェクト。</summary>
+    public List<TimelineObject> TemplateInstances(string templateId) =>
+        Scene.Objects.Where(o => TemplateOf(o)?.Id == templateId).ToList();
+
+    /// <summary>
+    /// シーンオブジェクト (テンプレートから作ったもの) を、pkg (同じテンプレートの新しい版) に入れ替える。
+    /// 新しい版を挿入するのと同じようにシーンを作り、古いシーンの公開項目の値を、同じパラメータで同じ表示名の項目に写す。
+    /// 参照先を新しいシーンにして、どこからも参照されなくなった古いシーンを消す。全部で 1 回の取り消し。更新した数を返す。
+    /// </summary>
+    public int UpdateTemplateInstances(IEnumerable<TimelineObject> objects, TemplatePackage pkg, string assetRoot, bool fitResolution)
+    {
+        var targets = objects.Where(o => TemplateOf(o)?.Id == pkg.Meta.Id).Select(o => o.Id).ToList();
+        if (targets.Count == 0) return 0;
+        Edit("テンプレートの更新", () =>
+        {
+            var oldScenes = new HashSet<string>();
+            foreach (var id in targets)
+            {
+                var o = Scene.Find(id)!;
+                var old = Project.FindScene(o.Main.GetString("scene"))!;
+                foreach (var sid in Reachable(old.Id)) oldScenes.Add(sid);
+                var inst = pkg.Instantiate(Project, assetRoot, TemplateInsertMode.Scene, fitResolution);
+                var body = inst.Scenes[0];
+                CopyExposedValues(old, body);
+                string keepName = old.Name;
+                Project.Scenes.AddRange(inst.Scenes);
+                o.Main.Values["scene"] = body.Id;
+                body.Name = keepName;   // 名前は前のものを引き継ぐ (古いシーンはこのあと消す)
+            }
+            // どこからも参照されなくなった古いシーンを消す。古いシーン同士の参照 (古い本体 → 古い入れ子) は数えず、
+            // 残るシーン (古いもの以外・メイン・開いているシーン) からたどれるものだけを残す
+            var keep = new HashSet<string>();
+            foreach (var sc in Project.Scenes)
+                if (!oldScenes.Contains(sc.Id) || sc == Project.Root || sc.Id == _sceneId)
+                    foreach (var sid in Reachable(sc.Id)) keep.Add(sid);
+            Project.Scenes.RemoveAll(sc => oldScenes.Contains(sc.Id) && !keep.Contains(sc.Id));
+        });
+        return targets.Count;
+    }
+
+    /// <summary>シーン id と、そこから入れ子でたどれるシーンの id。</summary>
+    private HashSet<string> Reachable(string id)
+    {
+        var result = new HashSet<string>();
+        var stack = new Stack<string>();
+        stack.Push(id);
+        while (stack.Count > 0)
+        {
+            var cur = stack.Pop();
+            if (!result.Add(cur) || Project.FindScene(cur) is not { } sc) continue;
+            foreach (var o in sc.Objects)
+                if (o.Main.DefinitionId == EffectRegistry.SceneRef) stack.Push(o.Main.GetString("scene"));
+        }
+        return result;
+    }
+
+    /// <summary>from の公開項目の値を、to の「同じパラメータ (キー) で同じ表示名」の項目に写す。</summary>
+    private static void CopyExposedValues(Scene from, Scene to)
+    {
+        if (from.Exposed == null || to.Exposed == null) return;
+        foreach (var x in from.Exposed)
+        {
+            if (x.Resolve(from) is not { } src) continue;
+            var match = to.Exposed.FirstOrDefault(y => y.Key == x.Key && y.Label == x.Label);
+            if (match?.Resolve(to) is not { } dst || dst.Effect.DefinitionId != src.Effect.DefinitionId) continue;
+            if (src.Param.Kind == ParamKind.Track)
+            {
+                if (!src.Effect.Tracks.TryGetValue(x.Key, out var v)) continue;
+                var c = v.Clone();
+                if (c.Values.Count != dst.Object.Sections + 1)
+                {
+                    // キーフレームの数が違うときは、最初の値で埋める
+                    double first = c.Values.Count > 0 ? c.Values[0] : src.Param.Default;
+                    c.Values = Enumerable.Repeat(first, dst.Object.Sections + 1).ToList();
+                }
+                dst.Effect.Tracks[x.Key] = c;
+            }
+            else if (src.Effect.Values.TryGetValue(x.Key, out var value)) dst.Effect.Values[x.Key] = value;
+        }
+    }
+
     // ---------------- トランジション ----------------
 
     /// <summary>

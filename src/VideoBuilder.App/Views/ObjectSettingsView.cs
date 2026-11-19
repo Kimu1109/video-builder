@@ -122,7 +122,8 @@ public sealed class ObjectSettingsView : UserControl
 
     /// <summary>欄の組み立て方が同じになるオブジェクトどうしで等しくなる文字列。</summary>
     private string BodySignature(TimelineObject o) =>
-        string.Join(",", o.Effects.Select(e => e.DefinitionId)) + "|" + _session.Project.Scenes.Count + "|" + ExposedSignature(o);
+        string.Join(",", o.Effects.Select(e => e.DefinitionId)) + "|" + _session.Project.Scenes.Count + "|" + ExposedSignature(o)
+        + "|" + (_session.TemplateOf(o) != null ? "tpl" : "");
 
     // ---------------- テンプレートの項目 ----------------
 
@@ -166,8 +167,31 @@ public sealed class ObjectSettingsView : UserControl
     /// <summary>シーンオブジェクトのプロパティの先頭に出す「テンプレートの項目」欄。</summary>
     private Control? BuildExposed(TimelineObject o)
     {
-        if (ExposedOf(o) is not { } x) return null;
+        // 公開項目がなくても、テンプレートから作ったものなら、更新の知らせを出すために欄を作る
+        bool fromTemplate = _session.TemplateOf(o) != null;
+        if (ExposedOf(o) is not { } x)
+        {
+            if (!fromTemplate) return null;
+            x = (_session.Project.FindScene(o.Main.GetString("scene"))!, new List<ExposedParam>());
+        }
         var rows = new StackPanel { Margin = new Thickness(8, 4, 18, 8), Spacing = 2 };
+        if (fromTemplate)
+        {
+            // 新しい版があれば知らせて、更新できるようにする
+            var notice = new TextBlock { Text = "テンプレートに新しい版があります", VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
+            notice[!TextBlock.ForegroundProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Accent");
+            var update = new IconButton { Icon = Icons.Get("Reset"), Text = "更新", Margin = new Thickness(8, 0, 0, 0) };
+            update.Click += (_, _) => { if (Target is { } t) EditorCommands.UpdateTemplate(new[] { t }); };
+            var bar = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
+            DockPanel.SetDock(update, Dock.Right);
+            bar.Children.Add(update); bar.Children.Add(notice);
+            rows.Children.Add(bar);
+            _refreshers.Add(() =>
+            {
+                var src = Target is { } t ? _session.TemplateOf(t) : null;
+                bar.IsVisible = src != null && TemplateService.NewerVersion(src) != null;
+            });
+        }
         string? group = null;
         for (int i = 0; i < x.Items.Count; i++)
         {
@@ -189,6 +213,7 @@ public sealed class ObjectSettingsView : UserControl
         var head = new DockPanel { Margin = new Thickness(4, 0, 16, 0), Height = 24 };
         var edit = new IconButton("Tune", "テンプレートの項目を編集 (並べ替え・グループ・表示名)");
         edit.Click += (_, _) => { if (ExposedOf(Target) is { } cur) _ = EditExposedAsync(cur.Scene.Id); };
+        edit.IsVisible = x.Items.Count > 0;
         DockPanel.SetDock(edit, Dock.Right);
         head.Children.Add(edit);
         var icon = new Icon("Template", 14) { Margin = new Thickness(26, 0, 6, 0) };

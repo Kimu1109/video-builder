@@ -258,6 +258,8 @@ public static class EditorCommands
             pkg.Thumbnail = TemplateService.RenderThumbnail(pkg, Session.Project.Settings);
             pkg.Preview = TemplateService.RenderPreview(pkg, Session.Project.Settings);
             Svc.Templates.Save(pkg);
+            TemplateService.ForgetVersions();
+            Session.NotifyChanged();   // 「新しい版があります」の表示を更新する
         }
         catch (Exception ex) { await ShowErrorAsync("テンプレートを保存できませんでした。\n" + ex.Message); }
     }
@@ -267,6 +269,13 @@ public static class EditorCommands
     {
         var (_, message) = TemplateService.Insert(entry, layer, frame, mode);
         if (message != null) _ = ShowErrorAsync(message);
+    }
+
+    /// <summary>シーンオブジェクト (テンプレートから作ったもの) を、元のテンプレートのいちばん新しい版にする。</summary>
+    public static void UpdateTemplate(IReadOnlyList<TimelineObject> objects)
+    {
+        var (_, error) = TemplateService.Update(objects);
+        if (error != null) _ = ShowErrorAsync(error);
     }
 
     public static async Task ShowTemplateLibraryAsync()

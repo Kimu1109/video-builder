@@ -302,6 +302,62 @@ public class TemplateTests : IDisposable
     }
 
     [Fact]
+    public void Placed_templates_are_updated_to_a_newer_version_keeping_exposed_values()
+    {
+        var src = new EditorSession();
+        var t = src.AddObject(EffectRegistry.Text, 0, 0, 60)!;
+        var nested = new Scene { Id = "inner", Name = "中身" };
+        nested.Objects.Add(ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 60));
+        src.Project.Scenes.Add(nested);
+        var so = src.AddObject(EffectRegistry.SceneRef, 1, 0, 60, o => o.Main.Values["scene"] = "inner")!;
+        var options = new TemplateOptions { Name = "名札", Exposed = new() { new ExposedParam { ObjectId = t.Id, Effect = 0, Key = "text", Label = "名前" } } };
+        var store = new TemplateStore(Path.Combine(_dir, "templates"), Path.Combine(_dir, "assets"));
+        store.Save(TemplatePackage.Create(src.Project, new[] { t, so }, options));
+        var v1 = Assert.Single(store.List());
+        var id = TemplatePackage.ReadMeta(v1.Path)!.Id;
+
+        // 挿入して、公開項目を書き換える
+        var s = new EditorSession();
+        Assert.Equal(1, s.InsertTemplate(store.Instantiate(v1, s.Project, TemplateInsertMode.Scene), 0, 0));
+        var placed = s.Primary!;
+        Assert.Equal((id, 1), (s.TemplateOf(placed)!.Id, s.TemplateOf(placed)!.Version));
+        var scene1 = s.Project.FindScene(placed.Main.GetString("scene"))!;
+        s.Edit("名前", () => scene1.Exposed![0].Resolve(scene1)!.Value.Effect.Values["text"] = "佐藤");
+        int scenesBefore = s.Project.Scenes.Count;   // メイン + 本体 + 入れ子
+
+        // 同じ名前で保存し直すと、同じ id の版 2 になる (色を変え、オブジェクトを 1 つ足す)
+        t.Main.Values["color"] = "#FF0000";
+        var extra = src.AddObject(EffectRegistry.Shape, 2, 0, 60)!;
+        store.Save(TemplatePackage.Create(src.Project, new[] { t, so, extra }, options));
+        var latest = store.FindLatest(id)!.Value;
+        Assert.Equal(2, latest.Meta.Version);
+        Assert.Single(store.List());
+
+        // 更新: 公開項目の値は残り、中身は新しい版になる。古いシーンは消える
+        Assert.Equal(1, s.UpdateTemplateInstances(new[] { s.Scene.Find(placed.Id)! }, store.Load(latest.Entry), store.AssetDirectory, false));
+        var now = s.Scene.Find(placed.Id)!;
+        var scene2 = s.Project.FindScene(now.Main.GetString("scene"))!;
+        Assert.NotEqual(scene1.Id, scene2.Id);
+        Assert.Equal(2, s.TemplateOf(now)!.Version);
+        Assert.Equal("名札", scene2.Name);
+        var text = scene2.Objects.Single(o => o.Main.DefinitionId == EffectRegistry.Text);
+        Assert.Equal("佐藤", text.Main.GetString("text"));
+        Assert.Equal("#FF0000", text.Main.GetString("color"));
+        Assert.Equal(3, scene2.Objects.Count);
+        Assert.Equal(scenesBefore, s.Project.Scenes.Count);           // 古い本体と入れ子は消えた
+        Assert.Null(s.Project.FindScene(scene1.Id));
+        // 1 回で戻せる
+        s.Undo();
+        Assert.Equal(scene1.Id, s.Scene.Find(placed.Id)!.Main.GetString("scene"));
+        Assert.NotNull(s.Project.FindScene(scene1.Id));
+
+        // ほかのテンプレートのものは更新しない
+        var plain = s.AddObject(EffectRegistry.Shape, 5, 0, 10)!;
+        Assert.Equal(0, s.UpdateTemplateInstances(new[] { plain }, store.Load(latest.Entry), store.AssetDirectory, false));
+        Assert.Single(s.TemplateInstances(id));
+    }
+
+    [Fact]
     public void Legacy_presets_are_listed_and_expanded()
     {
         var legacyDir = Path.Combine(_dir, "aliases");

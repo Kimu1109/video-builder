@@ -589,5 +589,11 @@ internal static class TranslationsEn
         ("1 文字ずつ下から", "Rise by character"),
         ("1 文字ずつ拡大", "Pop by character"),
         ("なし", "None"),
+        ("テンプレートに新しい版があります", "A newer version of this template is available"),
+        ("更新", "Update"),
+        ("テンプレートの更新を反映", "Update to the latest template"),
+        ("このテンプレートのものをすべて更新", "Update all from this template"),
+        ("テンプレートの更新", "Update template"),
+        ("元のテンプレート「{0}」がライブラリにありません", "The original template \"{0}\" is not in the library"),
     };
 }

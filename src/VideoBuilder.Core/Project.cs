@@ -78,6 +78,15 @@ public sealed class ExposedParam
     }
 }
 
+/// <summary>挿入したテンプレートの元 (テンプレートの id・名前・版)。新しい版が出たときに更新するために覚えておく。</summary>
+public sealed class TemplateSource
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public int Version { get; set; } = 1;
+    public TemplateSource Clone() => (TemplateSource)MemberwiseClone();
+}
+
 public sealed class Scene
 {
     public const int LayerCount = 100;
@@ -95,6 +104,8 @@ public sealed class Scene
     public int? RangeEnd { get; set; }
     /// <summary>テンプレートとして公開する項目。ないときは null (保存しない)。</summary>
     public List<ExposedParam>? Exposed { get; set; }
+    /// <summary>テンプレートを挿入してできたシーンなら、その元。ないときは null。</summary>
+    public TemplateSource? Template { get; set; }
 
     public LayerInfo GetLayer(int index) => Layers.TryGetValue(index, out var l) ? l : DefaultLayer;
     private static readonly LayerInfo DefaultLayer = new();
@@ -154,6 +165,7 @@ public sealed class Scene
             s.Objects.Add(old.TryGetValue(o.Id, out var prev) && TimelineObject.SameContent(o, prev) ? prev : o.Clone());
         foreach (var (k, v) in Layers) s.Layers[k] = v.Clone();
         s.Exposed = Exposed?.Select(x => x.Clone()).ToList();
+        s.Template = Template?.Clone();
         return s;
     }
 
@@ -163,6 +175,7 @@ public sealed class Scene
         foreach (var o in Objects) s.Objects.Add(o.Clone());
         foreach (var (k, v) in Layers) s.Layers[k] = v.Clone();
         s.Exposed = Exposed?.Select(x => x.Clone()).ToList();
+        s.Template = Template?.Clone();
         return s;
     }
 }

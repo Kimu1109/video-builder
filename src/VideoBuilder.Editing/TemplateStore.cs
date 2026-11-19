@@ -101,10 +101,18 @@ public sealed class TemplateStore
 
     public bool Exists(string name) => File.Exists(PathFor(name));
 
-    /// <summary>テンプレートを保存して、保存先のパスを返す。同じ名前のものは上書きする。</summary>
+    /// <summary>
+    /// テンプレートを保存して、保存先のパスを返す。同じ名前のものは上書きし、そのときは id を引き継いで版を 1 つ増やす
+    /// (挿入済みのものに「新しい版」として更新を知らせるため)。
+    /// </summary>
     public string Save(TemplatePackage package)
     {
         var path = PathFor(package.Meta.Name);
+        if (File.Exists(path) && TemplatePackage.ReadMeta(path) is { } old)
+        {
+            package.Meta.Id = old.Id;
+            package.Meta.Version = old.Version + 1;
+        }
         package.Save(path);
         _metaCache.Remove(path);
         return path;
@@ -122,6 +130,18 @@ public sealed class TemplateStore
             Meta = new TemplateMeta { Name = entry.Name, Category = LegacyCategory, InsertAs = TemplateInsertMode.Objects, Length = Math.Max(1, body.Length) },
             Scenes = { body },
         };
+    }
+
+    /// <summary>id のテンプレートのうち、いちばん新しい版 (自分のものと共有のもの)。なければ null。</summary>
+    public (TemplateEntry Entry, TemplateMeta Meta)? FindLatest(string id)
+    {
+        (TemplateEntry, TemplateMeta)? best = null;
+        foreach (var e in List())
+        {
+            if (e.Legacy || ReadMeta(e.Path) is not { } m || m.Id != id) continue;
+            if (best == null || m.Version > best.Value.Item2.Version) best = (e, m);
+        }
+        return best;
     }
 
     public byte[]? Thumbnail(TemplateEntry entry) => entry.Legacy ? null : TemplatePackage.ReadThumbnail(entry.Path);

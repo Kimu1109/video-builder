@@ -869,6 +869,46 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public void Newer_template_version_is_announced_and_applied_from_the_properties()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        var t = s.AddObject(EffectRegistry.Text, 0, 0, 60)!;
+        var options = new TemplateOptions { Name = "版のテスト", Exposed = new() { new ExposedParam { ObjectId = t.Id, Effect = 0, Key = "text", Label = "名前" } } };
+        Svc.Templates.Save(TemplatePackage.Create(s.Project, new[] { t }, options));
+        try
+        {
+            var entry = Svc.Templates.List().Single(e => e.Name == "版のテスト");
+            EditorCommands.InsertTemplate(entry, 5, 100);
+            var placed = s.Primary!;
+            TemplateService.ForgetVersions();
+            Pump();
+            var settings = w.GetVisualDescendants().OfType<ObjectSettingsView>().Single();
+            string notice = L.T("テンプレートに新しい版があります");
+            Assert.DoesNotContain(settings.GetVisualDescendants().OfType<TextBlock>(), b => b.Text == notice && b.IsEffectivelyVisible);
+
+            // 新しい版を保存すると、知らせが出る
+            s.Edit("色", () => s.Scene.Find(t.Id)!.Main.Values["color"] = "#00FF00");
+            Svc.Templates.Save(TemplatePackage.Create(s.Project, new[] { s.Scene.Find(t.Id)! }, options));
+            TemplateService.ForgetVersions();
+            s.Select(placed.Id);
+            s.NotifyChanged();
+            Pump();
+            Assert.Contains(settings.GetVisualDescendants().OfType<TextBlock>(), b => b.Text == notice && b.IsEffectivelyVisible);
+            Shot(w, "template-update");
+
+            var button = settings.GetVisualDescendants().OfType<IconButton>().First(b => b.Text == "更新" && b.IsEffectivelyVisible);
+            button.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+            Pump();
+            var scene = s.Project.FindScene(s.Scene.Find(placed.Id)!.Main.GetString("scene"))!;
+            Assert.Equal(2, scene.Template!.Version);
+            Assert.Equal("#00FF00", scene.Objects.Single().Main.GetString("color"));
+            Assert.DoesNotContain(settings.GetVisualDescendants().OfType<TextBlock>(), b => b.Text == notice && b.IsEffectivelyVisible);
+        }
+        finally { foreach (var e in Svc.Templates.List().Where(e => e.Name == "版のテスト")) Svc.Templates.Delete(e); }
+    }
+
+    [AvaloniaFact]
     public void Style_is_saved_and_applied_to_the_selection()
     {
         Open();

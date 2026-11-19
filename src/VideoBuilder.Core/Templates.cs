@@ -38,6 +38,8 @@ public sealed class TemplateMeta
     /// <summary>使っている、組み込みでないエフェクトの ID (プラグイン)。</summary>
     public List<string> Plugins { get; set; } = new();
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    /// <summary>版。新しく作ると 1、同じ名前で上書き保存すると、id を引き継いで 1 つ増やす。</summary>
+    public int Version { get; set; } = 1;
 }
 
 /// <summary>テンプレートを作るときの指定。</summary>
@@ -136,6 +138,7 @@ public sealed class TemplatePackage
             if (body.Exposed.Count == 0) body.Exposed = null;
         }
         body.RangeStart = body.RangeEnd = null;
+        body.Template = null;   // 新しいテンプレートの本体になる (元のテンプレートとのつながりは、保存するときに決める)
         pkg.Scenes.Add(body);
 
         // 本体から参照しているシーンを、入れ子の奥までたどって集める
@@ -440,6 +443,7 @@ public sealed class TemplatePackage
         }
 
         var body = scenes[0];
+        body.Template = new TemplateSource { Id = Meta.Id, Name = Meta.Name, Version = Meta.Version };
         if (mode == TemplateInsertMode.Scene)
         {
             inst.Scenes.AddRange(scenes);

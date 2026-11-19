@@ -34,6 +34,39 @@ public static class TemplateService
         return (true, notes.Count > 0 ? string.Join("\n\n", notes.Select(L.T)) : null);
     }
 
+    // 新しい版があるかの確認は、プロパティの表示のたびに呼ばれるので、少しの間 (2 秒) 覚えておく
+    private static readonly Dictionary<string, (long Time, TemplateEntry? Entry, int Version)> NewerCache = new();
+
+    /// <summary>src (挿入したときの版) より新しい版がライブラリにあれば、その一覧の行。なければ null。</summary>
+    public static TemplateEntry? NewerVersion(TemplateSource src)
+    {
+        long now = Environment.TickCount64;
+        if (!NewerCache.TryGetValue(src.Id, out var hit) || now - hit.Time > 2000)
+        {
+            var latest = Svc.Templates.FindLatest(src.Id);
+            hit = (now, latest?.Entry, latest?.Meta.Version ?? 0);
+            NewerCache[src.Id] = hit;
+        }
+        return hit.Entry != null && hit.Version > src.Version ? hit.Entry : null;
+    }
+
+    /// <summary>覚えている「新しい版」の確認をやり直す (保存したあとなど)。</summary>
+    public static void ForgetVersions() => NewerCache.Clear();
+
+    /// <summary>シーンオブジェクトを、元のテンプレートのいちばん新しい版にする。更新した数か、エラーを返す。</summary>
+    public static (int Count, string? Error) Update(IReadOnlyList<TimelineObject> objects)
+    {
+        var src = objects.Select(o => Svc.Session.TemplateOf(o)).FirstOrDefault(s => s != null);
+        if (src == null) return (0, null);
+        var latest = Svc.Templates.FindLatest(src.Id);
+        if (latest == null) return (0, $"元のテンプレート「{L.Name(src.Name)}」がライブラリにありません");
+        TemplatePackage pkg;
+        try { pkg = Svc.Templates.Load(latest.Value.Entry); }
+        catch (Exception ex) { return (0, $"テンプレートを読み込めませんでした。\n{ex.Message}"); }
+        int n = Svc.Session.UpdateTemplateInstances(objects, pkg, Svc.Templates.AssetDirectory, Svc.Settings.FitTemplateResolution);
+        return (n, null);
+    }
+
     public static List<string> MissingFonts(IEnumerable<string> fonts)
     {
         var installed = new HashSet<string>(Generators.FontFamilies, StringComparer.OrdinalIgnoreCase);
