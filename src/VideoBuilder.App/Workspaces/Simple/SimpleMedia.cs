@@ -78,7 +78,7 @@ public static class SimpleMedia
             {
                 clips.Add(r.Clip);
                 if (r.Clip.Kind == StoryClipKind.Video && firstVideo == null) firstVideo = r.Info;
-                if (r.Info != null && Svc.Settings.AutoProxy && ProxyStore.IsHeavy(r.Info)) Svc.Proxies.Enqueue(path);
+                if (r.Info != null && Svc.Settings.AutoProxy) Svc.Proxies.EnqueueIfNeeded(path, r.Info);
             }
             if (r.Music != null) musics.Add(r.Music);
         }

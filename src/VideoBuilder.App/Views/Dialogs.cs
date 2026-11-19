@@ -287,7 +287,7 @@ public sealed class PreferencesDialog : DialogBase
             s.UseProxies = useProxy.IsChecked == true; VideoBuilder.Media.ProxyStore.Enabled = s.UseProxies; s.Save(); Svc.Preview.Request();
         };
         Body.Children.Add(useProxy);
-        var autoProxy = new CheckBox { Content = "重い動画 (4K・H.265 など) は自動でプロキシを作る", IsChecked = s.AutoProxy };
+        var autoProxy = new CheckBox { Content = "再生が重くなりそうな動画は自動でプロキシを作る (4K・H.265 など。この PC でのデコードの速さも測って決める)", IsChecked = s.AutoProxy };
         autoProxy.IsCheckedChanged += (_, _) => { s.AutoProxy = autoProxy.IsChecked == true; s.Save(); };
         Body.Children.Add(autoProxy);
         Body.Children.Add(Row("プロキシの大きさ", Combo(new[] { "縦横 1/2", "縦横 1/4" }, s.ProxyDivisor == 4 ? 1 : 0, i =>

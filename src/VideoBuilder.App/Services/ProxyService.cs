@@ -85,19 +85,56 @@ public sealed class ProxyService
         if (_worker == null || _worker.IsCompleted) _worker = RunAsync();
     }
 
-    /// <summary>プロジェクトの動画のうち、プロキシがないものをすべて順番待ちに入れる。heavyOnly なら重い動画だけ。</summary>
+    /// <summary>
+    /// プロジェクトの動画のうち、プロキシがないものをすべて順番待ちに入れる。
+    /// heavyOnly なら、プロキシが要るもの (ProxyStore.NeedsProxy) だけを、裏で調べてから入れる。戻り値は今すぐ入れた数。
+    /// </summary>
     public int EnqueueProject(Project project, bool heavyOnly)
     {
         int n = 0;
         foreach (var path in ProjectMedia.UsedFiles(project).Where(f => ObjectFactory.DefinitionForFile(f) == EffectRegistry.Video))
         {
             if (ProxyStore.Exists(path) || _queued.Contains(path)) continue;
-            if (heavyOnly && (MediaInfo.Probe(path) is not { } info || !ProxyStore.IsHeavy(info))) continue;
+            if (heavyOnly) { EnqueueIfNeeded(path); continue; }
             Enqueue(path);
             n++;
         }
         return n;
     }
+
+    // 自動で作るかを調べている動画 (同じものを何度も調べない)
+    private readonly HashSet<string> _checking = new();
+
+    /// <summary>
+    /// プロキシが要る動画なら順番待ちに入れる (自動作成)。4K・H.265 などはすぐ入れる。そうでなければ、
+    /// この PC でのデコードの速さとキーフレームの間隔を裏で測ってから決める (ProxyStore.NeedsProxy)。UI スレッドから呼ぶ。
+    /// </summary>
+    public void EnqueueIfNeeded(string path, MediaInfo? info = null)
+    {
+        if (string.IsNullOrEmpty(path) || _queued.Contains(path) || _checking.Contains(path) || ProxyStore.Exists(path)) return;
+        info ??= MediaInfo.Probe(path);
+        if (info is not { HasVideo: true }) return;
+        if (ProxyStore.IsHeavy(info)) { Enqueue(path); return; }
+        _checking.Add(path);
+        var known = info;
+        _ = Task.Run(() =>
+        {
+            DecodeCheck? check = null;
+            try { check = ProxyStore.MeasureDecode(path); } catch { check = null; }
+            Dispatcher.UIThread.Post(() =>
+            {
+                _checking.Remove(path);
+                LastCheck = check == null ? null : (path, check);
+                if (ProxyStore.NeedsProxy(known, check)) Enqueue(path);
+            });
+        });
+    }
+
+    /// <summary>直近に測った動画と結果 (確認・テスト用)。</summary>
+    public (string Path, DecodeCheck Check)? LastCheck { get; private set; }
+
+    /// <summary>自動作成のために測っている途中の動画があるか。</summary>
+    public bool IsChecking => _checking.Count > 0;
 
     /// <summary>作成を中止して、順番待ちも空にする。</summary>
     public void CancelAll()

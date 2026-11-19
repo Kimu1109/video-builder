@@ -214,6 +214,40 @@ public class ProxySegmentTests : IDisposable
         Assert.False(File.Exists(legacy));
     }
 
+    [Fact]
+    public void Decode_speed_and_keyframe_interval_are_measured_on_this_machine()
+    {
+        if (!_ready) return;
+        var check = ProxyStore.MeasureDecode(_clip)!;
+        Assert.True(check.FramesPerSecond > 30, $"{check.FramesPerSecond:0} fps");   // 320x180 は軽い
+        Assert.InRange(check.KeyframeInterval, 2.9, 3.1);                            // -g 90 (30 fps) = 3 秒
+        Assert.Same(check, ProxyStore.MeasureDecode(_clip));                         // 2 回目は測り直さない
+
+        // キーフレームが 10 秒に 1 回しかない 720p: シークが遅いのでプロキシを作る
+        var sparse = Path.Combine(_dir, "sparse.mp4");
+        Assert.True(MediaTests.RunFfmpeg($"-f lavfi -i testsrc2=size=1280x720:rate=30:duration=12 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 300 -keyint_min 300 -sc_threshold 0 \"{sparse}\""));
+        var info = MediaInfo.Probe(sparse)!;
+        var sparseCheck = ProxyStore.MeasureDecode(sparse)!;
+        Assert.True(sparseCheck.KeyframeInterval > 9, $"{sparseCheck.KeyframeInterval:0.0} 秒");
+        Assert.False(ProxyStore.IsHeavy(info));
+        Assert.True(ProxyStore.NeedsProxy(info, sparseCheck));
+        Assert.False(ProxyStore.NeedsProxy(MediaInfo.Probe(_clip)!, check));       // 軽くてシークも速い動画は作らない
+    }
+
+    [Fact]
+    public void Proxies_are_needed_when_decoding_cannot_keep_up_with_playback()
+    {
+        var hd = new MediaInfo(true, true, 1920, 1080, 60, 100) { VideoCodec = "h264" };
+        Assert.False(ProxyStore.NeedsProxy(hd, null));                                        // 測れなければ従来どおり (重くなければ作らない)
+        Assert.False(ProxyStore.NeedsProxy(hd, new DecodeCheck(200, 2, "ソフトウェア")));
+        Assert.True(ProxyStore.NeedsProxy(hd, new DecodeCheck(70, 2, "ソフトウェア")));        // 60 fps の 1.5 倍に足りない
+        Assert.True(ProxyStore.NeedsProxy(hd, new DecodeCheck(200, 8, "ソフトウェア")));       // キーフレームの間隔が長い
+        var small = new MediaInfo(true, true, 640, 360, 30, 100) { VideoCodec = "h264" };
+        Assert.False(ProxyStore.NeedsProxy(small, new DecodeCheck(200, 8, "ソフトウェア")));   // 小さい動画はシークも速い
+        Assert.True(ProxyStore.NeedsProxy(new MediaInfo(true, true, 3840, 2160, 30, 10) { VideoCodec = "h264" }, null));
+        Assert.False(ProxyStore.NeedsProxy(new MediaInfo(false, true, 0, 0, 0, 10), null));
+    }
+
     private sealed class Sync(Action<double> onReport) : IProgress<double>
     {
         public void Report(double value) => onReport(value);

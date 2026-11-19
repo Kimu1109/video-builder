@@ -194,7 +194,111 @@ public static class ProxyStore
     /// <summary>重い動画 (プロキシを作ると効果が大きいもの) か。自動でプロキシを作るかどうかの判断に使う。</summary>
     public static bool IsHeavy(MediaInfo info) =>
         info.HasVideo && ((long)info.Width * info.Height > 1920L * 1080 || info.VideoCodec is "hevc" or "av1" or "prores" or "vp9" or "dnxhd");
+
+    /// <summary>
+    /// 自動でプロキシを作るか。重い動画 (IsHeavy) は作る。そうでなくても、この PC で実際に測って (check)、
+    /// 再生に追いつかない (1 秒にデコードできるフレームが、動画の fps の 1.5 倍に足りない) か、
+    /// キーフレームの間隔が長く (4 秒を超え) シークが遅い 720p 以上の動画なら作る。
+    /// </summary>
+    public static bool NeedsProxy(MediaInfo info, DecodeCheck? check)
+    {
+        if (!info.HasVideo) return false;
+        if (IsHeavy(info)) return true;
+        if (check == null) return false;
+        double fps = info.FrameRate > 0 ? info.FrameRate : 30;
+        if (check.FramesPerSecond > 0 && check.FramesPerSecond < fps * 1.5) return true;
+        return check.KeyframeInterval > 4 && (long)info.Width * info.Height >= 1280L * 720;
+    }
+
+    private static readonly Dictionary<string, DecodeCheck?> Checks = new();
+
+    /// <summary>
+    /// この PC で動画を少しデコードして、速さとキーフレームの間隔を測る (1 秒前後かかる。UI スレッドから呼ばない)。
+    /// デコードは再生と同じ方法 (使えればハードウェア) で行う。結果はファイル (パス・大きさ・更新日時) ごとに覚えておく。
+    /// </summary>
+    public static DecodeCheck? MeasureDecode(string path)
+    {
+        var file = new FileInfo(path);
+        if (!file.Exists) return null;
+        string key = $"{file.FullName}|{file.Length}|{file.LastWriteTimeUtc.Ticks}|{HardwareDecoding.Mode}";
+        lock (Checks) if (Checks.TryGetValue(key, out var known)) return known;
+        DecodeCheck? result = null;
+        try { result = Measure(path); }
+        catch { result = null; }
+        lock (Checks) Checks[key] = result;
+        return result;
+    }
+
+    private static DecodeCheck? Measure(string path)
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return null;
+        double interval = KeyframeInterval(path);
+        using var r = new VideoReader(path);
+        // 頭は静止していることが多いので、少し進んだ所 (1 割の位置) から測る
+        double start = r.Duration > 4 ? r.Duration * 0.1 : 0;
+        double step = 1 / Math.Max(1, r.FrameRate);
+        if (r.GetFramePointer(start) == IntPtr.Zero) return null;   // シークと最初のフレームは数えない
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        int frames = 0;
+        for (double t = start + step; watch.Elapsed.TotalSeconds < 0.6 && frames < 90; t += step)
+        {
+            if (r.GetFramePointer(t) == IntPtr.Zero) break;
+            frames++;
+        }
+        double fps = frames > 0 ? frames / Math.Max(1e-6, watch.Elapsed.TotalSeconds) : 0;
+        return new DecodeCheck(fps, interval, r.DecoderName);
+    }
+
+    /// <summary>先頭から 30 秒ほどの映像のパケットを読んで、キーフレームの間隔 (秒) を測る (デコードはしない)。測れなければ 0。</summary>
+    private static unsafe double KeyframeInterval(string path)
+    {
+        AVFormatContext* fmt = null;
+        if (ffmpeg.avformat_open_input(&fmt, path, null, null) < 0) return 0;
+        var pkt = ffmpeg.av_packet_alloc();
+        try
+        {
+            if (ffmpeg.avformat_find_stream_info(fmt, null) < 0) return 0;
+            int v = ffmpeg.av_find_best_stream(fmt, AVMediaType.AVMEDIA_TYPE_VIDEO, -1, -1, null, 0);
+            if (v < 0) return 0;
+            double tb = ffmpeg.av_q2d(fmt->streams[v]->time_base);
+            long first = long.MinValue, last = long.MinValue, firstPts = long.MinValue, maxPts = long.MinValue;
+            int keys = 0;
+            for (int n = 0; n < 5000 && ffmpeg.av_read_frame(fmt, pkt) >= 0; n++)
+            {
+                try
+                {
+                    if (pkt->stream_index != v) continue;
+                    long ts = pkt->pts != ffmpeg.AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
+                    if (ts == ffmpeg.AV_NOPTS_VALUE) continue;
+                    if (firstPts == long.MinValue) firstPts = ts;
+                    maxPts = Math.Max(maxPts, ts);
+                    if ((pkt->flags & ffmpeg.AV_PKT_FLAG_KEY) != 0)
+                    {
+                        if (first == long.MinValue) first = ts;
+                        last = ts;
+                        keys++;
+                    }
+                    if ((maxPts - firstPts) * tb > 30) break;
+                }
+                finally { ffmpeg.av_packet_unref(pkt); }
+            }
+            if (keys >= 2) return (last - first) * tb / (keys - 1);
+            // 読んだ範囲にキーフレームが 1 つしかない: 間隔は少なくとも読んだ長さ
+            return keys == 1 && maxPts > firstPts ? (maxPts - firstPts) * tb : 0;
+        }
+        finally
+        {
+            ffmpeg.av_packet_free(&pkt);
+            ffmpeg.avformat_close_input(&fmt);
+        }
+    }
 }
+
+/// <summary>この PC での、動画のデコードの速さの測定結果。</summary>
+/// <param name="FramesPerSecond">続けてデコードしたとき、1 秒に取り出せたフレームの数 (BGRA への変換を含む)。</param>
+/// <param name="KeyframeInterval">キーフレームの間隔 (秒)。長いほどシークが遅い。測れなければ 0。</param>
+/// <param name="Decoder">使ったデコーダ ("VAAPI" や "ソフトウェア")。</param>
+public sealed record DecodeCheck(double FramesPerSecond, double KeyframeInterval, string Decoder);
 
 /// <summary>
 /// プロキシを作る。動画をデコードし、縮小して MJPEG (すべてのフレームが単独で読める形式) で、区切りごとのファイルに書き出す。
