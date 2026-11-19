@@ -52,7 +52,8 @@ public static class Exporter
 
         // GPU コンテキストは作ったスレッドでしか使えないので、この関数の中で作って捨てる
         using var gpu = req.UseGpu ? GpuContext.TryCreate(out _) : null;
-        using var engine = new RenderEngine(gpu);
+        // フレームを順に描くので、動画の次のフレームを裏でデコードしておく
+        using var engine = new RenderEngine(gpu) { Lookahead = true };
         using var bitmap = new SKBitmap(Effects.Info(w, h));
 
         if (req.ImageSequence)

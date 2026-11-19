@@ -35,6 +35,15 @@ public sealed class RenderEngine : IDisposable
     }
     private bool _draft;
 
+    /// <summary>
+    /// 連続したフレームを順に描く (再生中・書き出し)。true のときは、動画の次のフレームを裏でデコードしておき、
+    /// 合成している間にデコードと変換を進める。シーク (飛び飛びの位置を描く) のときは false にする。
+    /// </summary>
+    public bool Lookahead { get; set; }
+
+    /// <summary>今の描画の、プロジェクトの 1 ピクセルが描画先の何ピクセルか (プレビューで縮めて描くとき 1 より小さい)。</summary>
+    private float _renderScale = 1;
+
     // テキスト・図形は、パラメータが同じ間は作り直さない
     private readonly Dictionary<string, SKImage?> _generated = new();
     private readonly Dictionary<string, long> _generatedUse = new();
@@ -98,6 +107,7 @@ public sealed class RenderEngine : IDisposable
             canvas.ResetMatrix();
             canvas.Clear(SKColors.Black);
             float scale = surface.Canvas.DeviceClipBounds.Width / (float)project.Settings.Width;
+            _renderScale = Math.Clamp(scale, 1f / 64, 1);
             canvas.Scale(scale);
             RenderScene(ctx, scene, frame, surface, 0);
             canvas.Flush();
@@ -150,7 +160,7 @@ public sealed class RenderEngine : IDisposable
         var cameras = new List<CameraState>();
         var deferred = new List<DeferredDraw>();
         var active = scene.ObjectsAt(frame).ToList();
-        PrefetchVideos(project, scene, active, frame);
+        PrefetchVideos(ctx, scene, active, frame, depth);
         // CPU 描画のときは描画先のピクセルを直接つかんでおく (大きな絵を帯に分けて並列に描くため)
         using var target = ctx.Gpu == null ? surface.PeekPixels() : null;
 
@@ -166,14 +176,8 @@ public sealed class RenderEngine : IDisposable
                 switch (def.Category)
                 {
                     case EffectCategory.Control when def.Id == EffectRegistry.GroupControl:
-                    {
-                        int n = (int)main.Eval("layers", bounds, frame);
-                        groups.Add(new GroupState(obj.Layer + 1, n <= 0 ? int.MaxValue : obj.Layer + n,
-                            (float)main.Eval("x", bounds, frame), (float)main.Eval("y", bounds, frame),
-                            (float)main.Eval("scale", bounds, frame) / 100f, (float)main.Eval("rotation", bounds, frame),
-                            1 - (float)main.Eval("alpha", bounds, frame) / 100f));
+                        groups.Add(GroupOf(obj, bounds, frame));
                         break;
-                    }
                     case EffectCategory.Control when def.Id == EffectRegistry.CameraControl:
                     {
                         float E(string k) => (float)main.Eval(k, bounds, frame);
@@ -199,20 +203,22 @@ public sealed class RenderEngine : IDisposable
                     {
                         _sourceScale = 1;
                         _sourceAnimated = false;
+                        _sourceStatic = false;
+                        _detail = Detail(ctx, obj, bounds, frame, groups, cameras.Count > 0);
                         var src = GetSource(ctx, obj, bounds, frame, depth);
                         if (src == null) break;
                         var sprite = Sprite.Centered(src);
                         if (_sourceScale != 1)
                         {
-                            // プロキシ (小さく作った動画) の絵。フィルタはピクセル単位の大きさ (ぼかしの範囲など) で動くので、
-                            // フィルタがあるときだけ元の大きさに戻してからかける。なければ縮んだまま描いて、描くときに拡大する
-                            bool hasFilter = obj.Effects.Skip(1).Any(e => e.Enabled && e.Definition.Category == EffectCategory.Filter);
-                            sprite = hasFilter ? Upscale(ctx, sprite, _sourceScale) : sprite with { Scale = _sourceScale };
+                            // 小さく作った絵 (プロキシ・縮めてデコードした動画・縮めて描いたシーン)。フィルタはピクセル単位の大きさ
+                            // (ぼかしの範囲など) で動くので、そういうフィルタがあるときだけ元の大きさに戻してからかける。
+                            // なければ縮んだまま描いて、描くときに拡大する
+                            sprite = NeedsFullResolution(obj) ? Upscale(ctx, sprite, _sourceScale) : sprite with { Scale = _sourceScale };
                         }
                         ctx.Modifiers = DrawModifiers.None;
                         int next = ApplyCachedFilters(ctx, obj, bounds, frame, depth, ref sprite);
                         sprite = Effects.ApplyRange(sprite, obj, bounds, ctx, next, obj.Effects.Count);
-                        bool changes = def.Id is EffectRegistry.Video or EffectRegistry.SceneRef || (def.Id == EffectRegistry.Vector && _sourceAnimated);
+                        bool changes = def.Id == EffectRegistry.Video || (def.Id == EffectRegistry.SceneRef && !_sourceStatic) || (def.Id == EffectRegistry.Vector && _sourceAnimated);
                         if (Place(sprite, obj, bounds, frame, groups, cameras, W, H, ctx.Modifiers) is not { } place) break;
                         if (place.Camera >= 0 && cameras[place.Camera].ZSort)
                         {
@@ -518,16 +524,89 @@ public sealed class RenderEngine : IDisposable
         return true;
     }
 
-    /// <summary>同じフレームに動画が複数あるときは、先にまとめて (並列に) デコードしておく。</summary>
-    private void PrefetchVideos(Project project, Scene scene, List<TimelineObject> active, int frame)
+    /// <summary>
+    /// 同じフレームに動画が複数あるときは、先にまとめて (並列に) デコードしておく。
+    /// 先読み (Lookahead) のときは 1 本でも先に取り出し、続けて次のフレームのデコードを裏で始める。
+    /// </summary>
+    private void PrefetchVideos(RenderContext ctx, Scene scene, List<TimelineObject> active, int frame, int depth)
     {
-        List<(string, string, double, bool)>? requests = null;
+        var project = ctx.Project;
+        List<(string, string, double, bool, float)>? requests = null;
+        List<(string, double, bool)>? next = null;
+        // 細かさ (Detail) を合成のときと同じに求めるため、グループ制御・カメラ制御を同じ順にたどる
+        var groups = new List<GroupState>();
+        bool camera = false;
         foreach (var o in active)
         {
-            if (!o.Enabled || o.Effects.Count == 0 || o.Main.DefinitionId != EffectRegistry.Video || !scene.GetLayer(o.Layer).Visible) continue;
-            (requests ??= new()).Add((o.Id, o.Main.GetString("file"), SourceTime(project, o, o.Bounds, frame), o.Main.GetBool("loop")));
+            if (!o.Enabled || o.Effects.Count == 0 || !scene.GetLayer(o.Layer).Visible) continue;
+            var id = o.Main.DefinitionId;
+            if (id == EffectRegistry.GroupControl) { groups.Add(GroupOf(o, o.Bounds, frame)); continue; }
+            if (id == EffectRegistry.CameraControl) { camera = true; continue; }
+            if (id != EffectRegistry.Video) continue;
+            var bounds = o.Bounds;
+            string file = o.Main.GetString("file");
+            bool loop = o.Main.GetBool("loop");
+            (requests ??= new()).Add((o.Id, file, SourceTime(project, o, bounds, frame), loop, Detail(ctx, o, bounds, frame, groups, camera)));
+            // 入れ子のシーンの中は、次に描くフレームが 1 つ先とは限らないので先読みしない
+            if (Lookahead && depth == 0 && o.Contains(frame + 1))
+                (next ??= new()).Add((o.Id, SourceTime(project, o, bounds, frame + 1), loop));
         }
-        if (requests is { Count: >= 2 }) Media.Prefetch(requests);
+        if (requests == null) return;
+        if (requests.Count >= 2 || next != null) Media.Prefetch(requests);
+        if (next != null) Media.Lookahead(next);
+    }
+
+    private static GroupState GroupOf(TimelineObject obj, int[] bounds, int frame)
+    {
+        var main = obj.Main;
+        int n = (int)main.Eval("layers", bounds, frame);
+        return new GroupState(obj.Layer + 1, n <= 0 ? int.MaxValue : obj.Layer + n,
+            (float)main.Eval("x", bounds, frame), (float)main.Eval("y", bounds, frame),
+            (float)main.Eval("scale", bounds, frame) / 100f, (float)main.Eval("rotation", bounds, frame),
+            1 - (float)main.Eval("alpha", bounds, frame) / 100f);
+    }
+
+    /// <summary>
+    /// プレビューで、オブジェクトの絵にどれだけの細かさが要るか (1 = 元の大きさ)。
+    /// 画面に出る大きさ (プレビューの縮小率 × 拡大率 × グループの拡大率 × 手前に出した分) より細かく作っても見えないので、
+    /// 動画のデコードやシーンの描画をその大きさで済ませる。
+    /// カメラ制御があるとき (どれだけ大きく映るか前もって分からない) と、ピクセル単位で動くフィルタがあるときは 1。
+    /// </summary>
+    private float Detail(RenderContext ctx, TimelineObject obj, int[] bounds, int frame, List<GroupState> groups, bool camera)
+    {
+        if (!ctx.Draft || _renderScale >= 1 || camera || NeedsFullResolution(obj)) return 1;
+        float k = _renderScale;
+        if (obj.Draw is { } draw)
+        {
+            k *= MathF.Abs((float)draw.Eval("scale", bounds, frame)) / 100f;
+            float z = (float)draw.Eval("z", bounds, frame);
+            if (z < 0) k *= DefaultCameraDistance / Math.Max(1, DefaultCameraDistance + z);   // 手前に出すと大きく映る
+        }
+        foreach (var g in groups)
+            if (obj.Layer >= g.FromLayer && obj.Layer <= g.ToLayer) k *= MathF.Abs(g.Scale);
+        if (float.IsNaN(k) || k <= 0) return 1;
+        return Math.Clamp(k, 1f / 64, 1);
+    }
+
+    /// <summary>
+    /// 小さく作った絵のままではかけられないフィルタ (ぼかしの範囲など、ピクセル単位の大きさで動くもの) があるか。
+    /// 色だけを変えるもの・不透明度や位置だけを変えるものは、小さい絵にかけても結果は同じ。
+    /// </summary>
+    private static bool NeedsFullResolution(TimelineObject obj)
+    {
+        for (int i = 1; i < obj.Effects.Count; i++)
+        {
+            var e = obj.Effects[i];
+            if (!e.Enabled || e.Definition.Category != EffectCategory.Filter) continue;
+            bool independent = e.DefinitionId switch
+            {
+                "filter.color" or "filter.mono" or "filter.fade" => true,
+                "filter.transition" => e.GetInt("type") is 0 or >= 6,   // フェード・スライド・ズーム (ワイプはぼかしの幅がピクセル単位)
+                _ => false,
+            };
+            if (!independent) return true;
+        }
+        return false;
     }
 
     // ---------------- フィルタ結果のキャッシュ ----------------
@@ -744,6 +823,10 @@ public sealed class RenderEngine : IDisposable
     private float _sourceScale = 1;
     /// <summary>直前の GetSource が返した絵が、フレームごとに変わるもの (Lottie) か。</summary>
     private bool _sourceAnimated;
+    /// <summary>直前の GetSource が返したシーンの絵が、前のフレームのものを使い回したもの (止まっているシーン) か。</summary>
+    private bool _sourceStatic;
+    /// <summary>今描いているオブジェクトに要る細かさ (Detail)。</summary>
+    private float _detail = 1;
     private readonly VectorSources _vectors = new();
 
     /// <summary>小さく作った絵を、元の大きさの絵にする。</summary>
@@ -773,7 +856,7 @@ public sealed class RenderEngine : IDisposable
             case EffectRegistry.Video:
             {
                 double t = SourceTime(p, obj, bounds, frame);
-                var image = Media.GetVideoFrame(obj.Id, main.GetString("file"), t, main.GetBool("loop"), out var scale);
+                var image = Media.GetVideoFrame(obj.Id, main.GetString("file"), t, main.GetBool("loop"), out var scale, _detail);
                 _sourceScale = scale;
                 return image;
             }
@@ -842,11 +925,7 @@ public sealed class RenderEngine : IDisposable
                 var scene = p.FindScene(main.GetString("scene"));
                 if (scene == null) return null;
                 int inner = SceneTime.InnerFrame(p, obj, scene, bounds, frame);
-                using var surface = ctx.CreateSurface(p.Settings.Width, p.Settings.Height);
-                if (surface == null) return null;
-                surface.Canvas.Clear(SKColors.Transparent);
-                RenderScene(ctx, scene, inner, surface, depth + 1);
-                return ctx.Own(surface.Snapshot());
+                return RenderSceneRef(ctx, obj, scene, inner, depth);
             }
         }
         // プラグインが追加したメディアオブジェクト
@@ -863,6 +942,141 @@ public sealed class RenderEngine : IDisposable
         // エンジンの持ち物 (ctx.Own したもの) だけをキャッシュに移す。プラグインが自分で持っている絵は預からない
         if (made == null || !ctx.Temporaries.Remove(made)) return made;
         return Cached(fullKey, () => made);
+    }
+
+    // ---------------- シーンオブジェクト ----------------
+
+    private sealed class SceneCacheEntry
+    {
+        public string SceneId = "";
+        public List<TimelineObject> Objects = new();
+        public List<bool> Visible = new();
+        public long FileStamp;
+        public int Frame;            // 止まっているシーンなら -1 (どのフレームでも同じ絵)
+        public int Width, Height;
+        public SKImage Image = null!;
+        public long LastUsed;
+    }
+    // シーンオブジェクトの絵。中身が同じ (同じオブジェクト・同じフレーム、止まっているシーンならフレームは問わない) なら使い回す
+    private readonly Dictionary<string, SceneCacheEntry> _sceneCache = new();
+    private const int SceneCacheLimit = 32;
+
+    /// <summary>シーンオブジェクトの絵を使い回した回数 / 描き直した回数 (計測用)。</summary>
+    public (long Hits, long Misses) SceneCacheStats { get; private set; }
+
+    /// <summary>
+    /// 入れ子のシーンを描いて絵にする。プレビューでは、画面に出る大きさ (Detail) までしか細かく描かない。
+    /// 中身が前と同じなら、前に描いた絵を返す。
+    /// </summary>
+    private SKImage? RenderSceneRef(RenderContext ctx, TimelineObject obj, Scene scene, int inner, int depth)
+    {
+        var p = ctx.Project;
+        int W = p.Settings.Width, H = p.Settings.Height;
+        // 細かさは 1/8 刻みに切り上げる (拡大率が少し動くたびに大きさが変わって、使い回せなくならないように)
+        float detail = Math.Min(1, MathF.Ceiling(_detail * 8) / 8);
+        int w = Math.Max(1, (int)MathF.Ceiling(W * detail)), h = Math.Max(1, (int)MathF.Ceiling(H * detail));
+
+        var active = scene.ObjectsAt(inner).ToList();
+        bool still = active.All(IsStill);
+        var visible = active.Select(o => scene.GetLayer(o.Layer).Visible).ToList();
+        long stamp = FileStampOf(active);
+        string key = depth == 0 ? obj.Id : obj.Id + "@" + depth;
+        _tick++;
+        if (_sceneCache.TryGetValue(key, out var hit) && hit.SceneId == scene.Id && hit.Width == w && hit.Height == h
+            && hit.Frame == (still ? -1 : inner) && hit.Objects.Count == active.Count
+            && hit.Objects.Zip(active).All(x => ReferenceEquals(x.First, x.Second)) && hit.Visible.SequenceEqual(visible) && hit.FileStamp == stamp)
+        {
+            hit.LastUsed = _tick;
+            _sourceScale = W / (float)w;
+            _sourceStatic = true;
+            SceneCacheStats = (SceneCacheStats.Hits + 1, SceneCacheStats.Misses);
+            return hit.Image;
+        }
+
+        using var surface = ctx.CreateSurface(w, h);
+        if (surface == null) return null;
+        surface.Canvas.Clear(SKColors.Transparent);
+        surface.Canvas.Scale(w / (float)W, h / (float)H);
+        // 中のオブジェクトの細かさ (Detail) は、この絵の縮小率で決める
+        float outerScale = _renderScale;
+        _renderScale = Math.Clamp(w / (float)W, 1f / 64, 1);
+        try { RenderScene(ctx, scene, inner, surface, depth + 1); }
+        finally { _renderScale = outerScale; }
+        surface.Canvas.ResetMatrix();
+        var image = surface.Snapshot();
+        SceneCacheStats = (SceneCacheStats.Hits, SceneCacheStats.Misses + 1);
+        // 中の描画で書き換わるので、描き終えてから決める
+        _sourceScale = W / (float)w;
+        _sourceStatic = false;
+
+        if (hit == null)
+        {
+            if (_sceneCache.Count >= SceneCacheLimit)
+                foreach (var k in _sceneCache.Where(kv => kv.Value.LastUsed < _frameStartTick).OrderBy(kv => kv.Value.LastUsed)
+                             .Take(SceneCacheLimit / 2).Select(kv => kv.Key).ToList())
+                {
+                    _sceneCache[k].Image.Dispose();
+                    _sceneCache.Remove(k);
+                }
+            _sceneCache[key] = hit = new SceneCacheEntry();
+        }
+        else hit.Image.Dispose();
+        hit.SceneId = scene.Id; hit.Objects = active; hit.Visible = visible; hit.FileStamp = stamp; hit.Frame = still ? -1 : inner;
+        hit.Width = w; hit.Height = h; hit.Image = image; hit.LastUsed = _tick;
+        return image;
+    }
+
+    /// <summary>画像ファイルの更新日時をまとめた値 (ファイルが書き換えられたら、シーンの絵を描き直すため)。</summary>
+    private static long FileStampOf(List<TimelineObject> objects)
+    {
+        long stamp = 0;
+        foreach (var o in objects)
+        {
+            if (o.Effects.Count == 0 || o.Main.DefinitionId != EffectRegistry.Image) continue;
+            string file = o.Main.GetString("file");
+            long t = 0;
+            try { if (file.Length > 0 && File.Exists(file)) t = File.GetLastWriteTimeUtc(file).Ticks; }
+            catch { t = 0; }
+            stamp = stamp * 31 + t;
+        }
+        return stamp;
+    }
+
+    /// <summary>
+    /// 時間がたっても見た目が変わらないオブジェクトか (シーンの絵を使い回してよいかの判定)。
+    /// 動画・アニメーション・スクリプトなど、フレームごとに変わりうるものは false。迷うものも false にする。
+    /// </summary>
+    private static bool IsStill(TimelineObject o)
+    {
+        if (!o.Enabled || o.Effects.Count == 0) return true;
+        var main = o.Main;
+        switch (main.Definition.Category)
+        {
+            case EffectCategory.AudioSource: return true;   // 絵には出ない
+            case EffectCategory.VideoSource:
+                if (main.DefinitionId is not (EffectRegistry.Image or EffectRegistry.Shape or EffectRegistry.Text)) return false;
+                if (main.DefinitionId == EffectRegistry.Text && main.GetInt("anim") > 0) return false;
+                break;
+            case EffectCategory.Control:
+            case EffectCategory.Filter:
+                break;
+            default: return false;
+        }
+        foreach (var e in o.Effects)
+        {
+            if (!e.Enabled) continue;
+            var cat = e.Definition.Category;
+            if (cat is EffectCategory.AudioPlay or EffectCategory.AudioFilter) continue;
+            // フェード・トランジションは時刻で変わる。結果が入力だけで決まらないもの (スクリプトなど) も変わりうる
+            if (cat == EffectCategory.Filter && (e.DefinitionId is "filter.fade" or "filter.transition"
+                || !Effects.IsDeterministic(e.DefinitionId, Effects.Find(e.DefinitionId)))) return false;
+            foreach (var v in e.Tracks.Values)
+            {
+                if (v.IsMoving) return false;
+                for (int i = 1; i < v.Values.Count; i++) if (!v.Values[i].Equals(v.Values[0])) return false;   // 中間点で値が切り替わる
+            }
+        }
+        return true;
     }
 
     /// <summary>オブジェクト内のフレーム位置を、素材の再生位置 (秒) に直す。</summary>
@@ -899,6 +1113,8 @@ public sealed class RenderEngine : IDisposable
         Gpu?.MakeCurrent();
         foreach (var e in _filterCache.Values) e.Sprite.Image.Dispose();
         foreach (var e in _dofCache.Values) e.Sprite.Image.Dispose();
+        foreach (var e in _sceneCache.Values) e.Image.Dispose();
+        _sceneCache.Clear();
         _dofCache.Clear();
         _filterCache.Clear();
         _filterCacheBytes = 0;

@@ -153,9 +153,11 @@ public sealed class ThumbnailCache
         // プロキシがあれば、小さいプロキシから作る (元の動画をデコードするより速い)
         var source = ProxyStore.FindReady(path) ?? path;
         var reader = OpenCached(source);
+        // サムネイルは小さいので、縮めて変換する (縮小に使う大きさの 2 倍は残す)
+        reader.OutputDivisor = Math.Max(1, reader.Height / (Height * 2));
         var frame = reader.GetFrame(seconds);
         if (frame == null) return null;
-        var info = new SKImageInfo(reader.Width, reader.Height, SKColorType.Bgra8888, SKAlphaType.Opaque);
+        var info = new SKImageInfo(reader.FrameWidth, reader.FrameHeight, SKColorType.Bgra8888, SKAlphaType.Opaque);
         using var src = new SKBitmap(info);
         System.Runtime.InteropServices.Marshal.Copy(frame, 0, src.GetPixels(), frame.Length);
         return Scale(src);

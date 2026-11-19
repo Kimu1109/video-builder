@@ -19,6 +19,10 @@ public sealed class MediaCache : IDisposable
         public double Position = double.NaN;
         /// <summary>最後に使った描画の番号。同じ描画の中で、別のオブジェクトに貸さないために使う。</summary>
         public long UsedInFrame = -1;
+        /// <summary>裏で次のフレームを読んでいる (先読み) 間は、その作業。終わるまでデコーダに触らない。</summary>
+        public Task? Pending;
+        /// <summary>先読みしている位置 (秒)。</summary>
+        public double PendingPosition;
     }
 
     // デコーダはファイルごとに持ち、オブジェクトには描画のたびに「いちばん都合のよいもの」を貸す。
@@ -51,6 +55,7 @@ public sealed class MediaCache : IDisposable
     /// <summary>新しいフレームの描画を始める。RenderEngine が描画のはじめに呼ぶ。</summary>
     public void BeginFrame()
     {
+        WaitLookahead();
         _frame++;
         _assigned.Clear();
     }
@@ -59,14 +64,32 @@ public sealed class MediaCache : IDisposable
         GetVideoFrame(key, path, seconds, loop, out _);
 
     /// <param name="key">オブジェクトの ID。同じ描画の中で、先に読んでおいた (Prefetch) フレームを見つけるのに使う。</param>
-    /// <param name="scale">返した画像の 1 ピクセルが、元の動画の何ピクセルにあたるか (プロキシなら 2 や 4)。</param>
-    public SKImage? GetVideoFrame(string key, string path, double seconds, bool loop, out float scale)
+    /// <param name="scale">返した画像の 1 ピクセルが、元の動画の何ピクセルにあたるか (プロキシや縮めたデコードなら 2 や 4)。</param>
+    /// <param name="detail">
+    /// 元の動画の大きさに対して、どれだけの細かさが要るか (1 = 元の大きさ、0.25 = 縦横 1/4 で足りる)。
+    /// 1 より小さければ、足りる範囲で縦横 1/n に縮めて変換する (変換と描画が軽くなる)。
+    /// </param>
+    public SKImage? GetVideoFrame(string key, string path, double seconds, bool loop, out float scale, float detail = 1)
     {
         scale = 1;
         var e = Acquire(key, EffectivePath(path), path, seconds, loop);
-        var image = e == null ? null : Decode(e, seconds, loop);
-        if (image != null && e!.Path != path && e.SourceWidth > 0) scale = e.SourceWidth / (float)image.Width;
+        var image = e == null ? null : Decode(e, seconds, loop, detail, path);
+        if (image != null) scale = OriginalWidth(e!, path) / (float)image.Width;
         return image;
+    }
+
+    /// <summary>元の動画の幅。プロキシの元の大きさが分からなければ、読んでいるファイルの幅とみなす。</summary>
+    private static int OriginalWidth(VideoEntry e, string original) =>
+        e.Path != original && e.SourceWidth > 0 ? e.SourceWidth : e.Reader?.Width ?? 1;
+
+    /// <summary>detail の細かさに足りる範囲で、いちばん大きな縮小率 (縦横 1/n) を選ぶ。</summary>
+    private static int DivisorFor(VideoEntry e, string original, float detail)
+    {
+        if (e.Reader is not { } r || detail >= 1 || detail <= 0) return 1;
+        double needed = OriginalWidth(e, original) * (double)detail;   // 要る幅 (ピクセル)
+        // 丸めの誤差で 1 段細かくならないよう、少しだけ余裕を見る
+        int n = (int)Math.Floor(r.Width / needed * 1.02);
+        return Math.Clamp(n, 1, 8);
     }
 
     /// <summary>実際に読むファイル (プロキシを使う設定でプロキシがあれば、プロキシ)。</summary>
@@ -77,17 +100,60 @@ public sealed class MediaCache : IDisposable
     /// 複数の動画のフレームを、動画ごとに別スレッドで同時にデコードしておく。
     /// このあとの GetVideoFrame は、デコード済みのフレームをすぐ返す。
     /// </summary>
-    public void Prefetch(IReadOnlyList<(string Key, string Path, double Seconds, bool Loop)> requests)
+    public void Prefetch(IReadOnlyList<(string Key, string Path, double Seconds, bool Loop, float Detail)> requests)
     {
         // デコーダの割り当て (一覧の書き換え) は 1 スレッドで済ませ、デコードだけを並列にする
-        var jobs = new List<(VideoEntry Entry, double Seconds, bool Loop)>();
-        foreach (var (key, path, seconds, loop) in requests)
+        var jobs = new List<(VideoEntry Entry, double Seconds, bool Loop, float Detail, string Original)>();
+        foreach (var (key, path, seconds, loop, detail) in requests)
         {
             var e = Acquire(key, EffectivePath(path), path, seconds, loop);
-            if (e?.Reader != null && jobs.All(j => !ReferenceEquals(j.Entry, e))) jobs.Add((e, seconds, loop));
+            if (e?.Reader != null && jobs.All(j => !ReferenceEquals(j.Entry, e))) jobs.Add((e, seconds, loop, detail, path));
         }
-        if (jobs.Count < 2) return;
-        Parallel.ForEach(jobs, job => Decode(job.Entry, job.Seconds, job.Loop));
+        if (jobs.Count == 1) Decode(jobs[0].Entry, jobs[0].Seconds, jobs[0].Loop, jobs[0].Detail, jobs[0].Original);
+        else if (jobs.Count >= 2) Parallel.ForEach(jobs, job => Decode(job.Entry, job.Seconds, job.Loop, job.Detail, job.Original));
+    }
+
+    /// <summary>最後に取り出した動画フレームの大きさ (縮めてデコードしたときは縮めた大きさ。計測・テスト用)。</summary>
+    public (int Width, int Height) LastFrameSize { get; private set; }
+
+    /// <summary>先読みを裏で走らせている数 (計測・テスト用)。</summary>
+    public int PendingLookaheads => _byPath.Values.Sum(l => l.Count(e => e.Pending != null));
+
+    /// <summary>
+    /// この描画で使ったデコーダに、次の描画で要るフレームを裏で読ませておく (デコードと変換を、合成と同時に進める)。
+    /// key は、この描画で GetVideoFrame / Prefetch に渡したもの。先読みが終わるまで、そのデコーダには触らない
+    /// (次の BeginFrame で終わるのを待つ)。
+    /// </summary>
+    public void Lookahead(IReadOnlyList<(string Key, double Seconds, bool Loop)> next)
+    {
+        foreach (var (key, seconds, loop) in next)
+        {
+            if (!_assigned.TryGetValue(key, out var e) || e.Reader is not { } r || e.Pending != null) continue;
+            double t = Normalize(e, seconds, loop);
+            // 今のフレームの範囲内なら、読むものがない
+            if (!double.IsNaN(e.Position) && Math.Abs(t - e.Position) < 1e-9) continue;
+            // 今のフレームの画像は、合成が終わるまで読まれる。先読みの変換で上書きしないよう、置き場を押さえておく
+            r.PinCurrentFrame();
+            e.PendingPosition = t;
+            e.Pending = Task.Run(() =>
+            {
+                try { r.GetFramePointer(t); }
+                catch { /* 先読みの失敗は無視する (本番の取り出しで、もう一度試す) */ }
+            });
+        }
+    }
+
+    /// <summary>先読みが終わるのを待って、デコーダを使えるように戻す。</summary>
+    private void WaitLookahead()
+    {
+        foreach (var e in _byPath.Values.SelectMany(l => l))
+        {
+            if (e.Pending == null) continue;
+            try { e.Pending.Wait(); } catch { /* 中で握りつぶしているので来ない */ }
+            e.Pending = null;
+            e.Reader?.UnpinFrame();
+            e.Position = e.PendingPosition;
+        }
     }
 
     private static double Normalize(VideoEntry e, double seconds, bool loop) =>
@@ -147,25 +213,29 @@ public sealed class MediaCache : IDisposable
         return e;
     }
 
-    private SKImage? Decode(VideoEntry e, double seconds, bool loop)
+    private SKImage? Decode(VideoEntry e, double seconds, bool loop, float detail = 1, string? original = null)
     {
         var r = e.Reader;
         if (r == null) return null;
+        // 先読み中のデコーダには触らない (この描画のフレームは、先読みを始める前に取り出してある)
+        if (e.Pending != null) return e.Image;
         seconds = Normalize(e, seconds, loop);
         e.Position = seconds;
-        // 先に古い画像を手放してから取り出す (zeroCopy では、取り出すとバッファの中身が書き換わるため)
+        r.OutputDivisor = DivisorFor(e, original ?? e.Path, detail);
         long before = r.CurrentFrameId;
         var data = r.GetFramePointer(seconds);
         if (data == IntPtr.Zero) return _zeroCopy && r.CurrentFrameId != before ? null : e.Image;
-        if (e.Image == null || e.FrameId != r.CurrentFrameId)
+        if (e.Image == null || e.FrameId != r.CurrentFrameId || e.Image.Width != r.FrameWidth || e.Image.Height != r.FrameHeight)
         {
+            // zeroCopy の古い画像は、デコーダの置き場を指しているだけなので、取り出した後に手放してよい
             e.Image?.Dispose();
-            var info = new SKImageInfo(r.Width, r.Height, SKColorType.Bgra8888, SKAlphaType.Opaque);
+            var info = new SKImageInfo(r.FrameWidth, r.FrameHeight, SKColorType.Bgra8888, SKAlphaType.Opaque);
             e.Image = _zeroCopy
-                ? SKImage.FromPixels(info, data, r.Width * 4)
-                : SKImage.FromPixelCopy(info, data, r.Width * 4);
+                ? SKImage.FromPixels(info, data, r.FrameWidth * 4)
+                : SKImage.FromPixelCopy(info, data, r.FrameWidth * 4);
             e.FrameId = r.CurrentFrameId;
         }
+        LastFrameSize = (e.Image.Width, e.Image.Height);
         return e.Image;
     }
 
@@ -206,6 +276,7 @@ public sealed class MediaCache : IDisposable
 
     public void Dispose()
     {
+        WaitLookahead();
         foreach (var e in _byPath.Values.SelectMany(l => l)) { e.Reader?.Dispose(); e.Image?.Dispose(); }
         foreach (var (img, _) in _images.Values) img?.Dispose();
         _byPath.Clear(); _assigned.Clear(); _images.Clear();
