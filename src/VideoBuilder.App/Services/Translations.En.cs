@@ -499,5 +499,15 @@ internal static class TranslationsEn
         ("見つからないプラグイン: {0}", "Missing plugins: {0}"),
         ("説明", "Description"),
         ("長さ {0} 秒 ・ {1} x {2} で作成", "{0} s long · made at {1} x {2}"),
+        ("色 1", "Color 1"),
+        ("色 2", "Color 2"),
+        ("色 3", "Color 3"),
+        ("色 4", "Color 4"),
+        ("色 5", "Color 5"),
+        ("色 6", "Color 6"),
+        ("色 7", "Color 7"),
+        ("色 8", "Color 8"),
+        ("ファイルの色に戻す", "Reset to the file's color"),
+        (" (ファイルの色)", " (file color)"),
     };
 }

@@ -596,6 +596,19 @@ public sealed class ObjectSettingsView : UserControl
         return box;
     }
 
+    /// <summary>
+    /// ベクター画像の「色 n」なら、置き換える元の色 (Lottie のファイルの n 番目の色)。
+    /// その番号の色がファイルにない (または Lottie でない) ときは Missing が true。ほかのパラメータでは null。
+    /// </summary>
+    private static (string? Original, bool Missing)? VectorColor(Effect e, string key)
+    {
+        if (e.DefinitionId != EffectRegistry.Vector) return null;
+        int slot = LottieColors.SlotOf(key);
+        if (slot < 0) return null;
+        var palette = LottieColors.PaletteOfFile(e.GetString("file"));
+        return slot < palette.Count ? (palette[slot], false) : (null, true);
+    }
+
     private Control BuildColor(Slot slot, ParamDefinition p)
     {
         var swatch = new Border { Width = 28, Height = 16, BorderThickness = new Thickness(1) };
@@ -614,16 +627,31 @@ public sealed class ObjectSettingsView : UserControl
             SetValue(slot, p.Key, $"#{e.NewColor.R:X2}{e.NewColor.G:X2}{e.NewColor.B:X2}", "color");
         };
         button.Flyout = new Flyout { Content = view, Placement = PlacementMode.BottomEdgeAlignedLeft };
+        // ベクター画像の色: ファイルの色に戻すボタン
+        var reset = new IconButton("Reset", "ファイルの色に戻す", flat: false) { Margin = new Thickness(4, 0, 0, 0), IsVisible = false };
+        reset.Click += (_, _) => SetValue(slot, p.Key, "");
+        var dock = new DockPanel();
+        DockPanel.SetDock(reset, Dock.Right);
+        dock.Children.Add(reset);
+        dock.Children.Add(button);
         _refreshers.Add(() =>
         {
             var e = slot.Effect(); if (e == null) return;
             var text = e.GetString(p.Key);
+            var vector = VectorColor(e, p.Key);
+            if (vector is { } v)
+            {
+                // ファイルにない番号の色は出さない (Lottie の色の数だけ並ぶ)。行 (ラベルを含む) ごと隠す
+                if (dock.Parent is Control row) row.IsVisible = !v.Missing;
+                reset.IsVisible = text.Length > 0;
+                if (text.Length == 0 && v.Original != null) text = v.Original;
+            }
             if (!Color.TryParse(text, out var c)) c = Colors.White;
             swatch.Background = new SolidColorBrush(c);
-            hex.Text = $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+            hex.Text = $"#{c.R:X2}{c.G:X2}{c.B:X2}" + (vector != null && e.GetString(p.Key).Length == 0 ? L.T(" (ファイルの色)") : "");
             if (view.Color != c) view.Color = c;
         });
-        return button;
+        return dock;
     }
 
     private Control BuildFile(Slot slot, ParamDefinition p)

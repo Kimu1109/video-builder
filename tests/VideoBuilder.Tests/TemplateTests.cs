@@ -375,3 +375,99 @@ public class VectorTests : IDisposable
         Assert.NotEqual(green, Pixel(p, 100, 160, 120));
     }
 }
+
+public class LottieColorTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), $"vb-lottie-{Guid.NewGuid():N}");
+
+    public LottieColorTests() => Directory.CreateDirectory(_dir);
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_dir, true); } catch { }
+    }
+
+    /// <summary>
+    /// 赤い丸 (塗り) と、緑から赤に変わる線、平面レイヤー (#0000ff)、文字色 (白) を持つ Lottie。
+    /// パレットは出てくる順に 赤・緑・青・白。
+    /// </summary>
+    internal const string Json = """
+    {"v":"5.7.4","fr":30,"ip":0,"op":30,"w":100,"h":100,"layers":[
+      {"ty":4,"ip":0,"op":30,"st":0,"ks":{"o":{"a":0,"k":100},"r":{"a":0,"k":0},"p":{"a":0,"k":[50,50,0]},"a":{"a":0,"k":[0,0,0]},"s":{"a":0,"k":[100,100,100]}},
+       "shapes":[{"ty":"el","p":{"a":0,"k":[0,0]},"s":{"a":0,"k":[60,60]}},
+                 {"ty":"fl","c":{"a":0,"k":[1,0,0,1]},"o":{"a":0,"k":100}},
+                 {"ty":"st","c":{"a":1,"k":[{"t":0,"s":[0,1,0,1]},{"t":29,"s":[1,0,0,1]}]},"o":{"a":0,"k":100},"w":{"a":0,"k":2}}]},
+      {"ty":1,"sc":"#0000ff","sw":10,"sh":10,"ip":0,"op":30,"st":0,"ks":{}},
+      {"ty":5,"t":{"d":{"k":[{"t":0,"s":{"t":"A","fc":[1,1,1],"s":10}}]}},"ip":0,"op":30,"st":0,"ks":{}}
+    ]}
+    """;
+
+    [Fact]
+    public void Palette_lists_colors_in_order_and_recolor_replaces_every_occurrence()
+    {
+        Assert.Equal(new[] { "#FF0000", "#00FF00", "#0000FF", "#FFFFFF" }, LottieColors.Palette(Json));
+        var recolored = LottieColors.Recolor(Json, new Dictionary<string, string> { ["#FF0000"] = "#336699", ["#0000FF"] = "#ABCDEF" });
+        // 塗りと、線のキーフレームの終わりの両方が置き換わる。並びは変わらない
+        Assert.Equal(new[] { "#336699", "#00FF00", "#ABCDEF", "#FFFFFF" }, LottieColors.Palette(recolored));
+        Assert.Contains("\"sc\":\"#abcdef\"", recolored);
+        Assert.Empty(LottieColors.Palette("{ not json"));
+        Assert.Equal("#AABBCC", LottieColors.Normalize("#abc"));
+        Assert.Equal("#112233", LottieColors.Normalize("#FF112233"));
+        Assert.Null(LottieColors.Normalize("red"));
+        Assert.Equal(2, LottieColors.SlotOf("color3"));
+        Assert.Equal(-1, LottieColors.SlotOf("color9"));
+    }
+
+    [Fact]
+    public void Map_uses_only_set_slots()
+    {
+        var e = new Effect(EffectRegistry.Get(EffectRegistry.Vector));
+        var palette = LottieColors.Palette(Json);
+        Assert.Empty(LottieColors.MapFor(e, palette));
+        e.Values["color2"] = "#123456";
+        e.Values["color4"] = "#ffffff";    // 元と同じ色は置き換えない
+        e.Values["color8"] = "#000000";    // パレットにない番号は無視
+        Assert.Equal(new Dictionary<string, string> { ["#00FF00"] = "#123456" }, LottieColors.MapFor(e, palette));
+    }
+
+    private static SKColor Pixel(Project p, int frame, int x, int y)
+    {
+        using var engine = new RenderEngine();
+        using var img = engine.RenderImage(p, p.Root, frame);
+        using var bmp = SKBitmap.FromImage(img);
+        return bmp.GetPixel(x, y);
+    }
+
+    private static readonly string Circle = """{"v":"5.7.4","fr":30,"ip":0,"op":30,"w":100,"h":100,"layers":[{"ty":4,"ip":0,"op":30,"st":0,"ks":{"o":{"a":0,"k":100},"r":{"a":0,"k":0},"p":{"a":0,"k":[50,50,0]},"a":{"a":0,"k":[0,0,0]},"s":{"a":0,"k":[100,100,100]}},"shapes":[{"ty":"el","p":{"a":0,"k":[0,0]},"s":{"a":0,"k":[60,60]}},{"ty":"fl","c":{"a":0,"k":[1,0,0,1]},"o":{"a":0,"k":100}}]}]}""";
+
+    [Fact]
+    public void Lottie_color_is_replaced_when_rendering_and_through_an_exposed_template_item()
+    {
+        var path = Path.Combine(_dir, "circle.json");
+        File.WriteAllText(path, Circle);
+        var s = new EditorSession();
+        s.Project.Settings.Width = 320; s.Project.Settings.Height = 240;
+        var o = s.AddObject(EffectRegistry.Vector, 0, 0, 30, x => x.Main.Values["file"] = path)!;
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(s.Project, 0, 160, 120));
+        o.Main.Values["color1"] = "#0000FF";
+        Assert.Equal(new SKColor(0, 0, 255), Pixel(s.Project, 0, 160, 120));
+        o.Main.Values["color1"] = "";
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(s.Project, 0, 160, 120));
+
+        // テンプレートにして「色 1」を公開し、挿入したものの公開項目から色を変える
+        var pkg = TemplatePackage.Create(s.Project, new[] { o }, new TemplateOptions
+        {
+            Name = "丸",
+            Exposed = new() { new ExposedParam { ObjectId = o.Id, Effect = 0, Key = "color1", Label = "丸の色" } },
+        });
+        var target = new EditorSession();
+        target.Project.Settings.Width = 320; target.Project.Settings.Height = 240;
+        Assert.Equal(1, target.InsertTemplate(pkg.Instantiate(target.Project, Path.Combine(_dir, "assets"), TemplateInsertMode.Scene), 0, 0));
+        var scene = target.Project.FindScene(target.Primary!.Main.GetString("scene"))!;
+        var (_, effect, param) = scene.Exposed![0].Resolve(scene)!.Value;
+        Assert.Equal(ParamKind.Color, param.Kind);
+        target.Edit("色", () => effect.Values["color1"] = "#00FF00");
+        Assert.Equal(new SKColor(0, 255, 0), Pixel(target.Project, 0, 160, 120));
+    }
+}
+

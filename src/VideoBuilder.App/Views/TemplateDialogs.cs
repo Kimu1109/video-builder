@@ -70,6 +70,9 @@ public sealed class TemplateSaveDialog : DialogBase
                     if (p.Key == "scene") continue;
                     // 一覧が長くなりすぎないよう、トラックバーはオブジェクト本体 (先頭のエフェクト) のものだけを出す
                     if (p.Kind == ParamKind.Track && ei != 0) continue;
+                    // ベクター画像の「色 n」は、Lottie にその番号の色があるものだけを出す
+                    if (e.DefinitionId == EffectRegistry.Vector && LottieColors.SlotOf(p.Key) is var cs and >= 0
+                        && cs >= LottieColors.PaletteOfFile(e.GetString("file")).Count) continue;
                     var existing = single?.Exposed?.FirstOrDefault(x => x.ObjectId == o.Id && x.Effect == ei && x.Key == p.Key);
                     bool suggested = existing != null || (single == null && ei == 0 &&
                         ((o.Main.DefinitionId == EffectRegistry.Text && p.Key == "text") || (p.Kind == ParamKind.File && o.Main.DefinitionId != EffectRegistry.Audio)));

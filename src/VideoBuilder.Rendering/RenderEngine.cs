@@ -800,7 +800,8 @@ public sealed class RenderEngine : IDisposable
             {
                 string file = main.GetString("file");
                 float size = (float)main.Eval("size", bounds, frame);
-                var info = _vectors.Get(file);
+                var palette = LottieColors.PaletteOfFile(file);
+                var info = palette.Count == 0 ? _vectors.Get(file) : _vectors.Get(file, LottieColors.MapFor(main, palette));
                 if (info == null) return null;
                 if (!info.Animated)
                     return Cached($"V|{file}|{info.Version}|{Generators.F(size)}", () => _vectors.Render(info, size, 0));

@@ -1,3 +1,4 @@
+using VideoBuilder.Core;
 using SkiaSharp;
 using SkiaSharp.Skottie;
 
@@ -32,6 +33,48 @@ internal sealed class VectorSources : IDisposable
 
     private readonly Dictionary<string, Item?> _items = new();
     private long _version;
+
+    // 色を置き換えた Lottie (キー: パス + 対応表)。色を選んでいる間に増えすぎないよう、古いものから捨てる
+    private readonly Dictionary<string, (Item Item, long Version, long LastUsed)> _recolored = new();
+    private long _tick;
+    private const int MaxRecolored = 16;
+
+    /// <summary>
+    /// 色を置き換えた Lottie を返す。map が空、または Lottie でなければ Get(path) と同じ。
+    /// 元のファイルが書き換わったら作り直す。
+    /// </summary>
+    public Item? Get(string path, IReadOnlyDictionary<string, string> map)
+    {
+        var item = Get(path);
+        if (item == null || !item.Animated || map.Count == 0) return item;
+        string key = path + "|" + string.Join(",", map.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => kv.Key + ">" + kv.Value));
+        _tick++;
+        if (_recolored.TryGetValue(key, out var hit) && hit.Version == item.Version)
+        {
+            _recolored[key] = hit with { LastUsed = _tick };
+            return hit.Item;
+        }
+        if (_recolored.Remove(key, out var stale)) stale.Item.Dispose();
+        var made = LoadLottie(LottieColors.Recolor(File.ReadAllText(path), map));
+        if (made == null) return item;
+        made.Time = item.Time; made.Version = ++_version;
+        if (_recolored.Count >= MaxRecolored)
+        {
+            var oldest = _recolored.MinBy(kv => kv.Value.LastUsed);
+            oldest.Value.Item.Dispose();
+            _recolored.Remove(oldest.Key);
+        }
+        _recolored[key] = (made, item.Version, _tick);
+        return made;
+    }
+
+    private static Item? LoadLottie(string json)
+    {
+        using var data = SKData.CreateCopy(System.Text.Encoding.UTF8.GetBytes(json));
+        using var stream = new SKMemoryStream(data);
+        if (!Animation.TryCreate(stream, out var anim) || anim == null) return null;
+        return new Item { Lottie = anim, Size = anim.Size };
+    }
 
     /// <summary>ファイルを読む。読めなければ null。</summary>
     public Item? Get(string path)
@@ -115,5 +158,7 @@ internal sealed class VectorSources : IDisposable
     {
         foreach (var i in _items.Values) i?.Dispose();
         _items.Clear();
+        foreach (var r in _recolored.Values) r.Item.Dispose();
+        _recolored.Clear();
     }
 }

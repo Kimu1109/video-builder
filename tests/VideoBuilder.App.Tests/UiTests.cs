@@ -596,6 +596,38 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public void Lottie_colors_appear_in_the_properties_only_as_many_as_the_file_has()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-ui-lottie-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var path = Path.Combine(dir, "two.json");
+            // 赤い塗りと緑の線 (2 色)
+            File.WriteAllText(path, """{"v":"5.7.4","fr":30,"ip":0,"op":30,"w":100,"h":100,"layers":[{"ty":4,"ip":0,"op":30,"st":0,"ks":{},"shapes":[{"ty":"fl","c":{"a":0,"k":[1,0,0,1]}},{"ty":"st","c":{"a":0,"k":[0,1,0,1]}}]}]}""");
+            var o = s.AddObject(EffectRegistry.Vector, 0, 0, 30, x => x.Main.Values["file"] = path)!;
+            Pump();
+            var settings = w.GetVisualDescendants().OfType<ObjectSettingsView>().Single();
+            var labels = settings.GetVisualDescendants().OfType<TextBlock>().Where(t => t.IsEffectivelyVisible).Select(t => t.Text).ToList();
+            Assert.Contains(L.T("色 1"), labels);
+            Assert.Contains(L.T("色 2"), labels);
+            Assert.DoesNotContain(L.T("色 3"), labels);
+            // 空の色は、ファイルの色を表示する
+            Assert.Contains(labels, t => t != null && t.StartsWith("#FF0000"));
+            Assert.Contains(labels, t => t != null && t.StartsWith("#00FF00"));
+
+            s.Edit("色", () => s.Scene.Find(o.Id)!.Main.Values["color1"] = "#0000FF");
+            Pump();
+            labels = settings.GetVisualDescendants().OfType<TextBlock>().Where(t => t.IsEffectivelyVisible).Select(t => t.Text).ToList();
+            Assert.Contains("#0000FF", labels);
+            Shot(w, "lottie-colors");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    [AvaloniaFact]
     public void Style_is_saved_and_applied_to_the_selection()
     {
         Open();
