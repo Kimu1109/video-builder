@@ -241,6 +241,9 @@ public sealed class PreferencesDialog : DialogBase
         var seconds = new NumberBox { Minimum = 0.1, Maximum = 600, Decimals = 1, Value = s.DefaultObjectSeconds, Width = 80, HorizontalAlignment = HorizontalAlignment.Left };
         seconds.Committed += v => { s.DefaultObjectSeconds = v; s.Save(); };
         Body.Children.Add(Row("新規オブジェクトの長さ (秒)", seconds, 180));
+        var crossfade = new NumberBox { Minimum = 0.05, Maximum = 30, Decimals = 2, Value = s.CrossfadeSeconds, Width = 80, HorizontalAlignment = HorizontalAlignment.Left };
+        crossfade.Committed += v => { s.CrossfadeSeconds = v; s.Save(); };
+        Body.Children.Add(Row("クロスフェードの長さ (秒)", crossfade, 180));
         var auto = new CheckBox { Content = $"自動保存する ({s.AutoSaveMinutes} 分ごと)", IsChecked = s.AutoSave };
         auto.IsCheckedChanged += (_, _) => { s.AutoSave = auto.IsChecked == true; s.Save(); };
         Body.Children.Add(auto);

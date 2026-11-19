@@ -45,6 +45,8 @@ public sealed class AppSettings
     public string SharedTemplateDir { get; set; } = "";
     /// <summary>テンプレートを入れるとき、作った解像度とプロジェクトの解像度が違えば、位置と大きさを合わせる。</summary>
     public bool FitTemplateResolution { get; set; } = true;
+    /// <summary>「次のクリップとつなぐ (クロスフェード)」で重ねる長さ (秒)。</summary>
+    public double CrossfadeSeconds { get; set; } = 0.5;
 
     private static readonly JsonSerializerOptions Options = new()
     {

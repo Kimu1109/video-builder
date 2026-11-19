@@ -13,6 +13,11 @@ public static class EffectRegistry
 
     public static readonly string[] ShapeTypes = { "背景", "円", "四角形", "三角形", "五角形", "六角形", "星型" };
     public static readonly string[] MaskShapes = { "四角形", "円", "角丸四角形" };
+    public static readonly string[] TransitionTypes =
+    {
+        "フェード", "ワイプ (左から)", "ワイプ (右から)", "ワイプ (上から)", "ワイプ (下から)", "円形ワイプ",
+        "スライド (左から)", "スライド (右から)", "スライド (上から)", "スライド (下から)", "ズーム",
+    };
 
     public static readonly string[] VideoExtensions = { "mp4", "mkv", "mov", "webm", "avi", "m4v", "ts", "flv", "wmv", "mpg" };
     public static readonly string[] ImageExtensions = { "png", "jpg", "jpeg", "bmp", "webp", "gif" };
@@ -195,6 +200,9 @@ public static class EffectRegistry
             T("width", "幅", 0, 16384, 400, 0, 0, 4000), T("height", "高さ", 0, 16384, 300, 0, 0, 4000),
             T("rotation", "回転", -3600, 3600, 0, 2, -360, 360), T("radius", "角の丸み", 0, 4000, 40, 0, 0, 500),
             T("feather", "ぼかし", 0, 1000, 0, 0, 0, 200), C("invert", "反転 (図形の外側を残す)"));
+        F("filter.transition", "トランジション", "Icon.Gradient",
+            new ParamDefinition { Key = "type", Name = "種類", Kind = ParamKind.Choice, Choices = TransitionTypes },
+            T("in", "イン (秒)", 0, 60, 0.5, 2, 0, 5), T("out", "アウト (秒)", 0, 60, 0, 2, 0, 5), T("feather", "ぼかし", 0, 1000, 20, 0, 0, 200));
         F("filter.script", "スクリプト制御", "Icon.Code",
             new ParamDefinition { Key = "code", Name = "Lua スクリプト", Kind = ParamKind.MultilineText, DefaultText = "-- obj.ox, obj.oy : 位置のずれ   obj.zoom : 拡大率 (1 = 等倍)\n-- obj.rz : 回転   obj.alpha : 不透明度 (1 = そのまま)\nobj.oy = math.sin(obj.time * 4) * 20" });
 

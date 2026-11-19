@@ -16,7 +16,7 @@ public static class Effects
         Register(new ColorCorrect()); Register(new Blur()); Register(new Border()); Register(new Shadow());
         Register(new Clip()); Register(new Mosaic()); Register(new ChromaKey()); Register(new Mono());
         Register(new Flip()); Register(new Fade()); Register(new ScriptEffect());
-        Register(new Mask());
+        Register(new Mask()); Register(new Transition());
     }
 
     private static readonly Dictionary<string, VideoBuilder.Plugins.IVideoSource> Sources = new();
@@ -518,6 +518,66 @@ public static class Effects
             bool invert = a.Check("invert");
             using var path = MaskPath(a.Effect.GetInt("shape"), s.Cx + a.Track("x"), s.Cy + a.Track("y"), w, h, a.Track("rotation"), a.Track("radius"));
             return Masked(s, a, path, a.Track("feather"), invert);
+        }
+    }
+
+    /// <summary>
+    /// エフェクト「トランジション」: クリップの入り (イン) と出 (アウト) で、フェード・ワイプ・円形ワイプ・スライド・ズームをかける。
+    /// フェード・スライド・ズームは描く位置 (DrawModifiers) で、ワイプはマスクで描く。動きは加減速 (smoothstep) を付ける。
+    /// </summary>
+    private sealed class Transition : IVideoEffect
+    {
+        public string Id => "filter.transition";
+
+        public Sprite Apply(Sprite s, EffectArgs a)
+        {
+            var p = a.Context.Project;
+            double t = p.FrameToSeconds(a.Context.Frame - a.Object.Start);
+            double rest = p.FrameToSeconds(a.Object.End + 1 - a.Context.Frame);
+            double fin = a.Track("in"), fout = a.Track("out");
+            double progress = 1;
+            if (fin > 0) progress = Math.Min(progress, t / fin);
+            if (fout > 0) progress = Math.Min(progress, rest / fout);
+            progress = Math.Clamp(progress, 0, 1);
+            if (progress >= 1) return s;
+            float e = (float)(progress * progress * (3 - 2 * progress));
+            float feather = a.Track("feather");
+            int W = p.Settings.Width, H = p.Settings.Height;
+            switch (a.Effect.GetInt("type"))
+            {
+                case 0:   // フェード
+                    a.Context.Modifiers.Alpha *= e;
+                    return s;
+                case >= 1 and <= 4 and var wipe:
+                {
+                    // ワイプ: 見えている範囲の端を、決めた辺から反対の辺へ動かす。
+                    // ぼかしの幅ぶん外から始めて外で終わるので、始め (e = 0) は何も見えず、終わり (e = 1) は全部見える
+                    float m = feather * 2, wx = -feather + (s.Width + feather * 2) * e, hy = -feather + (s.Height + feather * 2) * e;
+                    SKRect r = wipe switch
+                    {
+                        1 => new SKRect(-m, -m, wx, s.Height + m),                          // 左から
+                        2 => new SKRect(s.Width - wx, -m, s.Width + m, s.Height + m),       // 右から
+                        3 => new SKRect(-m, -m, s.Width + m, hy),                           // 上から
+                        _ => new SKRect(-m, s.Height - hy, s.Width + m, s.Height + m),      // 下から
+                    };
+                    using var path = new SKPath();
+                    path.AddRect(r);
+                    return Masked(s, a, path, feather, false);
+                }
+                case 5:   // 円形ワイプ: 中心から円を広げる
+                {
+                    float radius = (MathF.Sqrt(s.Width * s.Width + s.Height * s.Height) / 2 + feather) * e;
+                    using var path = MaskPath(1, s.Cx, s.Cy, radius * 2, radius * 2, 0, 0);
+                    return Masked(s, a, path, feather, false);
+                }
+                case 6: a.Context.Modifiers.Ox -= W * (1 - e); return s;   // スライド (左から)
+                case 7: a.Context.Modifiers.Ox += W * (1 - e); return s;   // スライド (右から)
+                case 8: a.Context.Modifiers.Oy -= H * (1 - e); return s;   // スライド (上から)
+                case 9: a.Context.Modifiers.Oy += H * (1 - e); return s;   // スライド (下から)
+                default:  // ズーム
+                    a.Context.Modifiers.Zoom *= e;
+                    return s;
+            }
         }
     }
 

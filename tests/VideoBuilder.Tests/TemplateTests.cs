@@ -857,3 +857,107 @@ public class MaskTests
     }
 }
 
+public class TransitionTests
+{
+    private static (Project P, Effect T) Setup(int type, double inSec = 1, double outSec = 0)
+    {
+        var p = MaskTests.WithBackground("#00FF00", out var bg);
+        p.Settings.FrameRate = "30";
+        var t = ObjectFactory.AddFilter(bg, "filter.transition");
+        t.Values["type"] = type.ToString();
+        t.Tracks["in"] = new AnimatedValue(inSec);
+        t.Tracks["out"] = new AnimatedValue(outSec);
+        t.Tracks["feather"] = new AnimatedValue(0);
+        return (p, t);
+    }
+
+    private static readonly SKColor Green = new(0, 255, 0);
+    private static SKColor Black => MaskTests.Pixel(new Project { Settings = { Width = 320, Height = 240 } }, 0, 0, 0);
+
+    [Fact]
+    public void Fade_goes_from_transparent_to_opaque_and_back()
+    {
+        var (p, _) = Setup(0, 1, 1);
+        Assert.Equal(Black, MaskTests.Pixel(p, 0, 160, 120));
+        Assert.InRange(MaskTests.Pixel(p, 15, 160, 120).Green, 100, 160);   // 半分 (加減速付き)
+        Assert.Equal(Green, MaskTests.Pixel(p, 30, 160, 120));
+        Assert.True(MaskTests.Pixel(p, 59, 160, 120).Green < 10);          // アウト: 最後はほぼ消える
+    }
+
+    [Fact]
+    public void Wipes_reveal_from_the_chosen_side()
+    {
+        var (p, t) = Setup(1);
+        Assert.Equal(Green, MaskTests.Pixel(p, 15, 40, 120));
+        Assert.Equal(Black, MaskTests.Pixel(p, 15, 280, 120));
+        t.Values["type"] = "2";
+        Assert.Equal(Black, MaskTests.Pixel(p, 15, 40, 120));
+        Assert.Equal(Green, MaskTests.Pixel(p, 15, 280, 120));
+        t.Values["type"] = "3";
+        Assert.Equal(Green, MaskTests.Pixel(p, 15, 160, 20));
+        Assert.Equal(Black, MaskTests.Pixel(p, 15, 160, 220));
+        t.Values["type"] = "4";
+        Assert.Equal(Black, MaskTests.Pixel(p, 15, 160, 20));
+        Assert.Equal(Green, MaskTests.Pixel(p, 15, 160, 220));
+        t.Values["type"] = "5";   // 円形
+        Assert.Equal(Green, MaskTests.Pixel(p, 15, 160, 120));
+        Assert.Equal(Black, MaskTests.Pixel(p, 15, 5, 5));
+        Assert.Equal(Black, MaskTests.Pixel(p, 0, 160, 120));
+        Assert.Equal(Green, MaskTests.Pixel(p, 30, 5, 5));
+        // ぼかし付きでも、始めは見えず終わりは全部見える
+        t.Values["type"] = "1";
+        t.Tracks["feather"] = new AnimatedValue(30);
+        Assert.True(MaskTests.Pixel(p, 0, 5, 120).Green < 10);
+        Assert.Equal(Green, MaskTests.Pixel(p, 30, 315, 120));
+    }
+
+    [Fact]
+    public void Slides_and_zoom_move_the_object()
+    {
+        var (p, t) = Setup(6);   // 左から: 半分のとき 160px 左にずれている
+        Assert.Equal(Green, MaskTests.Pixel(p, 15, 100, 120));
+        Assert.Equal(Black, MaskTests.Pixel(p, 15, 200, 120));
+        t.Values["type"] = "7";
+        Assert.Equal(Black, MaskTests.Pixel(p, 15, 100, 120));
+        Assert.Equal(Green, MaskTests.Pixel(p, 15, 200, 120));
+        t.Values["type"] = "9";
+        Assert.Equal(Black, MaskTests.Pixel(p, 15, 160, 40));
+        Assert.Equal(Green, MaskTests.Pixel(p, 15, 160, 200));
+        t.Values["type"] = "10";  // ズーム: 半分の大きさ
+        Assert.Equal(Green, MaskTests.Pixel(p, 15, 160, 120));
+        Assert.Equal(Black, MaskTests.Pixel(p, 15, 20, 120));
+        Assert.Equal(Green, MaskTests.Pixel(p, 30, 20, 120));
+    }
+
+    [Fact]
+    public void Crossfade_moves_the_next_clip_below_with_overlap_and_adds_fades()
+    {
+        var s = new EditorSession();
+        s.Project.Settings.FrameRate = "30";
+        var a = s.AddObject(EffectRegistry.Shape, 2, 0, 60)!;
+        var aSound = s.AddObject(EffectRegistry.Audio, 3, 0, 60)!;
+        var b = s.AddObject(EffectRegistry.Shape, 2, 70, 60)!;
+        var bSound = s.AddObject(EffectRegistry.Audio, 3, 70, 60)!;
+        s.Edit("連結", () => { a.GroupId = aSound.GroupId = "ga"; b.GroupId = bSound.GroupId = "gb"; });
+        Assert.Null(s.Crossfade(s.Scene.Find(a.Id)!, 15));
+        var nb = s.Scene.Find(b.Id)!; var nbs = s.Scene.Find(bSound.Id)!;
+        // 映像と音声の組なので 2 つ下 (前の音声のレイヤーを避ける) へ、15 フレーム重なる位置に
+        Assert.Equal((4, 45, 104), (nb.Layer, nb.Start, nb.End));
+        Assert.Equal((5, 45), (nbs.Layer, nbs.Start));
+        Assert.Equal(0.5, nb.FindEffect("filter.transition")!.Tracks["in"].Values[0]);
+        Assert.Equal(0.5, nbs.FindEffect("audio.fade")!.Tracks["in"].Values[0]);
+        Assert.Equal(0, nbs.FindEffect("audio.fade")!.Tracks["out"].Values[0]);
+        Assert.Equal(0.5, s.Scene.Find(aSound.Id)!.FindEffect("audio.fade")!.Tracks["out"].Values[0]);
+        s.Undo();
+        Assert.Equal((2, 70), (s.Scene.Find(b.Id)!.Layer, s.Scene.Find(b.Id)!.Start));
+        // 後ろにクリップがない・下が空いていないときは理由を返す
+        Assert.NotNull(s.Crossfade(s.Scene.Find(b.Id)!, 15));
+        // 連結していないクリップなら 1 つ下へ
+        var t = new EditorSession();
+        var c = t.AddObject(EffectRegistry.Shape, 0, 0, 30)!;
+        var d = t.AddObject(EffectRegistry.Shape, 0, 30, 30)!;
+        Assert.Null(t.Crossfade(c, 10));
+        Assert.Equal((1, 20), (t.Scene.Find(d.Id)!.Layer, t.Scene.Find(d.Id)!.Start));
+    }
+}
+

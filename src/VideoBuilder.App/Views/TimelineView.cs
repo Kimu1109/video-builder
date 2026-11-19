@@ -183,6 +183,12 @@ public sealed class TimelineView : UserControl
         menu.Items.Add(Menus.Item("コピー", "Copy", _session.CopySelected, Shortcuts.First("edit.copy")));
         menu.Items.Add(Menus.Item("削除", "Delete", _session.DeleteSelected, Shortcuts.First("edit.delete")));
         menu.Items.Add(Menus.Item("テンプレートとして保存...", "Template", () => _ = EditorCommands.SaveTemplateAsync()));
+        bool hasNext = _session.Scene.Objects.Any(x => x.Layer == o.Layer && x.Start > o.End);
+        menu.Items.Add(Menus.Item("次のクリップとつなぐ (クロスフェード)", "Gradient", () =>
+        {
+            var error = _session.Crossfade(o, Math.Max(1, _session.Project.SecondsToFrames(Svc.Settings.CrossfadeSeconds)));
+            if (error != null) _ = EditorCommands.ShowErrorAsync(error);
+        }, null, hasNext));
         if (o.Main.DefinitionId == EffectRegistry.Video)
         {
             var file = o.Main.GetString("file");

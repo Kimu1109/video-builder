@@ -373,6 +373,56 @@ public sealed class EditorSession
         return added.Count;
     }
 
+    // ---------------- トランジション ----------------
+
+    /// <summary>
+    /// first と、同じレイヤーのすぐ後ろのクリップをつなぐ (クロスフェード)。後ろのクリップ (連結しているものも一緒に) を
+    /// 下のレイヤー (手前に描かれる) の、まとめて入るいちばん近い所に移し、overlap フレームだけ重なる位置まで動かして、
+    /// 入りにトランジション (フェード) を付ける。
+    /// 音声は、後ろのものにフェードイン、first と連結した音声にフェードアウトを付ける。できなければ理由を返す (null なら成功)。
+    /// </summary>
+    public string? Crossfade(TimelineObject first, int overlap)
+    {
+        var next = Scene.Objects.Where(o => o.Layer == first.Layer && o.Start > first.End).MinBy(o => o.Start);
+        if (next == null) return "同じレイヤーの後ろにクリップがありません";
+        overlap = Math.Clamp(overlap, 1, Math.Max(1, Math.Min(first.Length, next.Length) - 1));
+        var moving = WithGroup(new[] { next });
+        int delta = first.End + 1 - overlap - next.Start;
+        var ignore = moving.Select(o => o.Id).ToHashSet();
+        // 映像と音声の組なら、first の音声が 1 つ下にあるので、まとめて入るいちばん近いずらし方を探す
+        int shift = 0;
+        for (int k = 1; k < Scene.LayerCount && shift == 0; k++)
+            if (moving.All(o => o.Start + delta >= 0 && Scene.IsFree(o.Layer + k, o.Start + delta, o.End + delta, ignore))) shift = k;
+        if (shift == 0) return "下のレイヤーに空きがありません";
+        double seconds = Project.FrameToSeconds(overlap);
+        var firstAudio = WithGroup(new[] { first }).Where(o => o.Definition.Category == EffectCategory.AudioSource).ToList();
+        Edit("クロスフェード", () =>
+        {
+            foreach (var o in moving)
+            {
+                o.Layer += shift;
+                o.SetRange(o.Start + delta, o.End + delta);
+                if (o.Definition.Category == EffectCategory.AudioSource) SetFade(o, "audio.fade", "in", seconds);
+                else if (o.Definition.Category == EffectCategory.VideoSource) SetFade(o, "filter.transition", "in", seconds);
+            }
+            foreach (var a in firstAudio) SetFade(a, "audio.fade", "out", seconds);
+        });
+        Select(next.Id);
+        return null;
+
+        static void SetFade(TimelineObject o, string definitionId, string key, double seconds)
+        {
+            var e = o.FindEffect(definitionId);
+            if (e == null)
+            {
+                e = ObjectFactory.AddFilter(o, definitionId);
+                // 付けたほうだけを使う (もう一方は 0 にする)
+                e.Tracks[key == "in" ? "out" : "in"] = new AnimatedValue(0, o.Sections);
+            }
+            e.Tracks[key] = new AnimatedValue(Math.Round(seconds, 2), o.Sections);
+        }
+    }
+
     // ---------------- 字幕 ----------------
 
     /// <summary>
