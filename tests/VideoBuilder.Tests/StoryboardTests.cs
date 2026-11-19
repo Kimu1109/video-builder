@@ -260,4 +260,56 @@ public class StoryboardTests
         Assert.Equal("/new/a.png", ed.Board!.Clips[0].File);
         Assert.True(ed.CanEdit);
     }
+
+    // ---------------- 再生速度 ----------------
+
+    [Fact]
+    public void Speed_shortens_the_clip_and_is_applied_to_video_and_audio()
+    {
+        var p = Small();
+        var clip = new StoryClip { Kind = StoryClipKind.Video, File = "/v.mp4", SourceSeconds = 10, TrimStart = 2, TrimEnd = 8, HasAudio = true, Speed = 2 };
+        var board = new Storyboard { Clips = { clip } };
+        Assert.Equal(3, clip.Seconds);                          // 6 秒ぶんを 2 倍速
+        Assert.Equal(90, StoryboardCompiler.Layout(board, p).VideoLength);
+        var objects = StoryboardCompiler.Compile(board, p);
+        var v = objects.Single(o => o.Main.DefinitionId == EffectRegistry.Video);
+        var a = objects.Single(o => o.Main.DefinitionId == EffectRegistry.Audio);
+        Assert.Equal(200, v.Main.Tracks["speed"].Values[0]);
+        Assert.Equal(200, a.Main.Tracks["speed"].Values[0]);
+        // 最後のフレームは、素材の使う範囲の終わりの手前
+        Assert.InRange(RenderEngine.SourceTime(p, v, v.Bounds, v.End), 7.9, 8);
+
+        // 写真・タイトルには効かない、範囲の外は収める
+        Assert.Equal(1, new StoryClip { Kind = StoryClipKind.Photo, Speed = 4 }.EffectiveSpeed);
+        clip.Speed = 100;
+        Assert.Equal(StoryClip.MaxSpeed, clip.EffectiveSpeed);
+    }
+
+    [Fact]
+    public void Splitting_and_trimming_a_fast_clip_cut_the_source_at_the_same_picture()
+    {
+        var (s, ed) = NewEditor();
+        ed.AddClips(new[] { new StoryClip { Kind = StoryClipKind.Video, File = "/v.mp4", SourceSeconds = 10, Speed = 2 } });
+        Assert.True(ed.SplitAt(60));   // 画面で 2 秒 = 素材で 4 秒
+        Assert.Equal(4, ed.Board!.Clips[0].TrimEnd);
+        Assert.Equal(4, ed.Board.Clips[1].TrimStart);
+        Assert.Equal(2, ed.Board.Clips[1].Speed);
+        Assert.Equal(150, ed.Layout.VideoLength);   // 合わせて 5 秒 (10 秒の 2 倍速) のまま
+
+        ed.Select(ed.Board.Clips[1].Id);
+        Assert.True(ed.TrimSelectedAt(60 + 30, start: false));   // 後半の 1 秒目 = 素材で 2 秒進んだ所
+        Assert.Equal(6, ed.Board!.Clips[1].TrimEnd);
+    }
+
+    [Fact]
+    public void Imported_video_keeps_its_speed()
+    {
+        var (s, ed) = NewEditor();
+        s.AddObject(EffectRegistry.Video, 0, 0, 60, o => { o.Main.Values["file"] = "/v.mp4"; o.Main.Tracks["speed"] = new AnimatedValue(150); });
+        ed.ImportFromScene();
+        var clip = ed.Board!.Clips.Single();
+        Assert.Equal(1.5, clip.Speed);
+        Assert.Equal(3, clip.TrimEnd - clip.TrimStart);
+        Assert.Equal(60, ed.Layout.VideoLength);
+    }
 }

@@ -1287,6 +1287,29 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public void Speed_is_chosen_in_the_clip_panel_for_videos_only()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        ed.AddClips(new[] { new StoryClip { Kind = StoryClipKind.Video, File = "/v.mp4", SourceSeconds = 10 }, ColorTitle("#FF0000") });
+        ed.Select(ed.Board!.Clips[0].Id);
+        Pump();
+        var combos = w.Simple.Panel.GetVisualDescendants().OfType<ComboBox>().ToList();
+        var speed = combos.Single(c => c.ItemsSource is string[] items && items.Contains("2x"));
+        speed.SelectedIndex = Array.IndexOf((string[])speed.ItemsSource!, "2x");
+        Pump();
+        Assert.Equal(2, ed.Board!.Clips[0].Speed);
+        Assert.Equal(150, ed.Layout.Clips[0].Length);
+        Svc.Session.Undo();
+        Assert.Equal(1, ed.Board!.Clips[0].Speed);
+
+        // タイトルには速度の欄がない
+        ed.Select(ed.Board.Clips[1].Id);
+        Pump();
+        Assert.DoesNotContain(w.Simple.Panel.GetVisualDescendants().OfType<ComboBox>(), c => c.ItemsSource is string[] items && items.Contains("2x"));
+    }
+
+    [AvaloniaFact]
     public void Project_changed_in_advanced_mode_shows_a_notice_in_simple_mode()
     {
         var w = OpenSimple();

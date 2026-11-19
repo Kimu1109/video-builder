@@ -209,7 +209,8 @@ public sealed class StoryboardEditor
             var first = b.FindClip(span.Clip.Id)!;
             if (first.Kind == StoryClipKind.Video)
             {
-                double cut = Math.Round(first.TrimStart + offset, 3);
+                // 画面の上の時間を、素材の時間に直す (2 倍速なら素材は 2 倍進んでいる)
+                double cut = Math.Round(first.TrimStart + offset * first.EffectiveSpeed, 3);
                 second.TrimStart = cut;
                 first.TrimEnd = cut;
             }
@@ -239,9 +240,9 @@ public sealed class StoryboardEditor
         {
             if (c.Kind == StoryClipKind.Video)
             {
-                double end = c.EffectiveTrimEnd;
-                if (start) { c.TrimStart = Math.Round(c.TrimStart + offset, 3); if (c.TrimEnd <= 0) c.TrimEnd = end; }
-                else c.TrimEnd = Math.Round(c.TrimStart + offset, 3);
+                double end = c.EffectiveTrimEnd, source = offset * c.EffectiveSpeed;
+                if (start) { c.TrimStart = Math.Round(c.TrimStart + source, 3); if (c.TrimEnd <= 0) c.TrimEnd = end; }
+                else c.TrimEnd = Math.Round(c.TrimStart + source, 3);
             }
             else c.Duration = Math.Round(start ? c.Duration - offset : offset, 3);
         });

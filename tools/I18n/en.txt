@@ -696,3 +696,7 @@ dotLottie の中にアニメーションがありません = There is no animati
 クリップの削除 = Delete clip
 クリップの移動 = Move clip
 音楽の削除 = Delete music
+速度の変更 = Change speed
+標準 (1 倍) = Normal (1x)
+長さ {0} (使う範囲 {1} を {2} 倍速) = Length {0} ({1} of source at {2}x)
+速度を変えると、音の高さも変わります。 = Changing the speed also changes the pitch.

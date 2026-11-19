@@ -66,6 +66,15 @@ public sealed class StoryClip
     public double TrimEnd { get; set; }
     /// <summary>写真・タイトルの表示時間 (秒)。</summary>
     public double Duration { get; set; } = 5;
+    /// <summary>動画の再生速度 (倍。1 = そのまま、2 = 2 倍速)。音声も同じ速さになる (音の高さも変わる)。</summary>
+    public double Speed { get; set; } = 1;
+
+    /// <summary>選べる再生速度。音声の再生速度の上限 (8 倍) に合わせる。</summary>
+    public static readonly double[] Speeds = { 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 8 };
+    public const double MinSpeed = 0.1, MaxSpeed = 8;
+
+    /// <summary>実際に使う再生速度 (範囲に収めたもの)。動画以外は 1。</summary>
+    [JsonIgnore] public double EffectiveSpeed => Kind == StoryClipKind.Video ? Math.Clamp(Speed, MinSpeed, MaxSpeed) : 1;
 
     // ---- 切り替え効果 (このクリップに入るとき) ----
     /// <summary>0 = なし、1 以上 = <see cref="EffectRegistry.TransitionTypes"/> の (番号 + 1)。</summary>
@@ -95,10 +104,10 @@ public sealed class StoryClip
     /// <summary>動画の使う範囲の終わり (TrimEnd が 0 なら素材の長さ)。</summary>
     [JsonIgnore] public double EffectiveTrimEnd => TrimEnd > 0 ? TrimEnd : SourceSeconds;
 
-    /// <summary>このクリップの長さ (秒)。</summary>
+    /// <summary>このクリップの長さ (秒)。動画は、使う範囲を再生速度で割ったもの。</summary>
     [JsonIgnore]
     public double Seconds => Kind == StoryClipKind.Video
-        ? Math.Max(MinSeconds, EffectiveTrimEnd - TrimStart)
+        ? Math.Max(MinSeconds, (EffectiveTrimEnd - TrimStart) / EffectiveSpeed)
         : Math.Max(MinSeconds, Duration);
 
     /// <summary>素材のファイルを使うクリップか (タイトルは使わない)。</summary>

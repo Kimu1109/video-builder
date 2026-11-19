@@ -375,7 +375,7 @@ public sealed class StoryboardStrip : Control
                 double w = thumb != null ? thumb.Size.Width * thumbHeight / Math.Max(1, thumb.Size.Height) : thumbHeight * 16 / 9;
                 if (x + w >= 0 && thumb != null) ctx.DrawImage(thumb, new Rect(thumb.Size), new Rect(x, inner.Y + thumbTop, w, thumbHeight));
                 x += w;
-                if (video) t += w / _pps;
+                if (video) t += w / _pps * clip.EffectiveSpeed;
                 if (!video && thumb == null) break;
             }
         }
@@ -385,7 +385,8 @@ public sealed class StoryboardStrip : Control
         double visibleRight = Math.Min(inner.Right, FrameToX(span.End + 1 - span.FadeOut));
         string name = clip.Kind == StoryClipKind.Title ? L.T("タイトル") : Path.GetFileName(clip.File);
         ctx.DrawText(Text(name, 11, white), new Point(inner.X + 4, inner.Y + 2));
-        ctx.DrawText(Text(FormatSeconds(clip.Seconds), 10, white), new Point(inner.X + 4, inner.Bottom - 15));
+        string length = FormatSeconds(clip.Seconds) + (clip.EffectiveSpeed != 1 ? $"  ×{clip.EffectiveSpeed:0.##}" : "");
+        ctx.DrawText(Text(length, 10, white), new Point(inner.X + 4, inner.Bottom - 15));
         // 付いている設定の印
         var marks = new List<string>();
         if (clip.Caption.Trim().Length > 0) marks.Add("T");

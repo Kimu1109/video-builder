@@ -25,6 +25,7 @@ public static class StoryboardImport
                 double speed = Math.Max(0.01, o.Main.Eval("speed", o.Bounds, o.Start) / 100);
                 clip.TrimStart = Math.Round(o.Main.Eval("position", o.Bounds, o.Start) + project.FrameToSeconds(o.SourceOffsetFrames) * speed, 3);
                 clip.TrimEnd = Math.Round(clip.TrimStart + seconds * speed, 3);
+                clip.Speed = Math.Round(Math.Clamp(speed, StoryClip.MinSpeed, StoryClip.MaxSpeed), 3);
                 var audio = o.GroupId == null ? null : visible.FirstOrDefault(a => a.GroupId == o.GroupId && a.Main.DefinitionId == EffectRegistry.Audio);
                 if (audio != null)
                 {

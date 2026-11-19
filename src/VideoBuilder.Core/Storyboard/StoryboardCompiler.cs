@@ -134,7 +134,11 @@ public static class StoryboardCompiler
             else
             {
                 v.Main.Values["file"] = clip.File;
-                if (clip.Kind == StoryClipKind.Video) v.Main.Tracks["position"] = new AnimatedValue(Round(clip.TrimStart));
+                if (clip.Kind == StoryClipKind.Video)
+                {
+                    v.Main.Tracks["position"] = new AnimatedValue(Round(clip.TrimStart));
+                    if (clip.EffectiveSpeed != 1) v.Main.Tracks["speed"] = new AnimatedValue(Round(clip.EffectiveSpeed * 100));
+                }
                 ApplyFrame(v, clip, W, H);
             }
             ApplyLook(v, clip.Look);
@@ -173,6 +177,7 @@ public static class StoryboardCompiler
                 a.Id = ObjectId(clip, "a");
                 a.Main.Values["file"] = clip.File;
                 a.Main.Tracks["position"] = new AnimatedValue(Round(clip.TrimStart));
+                if (clip.EffectiveSpeed != 1) a.Main.Tracks["speed"] = new AnimatedValue(Round(clip.EffectiveSpeed * 100));
                 a.Effects[^1].Tracks["volume"] = new AnimatedValue(Math.Clamp(clip.Volume, 0, 500));
                 AddFade(a, "audio.fade", fadeIn, fadeOut);
                 // 映像と音声を連結しておく (詳細編集で一緒に動かせるように)

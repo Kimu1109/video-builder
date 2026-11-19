@@ -29,6 +29,9 @@ public sealed class ClipPanel : UserControl
     public static readonly string[] Motions = { "なし", "ズームイン", "ズームアウト", "左へパン", "右へパン" };
     public static readonly string[] Looks = { "なし", "白黒", "セピア", "ぼかし", "明るく", "暗く", "鮮やか" };
     public static readonly string[] Placements = { "下", "中央", "上" };
+    /// <summary>速度の表示 (1 倍は「標準」)。</summary>
+    public static string SpeedLabel(double speed) => speed == 1 ? L.T("標準 (1 倍)") : $"{speed:0.##}x";
+
     public static string[] Transitions => new[] { "なし" }.Concat(EffectRegistry.TransitionTypes).ToArray();
 
     public ClipPanel()
@@ -200,6 +203,18 @@ public sealed class ClipPanel : UserControl
                 Children = { Small("開始位置を現在位置に", () => _editor.TrimSelectedAt(_session.CurrentFrame, true)), Small("終了位置を現在位置に", () => _editor.TrimSelectedAt(_session.CurrentFrame, false)) },
             });
             if (c.SourceSeconds > 0) Note(L.Format("素材の長さ {0}", StoryboardStrip.FormatSeconds(c.SourceSeconds)));
+
+            // 再生速度: 決まった倍率から選ぶ (取り込んだものなど、ほかの倍率ならそれも並べる)
+            var speeds = StoryClip.Speeds.ToList();
+            if (!speeds.Contains(c.EffectiveSpeed)) { speeds.Add(c.EffectiveSpeed); speeds.Sort(); }
+            Row("速度", Combo(speeds.Select(SpeedLabel).ToArray(), speeds.IndexOf(c.EffectiveSpeed), i =>
+            {
+                double speed = speeds[i];
+                Apply("速度の変更", x => x.Speed = speed);
+            }));
+            if (c.EffectiveSpeed != 1)
+                Note(L.Format("長さ {0} (使う範囲 {1} を {2} 倍速)", StoryboardStrip.FormatSeconds(c.Seconds),
+                    StoryboardStrip.FormatSeconds(c.EffectiveTrimEnd - c.TrimStart), c.EffectiveSpeed.ToString("0.##")));
         }
         else
         {
@@ -258,6 +273,7 @@ public sealed class ClipPanel : UserControl
             else
             {
                 Row("音量", Volume(c.Volume, (v, done) => Apply("音量の変更", x => x.Volume = v, "volume:" + c.Id)));
+                if (c.EffectiveSpeed != 1) Note("速度を変えると、音の高さも変わります。");
                 var mute = new CheckBox { Content = "音を消す", IsChecked = c.Muted };
                 mute.IsCheckedChanged += (_, _) => Apply("音を消す", x => x.Muted = mute.IsChecked == true);
                 _body.Children.Add(mute);
