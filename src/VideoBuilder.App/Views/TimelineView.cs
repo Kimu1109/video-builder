@@ -135,9 +135,10 @@ public sealed class TimelineView : UserControl
         var templateItems = new List<object>();
         foreach (var group in templates.GroupBy(t => t.Category))
         {
-            var items = group.Select(t => (object)Menus.Item(t.Name, null, () => EditorCommands.InsertTemplate(t, hit.Layer, hit.Frame)));
+            // テンプレートの名前とカテゴリは利用者が付けたものなので訳さない (旧形式のカテゴリ名だけはアプリのもの)
+            var items = group.Select(t => (object)Menus.Item(t.Name, null, () => EditorCommands.InsertTemplate(t, hit.Layer, hit.Frame), verbatim: true));
             if (group.Key.Length == 0) templateItems.AddRange(items);
-            else templateItems.Add(Menus.Sub(group.Key, null, items));
+            else templateItems.Add(Menus.Sub(group.Key, null, items, verbatim: group.Key != TemplateStore.LegacyCategory));
         }
         if (templateItems.Count > 0) templateItems.Add(Menus.Sep());
         templateItems.Add(Menus.Item("テンプレートライブラリ...", "Template", () => _ = EditorCommands.ShowTemplateLibraryAsync()));

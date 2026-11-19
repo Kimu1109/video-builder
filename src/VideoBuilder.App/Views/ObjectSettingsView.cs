@@ -154,7 +154,7 @@ public sealed class ObjectSettingsView : UserControl
             if (t == null || ExposedOf(t) is not { } x) return 0;
             return SceneTime.InnerFrame(_session.Project, t, x.Scene, t.Bounds, Math.Clamp(_session.CurrentFrame, t.Start, t.End));
         }
-        return new Slot(() => Resolve()?.Object, () => Resolve()?.Effect, Frame, "x" + index);
+        return new Slot(() => Resolve()?.Object, () => Resolve()?.Effect, Frame, "x" + index, Verbatim: true);
     }
 
     private static ParamDefinition Relabel(ParamDefinition p, string name) => new()
@@ -176,7 +176,10 @@ public sealed class ObjectSettingsView : UserControl
             var g = x.Items[i].Group;
             if (g != group && g.Length > 0)
             {
-                var sub = new TextBlock { Text = g, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, group == null ? 0 : 8, 0, 2) };
+                // グループ名は利用者が付けたものなので訳さない
+                var sub = L.Verbatim(g);
+                sub.FontWeight = FontWeight.SemiBold;
+                sub.Margin = new Thickness(0, group == null ? 0 : 8, 0, 2);
                 sub.Classes.Add("secondary");
                 rows.Children.Add(sub);
             }
@@ -262,9 +265,9 @@ public sealed class ObjectSettingsView : UserControl
         menu.Items.Add(Menus.Item("スタイルとして保存...", "Style", () => _ = EditorCommands.SaveStyleAsync(effectIndex)));
         menu.Items.Add(Menus.Sub("スタイルを適用", "Style", names.Count == 0
             ? new object[] { Menus.Item("(保存したスタイルはありません)", null, () => { }, null, false) }
-            : names.Select(n => (object)Menus.Item(n, null, () => EditorCommands.ApplyStyle(defId, n)))));
+            : names.Select(n => (object)Menus.Item(n, null, () => EditorCommands.ApplyStyle(defId, n), verbatim: true))));
         if (names.Count > 0)
-            menu.Items.Add(Menus.Sub("スタイルを削除", "Delete", names.Select(n => (object)Menus.Item(n, null, () => Svc.Styles.Delete(defId, n)))));
+            menu.Items.Add(Menus.Sub("スタイルを削除", "Delete", names.Select(n => (object)Menus.Item(n, null, () => Svc.Styles.Delete(defId, n), verbatim: true))));
         menu.Open(anchor);
     }
 
@@ -349,7 +352,11 @@ public sealed class ObjectSettingsView : UserControl
     /// テンプレートの項目では、シーンオブジェクトの参照先のシーンの中のオブジェクトのエフェクトになる。
     /// Frame はそのオブジェクトから見た現在位置 (トラックバーの区間を決める)。Id は取り消しをまとめる鍵に使う。
     /// </summary>
-    private sealed record Slot(Func<TimelineObject?> Owner, Func<Effect?> Effect, Func<int> Frame, string Id);
+    /// Verbatim が true なら、パラメータ名は利用者が付けた表示名なので訳さない。
+    private sealed record Slot(Func<TimelineObject?> Owner, Func<Effect?> Effect, Func<int> Frame, string Id, bool Verbatim = false);
+
+    /// <summary>パラメータ名の表示。テンプレートの項目 (利用者が付けた表示名) は訳さない。</summary>
+    private static TextBlock Caption(Slot slot, string text) => slot.Verbatim ? L.Verbatim(text) : new TextBlock { Text = text };
 
     private Slot MainSlot(int effectIndex) => new(() => Target, () => EffectAt(effectIndex), () => _session.CurrentFrame, effectIndex.ToString());
 
@@ -433,28 +440,28 @@ public sealed class ObjectSettingsView : UserControl
     {
         ParamKind.Track => BuildTrack(slot, p),
         ParamKind.Check => BuildCheck(slot, p),
-        ParamKind.Choice => Labeled(p.Name, BuildChoice(slot, p)),
-        ParamKind.Color => Labeled(p.Name, BuildColor(slot, p)),
-        ParamKind.File => Labeled(p.Name, BuildFile(slot, p)),
-        ParamKind.Font => Labeled(p.Name, BuildFont(slot, p)),
+        ParamKind.Choice => Labeled(Caption(slot, p.Name), BuildChoice(slot, p)),
+        ParamKind.Color => Labeled(Caption(slot, p.Name), BuildColor(slot, p)),
+        ParamKind.File => Labeled(Caption(slot, p.Name), BuildFile(slot, p)),
+        ParamKind.Font => Labeled(Caption(slot, p.Name), BuildFont(slot, p)),
         ParamKind.MultilineText => BuildMultiline(slot, p),
-        _ => p.Key == "scene" ? Labeled(p.Name, BuildScene(slot, p)) : Labeled(p.Name, BuildText(slot, p, false)),
+        _ => p.Key == "scene" ? Labeled(Caption(slot, p.Name), BuildScene(slot, p)) : Labeled(Caption(slot, p.Name), BuildText(slot, p, false)),
     };
 
     /// <summary>複数行のテキスト。テンプレートの項目では、名前がわかるよう見出しを付ける。</summary>
     private Control BuildMultiline(Slot slot, ParamDefinition p)
     {
         var box = BuildText(slot, p, true);
-        if (!slot.Id.StartsWith('x')) return box;
-        var label = new TextBlock { Text = p.Name };
+        if (!slot.Verbatim) return box;
+        var label = Caption(slot, p.Name);
         label.Classes.Add("secondary");
         return new StackPanel { Spacing = 2, Children = { label, box } };
     }
 
-    private static Control Labeled(string label, Control control)
+    private static Control Labeled(TextBlock text, Control control)
     {
         var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("88,*"), MinHeight = 24 };
-        var text = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center };
+        text.VerticalAlignment = VerticalAlignment.Center;
         text.Classes.Add("secondary");
         grid.Children.Add(text);
         Grid.SetColumn(control, 1);
@@ -479,7 +486,7 @@ public sealed class ObjectSettingsView : UserControl
         var right = new NumberBox { Minimum = p.Min, Maximum = p.Max, Decimals = p.Decimals };
         var leftSlider = new MiniSlider { Minimum = p.SliderMin, Maximum = p.SliderMax, Margin = new Thickness(4, 0) };
         var rightSlider = new MiniSlider { Minimum = p.SliderMin, Maximum = p.SliderMax, Margin = new Thickness(4, 0) };
-        var name = new Button { Content = p.Name, Width = 96, Padding = new Thickness(2, 0), Focusable = false };
+        var name = new Button { Content = Caption(slot, p.Name), Width = 96, Padding = new Thickness(2, 0), Focusable = false };
         ToolTip.SetTip(name, "クリックで移動方法を選択");
 
         AnimatedValue? Track() => slot.Effect()?.Tracks.GetValueOrDefault(p.Key);
@@ -595,7 +602,7 @@ public sealed class ObjectSettingsView : UserControl
 
     private Control BuildCheck(Slot slot, ParamDefinition p)
     {
-        var box = new CheckBox { Content = p.Name };
+        var box = new CheckBox { Content = Caption(slot, p.Name) };
         box.IsCheckedChanged += (_, _) => { if (!_refreshing) SetValue(slot, p.Key, box.IsChecked == true ? "1" : "0"); };
         _refreshers.Add(() => { var e = slot.Effect(); if (e != null) box.IsChecked = e.GetBool(p.Key); });
         return box;

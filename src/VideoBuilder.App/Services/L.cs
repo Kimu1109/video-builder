@@ -82,6 +82,20 @@ public static class L
         return false;
     }
 
+    /// <summary>
+    /// true の TextBlock は訳さない (利用者が入力した名前など)。Text より先に設定すること。Verbatim(...) で作るのが簡単。
+    /// </summary>
+    public static readonly AttachedProperty<bool> VerbatimProperty = AvaloniaProperty.RegisterAttached<TextBlock, bool>("Verbatim", typeof(L));
+
+    /// <summary>訳さない TextBlock を作る (利用者が入力した文字を表示する)。</summary>
+    public static TextBlock Verbatim(string text)
+    {
+        var tb = new TextBlock();
+        tb.SetValue(VerbatimProperty, true);
+        tb.Text = text;
+        return tb;
+    }
+
     private static void Install()
     {
         if (_installed) return;
@@ -90,7 +104,7 @@ public static class L
         TextBlock.TextProperty.Changed.AddClassHandler<TextBlock>((tb, e) =>
         {
             var text = e.NewValue as string;
-            if (text == null) return;
+            if (text == null || tb.GetValue(VerbatimProperty)) return;
             var translated = T(text);
             if (!ReferenceEquals(translated, text) && translated != text) tb.SetCurrentValue(TextBlock.TextProperty, translated);
         });

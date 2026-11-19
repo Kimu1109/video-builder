@@ -709,6 +709,58 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public void User_given_names_are_not_translated()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        bool wasEnglish = L.English;
+        // 対応表にある言葉 (「名前」「説明」「テキスト」) を、利用者が名前として付けた場合
+        var pkg = (TemplatePackage?)null;
+        try
+        {
+            L.Initialize(Language.English);
+            Assert.Equal("Name", L.T("名前"));
+            Assert.Equal("名前", L.Verbatim("名前").Text);
+
+            var scene = s.AddScene();
+            var text = s.AddObject(EffectRegistry.Text, 0, 0, 60)!;
+            var image = s.AddObject(EffectRegistry.Image, 1, 0, 60)!;
+            s.SetExposed(text, 0, "text", "名前");
+            s.SetExposed(image, 0, "file", "テキスト");
+            s.ReplaceExposed(scene.Id, s.Scene.Exposed!.Select(x => { var c = x.Clone(); c.Group = "説明"; return c; }).ToList());
+            s.SwitchScene("root");
+            var so = s.AddObject(EffectRegistry.SceneRef, 0, 0, 60, o => o.Main.Values["scene"] = scene.Id)!;
+            Pump();
+            var settings = w.GetVisualDescendants().OfType<ObjectSettingsView>().Single();
+            var texts = settings.GetVisualDescendants().OfType<TextBlock>().Where(t => t.IsEffectivelyVisible).Select(t => t.Text).ToList();
+            Assert.Contains("名前", texts);         // 表示名
+            Assert.Contains("テキスト", texts);     // 表示名
+            Assert.Contains("説明", texts);         // グループ名
+            Assert.Contains("Template items", texts);   // アプリの文言は訳す
+            Assert.Contains("Start offset", texts);     // 公開項目でないパラメータ名も訳す
+            Assert.DoesNotContain("Description", texts);
+
+            // テンプレートの名前・カテゴリ (ライブラリと右クリックのメニュー)
+            pkg = TemplatePackage.Create(s.Project, new[] { so }, new TemplateOptions { Name = "テキスト", Category = "説明" });
+            Svc.Templates.Save(pkg);
+            var lib = new TemplateLibraryDialog();
+            lib.Show(w);
+            Pump();
+            var libTexts = lib.GetVisualDescendants().OfType<TextBlock>().Where(t => t.IsEffectivelyVisible).Select(t => t.Text).ToList();
+            Assert.Contains("テキスト", libTexts);
+            Assert.Contains("All categories", libTexts);
+            Shot(lib, "verbatim-library");
+            lib.Close();
+            Shot(w, "verbatim-properties");
+        }
+        finally
+        {
+            L.Initialize(wasEnglish ? Language.English : Language.Japanese);
+            foreach (var e in Svc.Templates.List().Where(e => e.Name == "テキスト" && !e.Legacy)) Svc.Templates.Delete(e);
+        }
+    }
+
+    [AvaloniaFact]
     public void Style_is_saved_and_applied_to_the_selection()
     {
         Open();

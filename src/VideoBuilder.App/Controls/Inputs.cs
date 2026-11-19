@@ -219,9 +219,10 @@ public sealed class MiniSlider : Control
 /// <summary>メニュー項目を短く書くためのヘルパー。</summary>
 public static class Menus
 {
-    public static MenuItem Item(string header, string? icon, Action? action, string? gesture = null, bool enabled = true, bool? isChecked = null)
+    /// <param name="verbatim">true なら header を訳さない (利用者が付けた名前)。</param>
+    public static MenuItem Item(string header, string? icon, Action? action, string? gesture = null, bool enabled = true, bool? isChecked = null, bool verbatim = false)
     {
-        var item = new MenuItem { Header = header, IsEnabled = enabled };
+        var item = new MenuItem { Header = verbatim ? L.Verbatim(header) : header, IsEnabled = enabled };
         if (icon != null) item.Icon = new Icon(icon);
         if (isChecked != null)
         {
@@ -233,13 +234,20 @@ public static class Menus
         return item;
     }
 
-    public static MenuItem Sub(string header, string? icon, IEnumerable<object> items)
+    public static MenuItem Sub(string header, string? icon, IEnumerable<object> items, bool verbatim = false)
     {
-        var item = new MenuItem { Header = header };
+        var item = new MenuItem { Header = verbatim ? L.Verbatim(header) : header };
         if (icon != null) item.Icon = new Icon(icon);
         foreach (var i in items) item.Items.Add(i);
         return item;
     }
 
     public static Separator Sep() => new();
+
+    /// <summary>
+    /// 一覧 (ComboBox・AutoCompleteBox) の項目を訳さずに表示する。利用者が付けた名前 (カテゴリ・グループ) の一覧に使う。
+    /// except に入っている項目 (アプリが用意した「すべてのカテゴリ」など) だけは訳す。
+    /// </summary>
+    public static Avalonia.Controls.Templates.IDataTemplate VerbatimItems(params string[] except) =>
+        new Avalonia.Controls.Templates.FuncDataTemplate<string>((s, _) => s != null && except.Contains(s) ? new TextBlock { Text = s } : L.Verbatim(s ?? ""));
 }

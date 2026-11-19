@@ -29,7 +29,7 @@ public sealed class TemplateSaveDialog : DialogBase
         var objects = single?.Objects ?? targets.ToList();
 
         var name = new TextBox { Text = single?.Name ?? suggestedName };
-        var category = new AutoCompleteBox { ItemsSource = categories, FilterMode = AutoCompleteFilterMode.StartsWith, MinimumPrefixLength = 0, Watermark = "(なし)" };
+        var category = new AutoCompleteBox { ItemsSource = categories, FilterMode = AutoCompleteFilterMode.StartsWith, MinimumPrefixLength = 0, Watermark = "(なし)", ItemTemplate = Menus.VerbatimItems(TemplateStore.LegacyCategory) };
         var description = new TextBox { Watermark = "(任意)" };
         var asScene = new RadioButton { Content = "まとめて置く (シーンオブジェクト 1 つ。公開した項目だけを編集する)", GroupName = "insertAs", IsChecked = true };
         var asObjects = new RadioButton { Content = "展開して置く (オブジェクトをそのまま並べる)", GroupName = "insertAs" };
@@ -130,7 +130,8 @@ public sealed class TemplateLibraryDialog : DialogBase
     private readonly TextBox _search = new() { Watermark = "名前で検索" };
     private readonly ComboBox _category = new() { MinWidth = 160 };
     private readonly ListBox _list = new() { Height = 360, SelectionMode = SelectionMode.Single };
-    private readonly TextBlock _detail = new() { TextWrapping = TextWrapping.Wrap, MinHeight = 36 };
+    // 説明 (利用者が書いたもの) とアプリの文言を混ぜて出すので、アプリの文言はそれぞれ L.T で訳してから入れる
+    private readonly TextBlock _detail = L.Verbatim("");
     private readonly List<Button> _needsSelection = new();
     private List<TemplateEntry> _shown = new();
     private readonly Dictionary<string, Bitmap?> _thumbs = new();
@@ -139,7 +140,9 @@ public sealed class TemplateLibraryDialog : DialogBase
     {
         _list.ItemsPanel = new FuncTemplate<Panel?>(() => new WrapPanel());
         ScrollViewer.SetHorizontalScrollBarVisibility(_list, Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled);
+        _detail.TextWrapping = TextWrapping.Wrap; _detail.MinHeight = 36;
         _detail.Classes.Add("secondary");
+        _category.ItemTemplate = Menus.VerbatimItems(AllCategories, NoCategory, TemplateStore.LegacyCategory);
         var searchIcon = new Icon("Search") { Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center };
         var top = new DockPanel();
         DockPanel.SetDock(searchIcon, Dock.Left);
@@ -169,11 +172,12 @@ public sealed class TemplateLibraryDialog : DialogBase
     }
 
     private const string AllCategories = "すべてのカテゴリ";
+    private const string NoCategory = "(カテゴリなし)";
 
     private void Reload()
     {
         var cats = Svc.Templates.Categories().ToList();
-        if (Svc.Templates.List().Any(e => e.Category.Length == 0)) cats.Add("(カテゴリなし)");
+        if (Svc.Templates.List().Any(e => e.Category.Length == 0)) cats.Add(NoCategory);
         var selected = _category.SelectedItem as string;
         _category.ItemsSource = new[] { AllCategories }.Concat(cats).ToList();
         _category.SelectedItem = selected != null && cats.Contains(selected) ? selected : AllCategories;
@@ -185,7 +189,7 @@ public sealed class TemplateLibraryDialog : DialogBase
         var query = _search.Text?.Trim() ?? "";
         var cat = _category.SelectedItem as string ?? AllCategories;
         _shown = Svc.Templates.List()
-            .Where(e => cat == AllCategories || (cat == "(カテゴリなし)" ? e.Category.Length == 0 : e.Category == cat))
+            .Where(e => cat == AllCategories || (cat == NoCategory ? e.Category.Length == 0 : e.Category == cat))
             .Where(e => query.Length == 0 || e.Name.Contains(query, StringComparison.CurrentCultureIgnoreCase) || e.Description.Contains(query, StringComparison.CurrentCultureIgnoreCase))
             .ToList();
         _list.ItemsSource = _shown.Select(Tile).ToList();
@@ -207,9 +211,11 @@ public sealed class TemplateLibraryDialog : DialogBase
         var frame = new Border { Child = picture, BorderThickness = new Thickness(1) };
         frame[!Border.BorderBrushProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Border.Default");
         frame[!Border.BackgroundProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Bg.Base");
-        var label = new TextBlock { Text = e.Name, Width = 160, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 4, 0, 0) };
+        // 名前は利用者が付けたものなので訳さない (旧形式のプリセットの名前も同じ)
+        var label = L.Verbatim(e.Name);
+        label.Width = 160; label.TextTrimming = TextTrimming.CharacterEllipsis; label.Margin = new Thickness(0, 4, 0, 0);
         var panel = new StackPanel { Margin = new Thickness(4), Children = { frame, label } };
-        ToolTip.SetTip(panel, e.Description.Length > 0 ? $"{e.Name}\n{e.Description}" : e.Name);
+        ToolTip.SetTip(panel, L.Verbatim(e.Description.Length > 0 ? $"{e.Name}\n{e.Description}" : e.Name));
         return panel;
     }
 
@@ -219,7 +225,7 @@ public sealed class TemplateLibraryDialog : DialogBase
     {
         var e = Selected;
         foreach (var b in _needsSelection) b.IsEnabled = e != null;
-        if (e == null) { _detail.Text = _shown.Count == 0 ? "テンプレートがありません。タイムラインでオブジェクトを選び、右クリックの「テンプレートとして保存...」で作れます。" : ""; return; }
+        if (e == null) { _detail.Text = _shown.Count == 0 ? L.T("テンプレートがありません。タイムラインでオブジェクトを選び、右クリックの「テンプレートとして保存...」で作れます。") : ""; return; }
         if (e.Legacy) { _detail.Text = L.T("旧形式のプリセットです (展開して挿入します)。"); return; }
         var meta = TemplatePackage.ReadMeta(e.Path);
         if (meta == null) { _detail.Text = ""; return; }
@@ -342,7 +348,7 @@ public sealed class ExposedItemsDialog : DialogBase
             var item = _items[i];
             var label = new TextBox { Text = item.Label, Margin = new Thickness(0, 0, 4, 0) };
             label.TextChanged += (_, _) => item.Label = label.Text?.Trim() ?? "";
-            var group = new AutoCompleteBox { Text = item.Group, ItemsSource = groups, FilterMode = AutoCompleteFilterMode.StartsWith, MinimumPrefixLength = 0, Watermark = "(なし)", Margin = new Thickness(0, 0, 4, 0) };
+            var group = new AutoCompleteBox { Text = item.Group, ItemsSource = groups, FilterMode = AutoCompleteFilterMode.StartsWith, MinimumPrefixLength = 0, Watermark = "(なし)", Margin = new Thickness(0, 0, 4, 0), ItemTemplate = Menus.VerbatimItems() };
             group.TextChanged += (_, _) => item.Group = group.Text?.Trim() ?? "";
             var where = new TextBlock { Text = Describe(item), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(4, 0) };
             where.Classes.Add("secondary");
