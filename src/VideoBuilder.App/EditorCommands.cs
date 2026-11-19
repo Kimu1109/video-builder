@@ -3,6 +3,7 @@ using Avalonia.Input;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using VideoBuilder.App.Services;
+using VideoBuilder.App.Shell;
 using VideoBuilder.App.Views;
 using VideoBuilder.Core;
 using VideoBuilder.Editing;
@@ -13,6 +14,9 @@ namespace VideoBuilder.App;
 public static class EditorCommands
 {
     public static MainWindow? Main { get; set; }
+    /// <summary>今の編集画面。</summary>
+    public static IWorkspace? Workspace => Main?.Workspace;
+    public static EditorMode CurrentMode => Main?.Workspace.Mode ?? Svc.Settings.EditorMode;
     private static EditorSession Session => Svc.Session;
     private static DispatcherTimer? _autoSave;
 
@@ -99,21 +103,26 @@ public static class EditorCommands
         }
     }
 
-    /// <summary>ファイル選択ダイアログからメディアを読み込んで、タイムラインに置く。</summary>
-    public static async Task ImportFilesAsync(int layer, int frame, string[]? extensions = null, string title = "メディアファイル")
+    /// <summary>ファイル選択ダイアログで、メディアファイルを (いくつでも) 選ぶ。</summary>
+    public static async Task<List<string>> PickMediaFilesAsync(string[] extensions, string title)
     {
-        if (Main == null) return;
-        extensions ??= EffectRegistry.VideoExtensions.Concat(EffectRegistry.ImageExtensions).Concat(EffectRegistry.AudioExtensions).Concat(EffectRegistry.VectorExtensions).ToArray();
+        if (Main == null) return new List<string>();
         var files = await Main.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
             Title = title + "を選択", AllowMultiple = true,
             FileTypeFilter = new[] { new FilePickerFileType(title) { Patterns = extensions.Select(x => "*." + x).ToArray() }, FilePickerFileTypes.All },
         });
+        return files.Select(f => f.TryGetLocalPath()).Where(p => p != null).Select(p => p!).ToList();
+    }
+
+    /// <summary>ファイル選択ダイアログからメディアを読み込んで、タイムラインに置く (詳細編集)。</summary>
+    public static async Task ImportFilesAsync(int layer, int frame, string[]? extensions = null, string title = "メディアファイル")
+    {
+        if (Main == null) return;
+        extensions ??= EffectRegistry.VideoExtensions.Concat(EffectRegistry.ImageExtensions).Concat(EffectRegistry.AudioExtensions).Concat(EffectRegistry.VectorExtensions).ToArray();
         var errors = new List<string>();
-        foreach (var f in files)
+        foreach (var path in await PickMediaFilesAsync(extensions, title))
         {
-            var path = f.TryGetLocalPath();
-            if (path == null) continue;
             var error = MediaImport.AddFile(path, layer, frame);
             if (error != null) errors.Add(error);
             else if (Session.Primary is { } added) layer = Math.Min(Scene.LayerCount - 1, added.Layer + (added.GroupId != null ? 2 : 1));
@@ -187,34 +196,41 @@ public static class EditorCommands
         await d.ShowDialog(Main);
         if (d.Result == null) return;
         Svc.Preview.Stop();
-        Session.Edit("プロジェクト設定の変更", () => Session.Project.Settings = d.Result);
+        Workspace?.ChangeProjectSettings(d.Result);
     }
 
     public static void ShowSettings() => Main?.ShowSettingsPanel();
 
+    /// <summary>編集画面 (詳細 / シンプル) を切り替えて、設定に覚える。</summary>
+    public static void SetEditorMode(EditorMode mode)
+    {
+        Svc.Settings.EditorMode = mode;
+        Svc.Settings.Save();
+        Main?.SwitchWorkspace(mode);
+    }
+
+    /// <summary>詳細編集のウィンドウ構成 (分ける / まとめる) を設定に合わせる。</summary>
+    public static void ApplyWindowMode() => Main?.ApplyWindowMode();
+
     // ---------------- 編集 ----------------
 
     public static void AddKeyFrame() => Session.AddKeyFrameToSelected(Session.CurrentFrame);
-    public static void Split() => Session.SplitSelectedAt(Session.CurrentFrame);
+    public static void Split() => Workspace?.Split();
 
-    public static void Paste()
-    {
-        int layer = Main?.Timeline.LastLayer ?? 0;
-        Session.Paste(layer, Session.CurrentFrame);
-    }
+    public static void Paste() => Workspace?.Paste();
 
     public static void Step(int frames)
     {
         Svc.Preview.Stop();
         Session.CurrentFrame = Math.Clamp(Session.CurrentFrame + frames, 0, Math.Max(0, Session.SceneLength - 1 + Math.Max(0, frames)));
-        Main?.Timeline.Canvas.EnsureFrameVisible(Session.CurrentFrame);
+        Workspace?.RevealFrame(Session.CurrentFrame);
     }
 
     public static void Seek(int frame)
     {
         Svc.Preview.Stop();
         Session.CurrentFrame = Math.Max(0, frame);
-        Main?.Timeline.Canvas.EnsureFrameVisible(Session.CurrentFrame);
+        Workspace?.RevealFrame(Session.CurrentFrame);
     }
 
     public static void SetTheme(ThemeMode mode)
@@ -311,7 +327,7 @@ public static class EditorCommands
         catch (Exception ex) { _ = ShowErrorAsync("スタイルを読み込めませんでした。\n" + ex.Message); }
     }
 
-    private static string TimelineCanvasLabel(TimelineObject o) => Controls.TimelineCanvas.ObjectLabel(o);
+    private static string TimelineCanvasLabel(TimelineObject o) => Labels.Object(o);
 
     public static void InsertAlias(string name, int layer, int frame)
     {
@@ -354,6 +370,7 @@ public static class EditorCommands
 
     public static void RegisterCommands()
     {
+        const EditorMode Adv = EditorMode.Advanced;
         Shortcuts.Register(
             new("file.new", "新規プロジェクト", "Ctrl+N", () => _ = NewAsync(), true),
             new("file.open", "開く", "Ctrl+O", () => _ = OpenAsync(), true),
@@ -362,14 +379,15 @@ public static class EditorCommands
             new("file.export", "動画の出力", "Ctrl+E", () => _ = ExportAsync(), true),
             new("edit.undo", "元に戻す", "Ctrl+Z", () => Session.Undo()),
             new("edit.redo", "やり直し", "Ctrl+Y;Ctrl+Shift+Z", () => Session.Redo()),
-            new("edit.cut", "切り取り", "Ctrl+X", () => Session.CutSelected()),
-            new("edit.copy", "コピー", "Ctrl+C", () => Session.CopySelected()),
+            // 切り取り・削除などは、今の編集画面 (タイムラインのオブジェクト / ストーリーボードのクリップ) に対して行う
+            new("edit.cut", "切り取り", "Ctrl+X", () => Workspace?.Cut()),
+            new("edit.copy", "コピー", "Ctrl+C", () => Workspace?.Copy()),
             new("edit.paste", "貼り付け", "Ctrl+V", Paste),
-            new("edit.delete", "削除", "Delete", () => Session.DeleteSelected()),
-            new("edit.selectAll", "すべて選択", "Ctrl+A", () => Session.SelectMany(Session.Scene.Objects.Where(o => !Session.Scene.GetLayer(o.Layer).Locked).Select(o => o.Id))),
-            new("edit.deselect", "選択を解除", "Escape", () => Session.Select(null)),
+            new("edit.delete", "削除", "Delete", () => Workspace?.Delete()),
+            new("edit.selectAll", "すべて選択", "Ctrl+A", () => Workspace?.SelectAll()),
+            new("edit.deselect", "選択を解除", "Escape", () => Workspace?.Deselect()),
             new("edit.split", "現在位置で分割", "S", Split),
-            new("edit.addKey", "キーフレームを追加", "P", AddKeyFrame),
+            new("edit.addKey", "キーフレームを追加", "P", AddKeyFrame, Mode: Adv),
             new("play.toggle", "再生 / 停止", "Space", () => Svc.Preview.TogglePlay()),
             new("move.prev", "1 フレーム戻る", "Left", () => Step(-1)),
             new("move.next", "1 フレーム進む", "Right", () => Step(1)),
@@ -379,11 +397,13 @@ public static class EditorCommands
             new("move.nextEdit", "次の編集点へ", "Ctrl+Right", () => Seek(Session.FindEditPoint(Session.CurrentFrame, 1))),
             new("move.home", "先頭へ", "Home", () => Seek(0)),
             new("move.end", "末尾へ", "End", () => Seek(Math.Max(0, Session.SceneLength - 1))),
-            new("range.start", "出力範囲の開始を現在位置に", "OemOpenBrackets", SetRangeStart),
-            new("range.end", "出力範囲の終了を現在位置に", "OemCloseBrackets", SetRangeEnd),
-            new("range.clear", "出力範囲を解除", "", ClearRange),
-            new("alias.create", "テンプレートとして保存", "", () => _ = SaveTemplateAsync()),
-            new("template.library", "テンプレートライブラリ", "", () => _ = ShowTemplateLibraryAsync()));
+            new("range.start", "出力範囲の開始を現在位置に", "OemOpenBrackets", SetRangeStart, Mode: Adv),
+            new("range.end", "出力範囲の終了を現在位置に", "OemCloseBrackets", SetRangeEnd, Mode: Adv),
+            new("range.clear", "出力範囲を解除", "", ClearRange, Mode: Adv),
+            new("alias.create", "テンプレートとして保存", "", () => _ = SaveTemplateAsync(), Mode: Adv),
+            new("template.library", "テンプレートライブラリ", "", () => _ = ShowTemplateLibraryAsync(), Mode: Adv),
+            new("simple.trimStart", "開始位置を現在位置に (シンプル編集)", "OemOpenBrackets", () => Main?.Simple.TrimAtPlayhead(start: true), Mode: EditorMode.Simple),
+            new("simple.trimEnd", "終了位置を現在位置に (シンプル編集)", "OemCloseBrackets", () => Main?.Simple.TrimAtPlayhead(start: false), Mode: EditorMode.Simple));
     }
 
     /// <summary>キー入力を処理したら true。文字入力中 (TextBox) は編集用のキーを横取りしない。</summary>
@@ -415,7 +435,7 @@ public static class EditorCommands
         if (version == _lastAutoSavedVersion) return Task.CompletedTask;
         var snapshot = Session.SnapshotForRead();
         // 保存処理は素材の相対パス表を書き換えるので、中身 (シーンなど) だけを共有する別の入れ物を渡す
-        var copy = new Project { FormatVersion = snapshot.FormatVersion, Settings = snapshot.Settings, Scenes = snapshot.Scenes, Grid = snapshot.Grid };
+        var copy = new Project { FormatVersion = snapshot.FormatVersion, Settings = snapshot.Settings, Scenes = snapshot.Scenes, Grid = snapshot.Grid, Storyboard = snapshot.Storyboard };
         string name = Session.FilePath != null ? Path.GetFileNameWithoutExtension(Session.FilePath) : "untitled";
         string dir = AppPaths.AutoSaveDir;
         _autoSaving = true;
@@ -449,7 +469,7 @@ public static class EditorCommands
             // 自動保存ファイルに上書きしないよう、「名前なし・未保存」の状態で開く
             var project = ProjectSerializer.Load(path);
             Session.NewProject(project.Settings);
-            Session.Edit("自動保存から復元", () => Session.Project.Scenes = project.Scenes);
+            Session.Edit("自動保存から復元", () => { Session.Project.Scenes = project.Scenes; Session.Project.Storyboard = project.Storyboard; });
         }
         catch (Exception ex) { await ShowErrorAsync("復元できませんでした。\n" + ex.Message); }
     }

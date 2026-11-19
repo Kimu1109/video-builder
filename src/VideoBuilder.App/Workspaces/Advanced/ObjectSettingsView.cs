@@ -6,12 +6,13 @@ using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using VideoBuilder.App.Controls;
 using VideoBuilder.App.Services;
+using VideoBuilder.App.Views;
 using VideoBuilder.Core;
 using VideoBuilder.Editing;
 using VideoBuilder.Rendering;
 using Effect = VideoBuilder.Core.Effect;
 
-namespace VideoBuilder.App.Views;
+namespace VideoBuilder.App.Workspaces.Advanced;
 
 /// <summary>
 /// 設定ダイアログ。選択中オブジェクトの効果を上から並べ、トラックバーなどで値を編集する。
@@ -818,7 +819,7 @@ public sealed class ObjectSettingsView : UserControl
             var e = slot.Effect(); if (e == null) return;
             // 自分自身のシーンは選ばせない (無限に入れ子になるため)
             scenes = _session.Project.Scenes.Where(s => s.Id != _session.Scene.Id).ToList();
-            combo.ItemsSource = scenes.Select(TimelineCanvas.SceneLabel).ToList();
+            combo.ItemsSource = scenes.Select(Labels.Scene).ToList();
             combo.SelectedIndex = scenes.FindIndex(s => s.Id == e.GetString(p.Key));
             combo.PlaceholderText = scenes.Count == 0 ? "(ほかのシーンがありません)" : "(シーンを選択)";
         });

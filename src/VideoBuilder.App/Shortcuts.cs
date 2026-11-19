@@ -7,7 +7,8 @@ namespace VideoBuilder.App;
 /// <summary>ショートカットを割り当てられる操作。</summary>
 /// <param name="DefaultGestures">既定のキー。複数あるときは ";" で区切る。</param>
 /// <param name="WhileTyping">文字入力中 (TextBox にフォーカスがあるとき) も効くか。</param>
-public sealed record CommandInfo(string Id, string Name, string DefaultGestures, Action Run, bool WhileTyping = false);
+/// <param name="Mode">この編集画面のときだけ効く。null ならどちらでも効く。</param>
+public sealed record CommandInfo(string Id, string Name, string DefaultGestures, Action Run, bool WhileTyping = false, EditorMode? Mode = null);
 
 /// <summary>操作とキーの対応表。利用者が変えた分は設定ファイルに保存する。</summary>
 public static class Shortcuts
@@ -76,9 +77,12 @@ public static class Shortcuts
         string? stolen = null;
         if (gesture != null)
         {
+            var mode = Commands.FirstOrDefault(c => c.Id == id)?.Mode;
             foreach (var c in Commands)
             {
                 if (c.Id == id) continue;
+                // 別の編集画面だけで効く操作とは、同じキーを使ってよい
+                if (mode != null && c.Mode != null && c.Mode != mode) continue;
                 var others = Parse(GesturesOf(c.Id));
                 if (!others.Any(o => o.Key == gesture.Key && o.KeyModifiers == gesture.KeyModifiers)) continue;
                 Svc.Settings.Shortcuts[c.Id] = string.Join(";", others.Where(o => !(o.Key == gesture.Key && o.KeyModifiers == gesture.KeyModifiers)).Select(o => o.ToString()));
@@ -108,6 +112,7 @@ public static class Shortcuts
         foreach (var c in Commands)
         {
             if (typing && !c.WhileTyping) continue;
+            if (c.Mode != null && c.Mode != EditorCommands.CurrentMode) continue;
             foreach (var g in _resolved[c.Id])
             {
                 if (g.Key != e.Key || g.KeyModifiers != mods) continue;

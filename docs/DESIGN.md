@@ -990,12 +990,17 @@ video-builder/
 ├─ Directory.Packages.props       # 中央パッケージ管理
 ├─ src/
 │  ├─ VideoBuilder.App/           # Avalonia エントリポイント (実行ファイル名: video-builder)
-│  │  ├─ Views/                   # MainWindow, TimelineView, ObjectSettingsView, 各ダイアログ
-│  │  ├─ Controls/                # TimelineCanvas, PreviewView, Icon, IconButton, NumberBox, MiniSlider
-│  │  ├─ Services/                # PreviewService, ThemeService, AppSettings, MediaImport
+│  │  ├─ Shell/                   # MainWindow (メニュー・ツールバー・保存の確認・ドロップ), IWorkspace, PreviewArea, ToolWindow
+│  │  ├─ Workspaces/
+│  │  │  ├─ Advanced/             # 詳細編集 (AviUtl 風): AdvancedWorkspace, TimelineView, TimelineCanvas, ObjectSettingsView
+│  │  │  └─ Simple/               # シンプル編集 (ムービーメーカー風): SimpleWorkspace, StoryboardStrip, ClipPanel, SimpleMedia
+│  │  ├─ Views/                   # 共通のダイアログ (環境設定・出力・テンプレートなど)
+│  │  ├─ Controls/                # PreviewView, Icon, IconButton, NumberBox, MiniSlider, FileDropZone
+│  │  ├─ Services/                # PreviewService, ThemeService, AppSettings, MediaImport, Labels
 │  │  └─ Themes/                  # Tokens.axaml (色), Base.axaml (スタイル), Icons.axaml (生成)
-│  ├─ VideoBuilder.Editing/       # EditorSession, UndoStack, IEditCommand
+│  ├─ VideoBuilder.Editing/       # EditorSession, UndoStack, IEditCommand, StoryboardEditor
 │  ├─ VideoBuilder.Core/          # Project, Scene, TimelineObject, Effect, AnimatedValue, EffectRegistry
+│  │  └─ Storyboard/              # Storyboard (シンプル編集のモデル), StoryboardCompiler, StoryboardImport
 │  ├─ VideoBuilder.Rendering/     # RenderEngine, Effects, Generators (テキスト・図形), AudioMixer, Exporter
 │  ├─ VideoBuilder.Media/         # VideoReader, AudioReader, MediaWriter, AudioOutput
 │  └─ VideoBuilder.Plugin.Abstractions/   # プラグイン用の公開インターフェース
@@ -1798,6 +1803,67 @@ SVG にも Lottie にも「名前の付いた色の欄」がないので、フ�
 - OpenAL はランタイムにないので、openal-soft 1.23.1 を一緒に作る (openal-soft.org から取得)。
 - FFmpeg を探す場所に `/app/lib/ffmpeg` (Flatpak の拡張の置き場所) を足した。
 - Wayland では XWayland で動く (`--socket=x11`)。
+
+
+### 22.21 シンプル編集 (ムービーメーカー風)
+
+AviUtl 風の詳細編集とは別に、動画・写真を並べるだけで作れる簡単な編集画面を用意した。
+環境設定 (または「表示」→「編集モード」) の「編集モード」で切り替える。既定は詳細編集のまま。
+
+#### 22.21.1 できること
+
+| 操作 | 内容 |
+|---|---|
+| ビデオと写真 | 動画・写真をストーリーボードに追加 (選んでいるクリップの後ろ、ドロップなら落とした位置)。写真は 5 秒 |
+| タイトル | 色の背景に文字を出すクリップ (選んでいるクリップの前) |
+| キャプション | クリップに重ねる文字。位置 (下・中央・上) と文字色 |
+| 音楽 | 現在位置から鳴らす音声。使う範囲・音量・フェードイン / アウト、「映像の終わりで止める」 |
+| 長さ | 動画は使う範囲 (開始・終了)、写真・タイトルは表示時間。`[` / `]` で現在位置を開始 / 終了にする |
+| 切り替え効果 | クリップに入るときの効果 (フェード・ワイプ・スライド・ズームなど) と長さ。先頭のクリップは黒から |
+| 動き・見た目・回転 | ズームイン / アウト・左右へのパン、白黒・セピア・ぼかしなど、90° ずつの回転 |
+| 音声 | 動画の音量・音を消す |
+| 並べ替え・分割・削除 | ドラッグで並べ替え、`S` で現在位置で分割、`Delete` で削除、切り取り・コピー・貼り付け |
+
+写真・動画は、画面に収まる大きさに自動で合わせる。何もないプロジェクトに最初の動画を入れると、
+プロジェクトの画像サイズとフレームレートを動画に合わせる (詳細編集と同じ)。
+
+#### 22.21.2 しくみ
+
+- モデル: `Project.Storyboard` (`Core/Storyboard/Storyboard.cs`)。クリップ (`StoryClip`) の並びと音楽 (`MusicClip`)。
+  詳細編集だけのプロジェクトでは `null` (保存もしない)。
+- 描画・出力・保存・取り消しは、これまでと同じシーン (タイムラインのオブジェクト) の仕組みをそのまま使う。
+  シンプル編集の操作 (`Editing/StoryboardEditor.cs`) は、ストーリーボードを書き換えたあと
+  `StoryboardCompiler.Apply` でメインのシーンのオブジェクトを作り直し、これを `EditorSession.Edit` の 1 回にまとめる。
+  ストーリーボードもプロジェクトの複製・取り消しの対象に入れた。
+- 変換 (`StoryboardCompiler`) は入力だけで決まる。オブジェクトの ID もクリップの ID から作るので、
+  同じストーリーボードからは同じオブジェクトができる。
+
+  | レイヤー | 置くもの |
+  |---|---|
+  | 1・2 | 映像 (動画・写真・タイトルの背景)。隣り合うクリップを交互に置き、切り替えの間だけ重ねる |
+  | 3・4 | 文字 (タイトル・キャプション)。切り替えに合わせてフェード |
+  | 5・6 | 動画の音声 (映像と連結)。切り替えに合わせてフェード |
+  | 7〜10 | 音楽 (重なるものは別のレイヤー) |
+
+- 切り替え効果: 重なる長さは、どちらのクリップの長さの半分も超えないようにする (3 つのクリップにまたがらない)。
+  後ろのレイヤーほど手前に描かれるので、入ってくるクリップが手前 (レイヤー 2) ならその入りに「トランジション」をかける。
+  奥 (レイヤー 1) なら、出ていく手前のクリップの出に、向きを逆にした種類 (ワイプ・スライドの左右・上下) をかけて同じ見え方にする。
+- 詳細編集との行き来: 詳細編集に切り替えると、作られたシーンをそのまま編集できる。シンプル編集に戻ったとき、
+  シーンがストーリーボードから作ったものと違えば (`StoryboardCompiler.IsInSync` が、作り直したものと比べる)、
+  編集画面の代わりに案内を出し、「シンプル編集の内容に戻す」「今の内容から取り込み直す」「詳細編集に切り替える」を選ばせる。
+  詳細編集で作ったプロジェクトは「シンプル編集に取り込む」(`StoryboardImport`) で、並んだ動画・写真と音楽だけを取り込める。
+- 素材の付け替え・収集 (`ProjectMedia`) は、シーンとストーリーボードの両方のファイルを一緒に書き換える
+  (付け替えたあとも、シーンはストーリーボードから作ったままになる)。
+
+#### 22.21.3 画面の構成 (App)
+
+- `Shell/MainWindow` はメニュー・ツールバー・保存の確認・ほかのアプリからのドロップなど、編集画面によらない部分だけを持ち、
+  中央に今の編集画面 (`IWorkspace`) を置く。プレビューと再生バー (`PreviewArea`) は共通で、有効な編集画面が自分の中に置く。
+- `IWorkspace` は「編集」メニュー・ツールバーの中身と、切り取り・削除・分割・ファイルの読み込み・ドロップなどの操作を受け持つ。
+  ショートカット (`Shortcuts`) の切り取り・削除などは今の編集画面に渡す。キーフレーム・出力範囲・テンプレートなど
+  詳細編集だけの操作は `CommandInfo.Mode` で詳細編集のときだけ効く (同じキーを、もう一方の編集画面の別の操作に割り当ててよい)。
+- `Workspaces/Advanced` は従来の画面 (タイムライン・プロパティ・ウィンドウの分離 / ドッキング)、
+  `Workspaces/Simple` はストーリーボード (`StoryboardStrip`)・クリップの設定 (`ClipPanel`)・素材の読み込み (`SimpleMedia`)。
 
 ---
 

@@ -8,6 +8,8 @@ namespace VideoBuilder.App.Services;
 public static class Svc
 {
     public static EditorSession Session { get; } = new();
+    /// <summary>シンプル編集の操作 (Session のプロジェクトのストーリーボードを編集する)。</summary>
+    public static StoryboardEditor Storyboard { get; } = new(Session);
     public static AppSettings Settings { get; private set; } = new();
     public static ThemeService Theme { get; private set; } = null!;
     public static PreviewService Preview { get; private set; } = null!;

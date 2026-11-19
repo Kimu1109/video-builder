@@ -8,7 +8,7 @@ using VideoBuilder.App.Services;
 using VideoBuilder.Core;
 using VideoBuilder.Editing;
 
-namespace VideoBuilder.App.Views;
+namespace VideoBuilder.App.Workspaces.Advanced;
 
 /// <summary>タイムライン (拡張編集) ウィンドウの中身。本体 + スクロールバー + シーン切替 + 拡大率。</summary>
 public sealed class TimelineView : UserControl
@@ -97,7 +97,7 @@ public sealed class TimelineView : UserControl
     private void SyncScenes()
     {
         _syncing = true;
-        var names = _session.Project.Scenes.Select(TimelineCanvas.SceneLabel).Append(AddSceneLabel).ToList();
+        var names = _session.Project.Scenes.Select(Labels.Scene).Append(AddSceneLabel).ToList();
         if (_scenes.ItemsSource is not List<string> old || !old.SequenceEqual(names)) _scenes.ItemsSource = names;
         _scenes.SelectedIndex = _session.Project.Scenes.IndexOf(_session.Scene);
         _syncing = false;

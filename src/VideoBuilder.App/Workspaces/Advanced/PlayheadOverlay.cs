@@ -1,9 +1,10 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
+using VideoBuilder.App.Controls;
 using VideoBuilder.App.Services;
 
-namespace VideoBuilder.App.Controls;
+namespace VideoBuilder.App.Workspaces.Advanced;
 
 /// <summary>
 /// タイムラインの現在位置カーソル (赤い線)。タイムライン本体とは別のコントロールにして、

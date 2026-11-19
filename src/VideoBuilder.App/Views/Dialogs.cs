@@ -155,6 +155,13 @@ public sealed class PreferencesDialog : DialogBase
         var langNote = new TextBlock { Text = "言語の変更は、次回起動時に反映されます。", TextWrapping = TextWrapping.Wrap };
         langNote.Classes.Add("secondary");
         Body.Children.Add(langNote);
+        Body.Children.Add(Row("編集モード", Combo(new[] { "詳細編集 (AviUtl 風)", "シンプル編集 (ムービーメーカー風)" }, (int)s.EditorMode, i =>
+        {
+            EditorCommands.SetEditorMode((EditorMode)i);
+        })));
+        var modeNote = new TextBlock { Text = "シンプル編集は、動画・写真を並べて切り替え効果・キャプション・音楽を付けるだけの簡単な編集画面です。", TextWrapping = TextWrapping.Wrap };
+        modeNote.Classes.Add("secondary");
+        Body.Children.Add(modeNote);
         Body.Children.Add(Row("テーマ", Combo(new[] { "システムに従う", "ライト", "ダーク" }, (int)s.Theme, i => { s.Theme = (ThemeMode)i; Svc.Theme.Apply(); })));
 
         var custom = new ColorPicker { Color = Color.TryParse(s.CustomAccent, out var cc) ? cc : Colors.DodgerBlue, IsAlphaEnabled = false, IsAlphaVisible = false, HorizontalAlignment = HorizontalAlignment.Left, IsEnabled = s.Accent == AccentMode.Custom };
@@ -171,7 +178,7 @@ public sealed class PreferencesDialog : DialogBase
         Body.Children.Add(Row("カスタム色", custom));
         Body.Children.Add(Row("ウィンドウ", Combo(new[] { "自動 (1 つのウィンドウにまとめる)", "ウィンドウを分ける", "1 つのウィンドウにまとめる" }, (int)s.WindowMode, i =>
         {
-            s.WindowMode = (WindowMode)i; EditorCommands.Main?.ApplyWindowMode();
+            s.WindowMode = (WindowMode)i; EditorCommands.ApplyWindowMode();
         })));
         Body.Children.Add(Row("レイヤーの高さ", Combo(new[] { "小 (20)", "中 (24)", "大 (32)" }, s.LayerHeight <= 20 ? 0 : s.LayerHeight <= 24 ? 1 : 2, i =>
         {

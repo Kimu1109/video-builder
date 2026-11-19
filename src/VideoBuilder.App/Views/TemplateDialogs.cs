@@ -85,7 +85,7 @@ public sealed class TemplateSaveDialog : DialogBase
                     var labelBox = new TextBox { Text = label, Width = 160, IsEnabled = suggested };
                     check.IsCheckedChanged += (_, _) => labelBox.IsEnabled = check.IsChecked == true;
                     // オブジェクトの表示名 (テキストの本文など) を含むので、組み立てた文字はもう訳さない
-                    var where = L.Verbatim($"{TimelineCanvas.ObjectLabel(o)} › {L.T(e.Definition.Name)} › {L.T(p.Name)}");
+                    var where = L.Verbatim($"{Labels.Object(o)} › {L.T(e.Definition.Name)} › {L.T(p.Name)}");
                     where.VerticalAlignment = VerticalAlignment.Center; where.TextTrimming = TextTrimming.CharacterEllipsis; where.Margin = new Thickness(8, 0, 0, 0);
                     where.Classes.Add("secondary");
                     var row = new DockPanel { Children = { check, labelBox, where } };
@@ -478,6 +478,6 @@ public sealed class ExposedItemsDialog : DialogBase
 
     private string Describe(ExposedParam x) =>
         x.Resolve(_scene) is { } r
-            ? $"{TimelineCanvas.ObjectLabel(r.Object)} › {L.T(r.Effect.Definition.Name)} › {L.T(r.Param.Name)}"
+            ? $"{Labels.Object(r.Object)} › {L.T(r.Effect.Definition.Name)} › {L.T(r.Param.Name)}"
             : L.T("(見つかりません)");
 }

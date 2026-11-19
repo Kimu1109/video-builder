@@ -5,7 +5,7 @@ using Avalonia.Markup.Xaml;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using VideoBuilder.App.Services;
-using VideoBuilder.App.Views;
+using VideoBuilder.App.Shell;
 
 namespace VideoBuilder.App;
 

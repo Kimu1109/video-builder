@@ -10,7 +10,10 @@ using Avalonia.VisualTree;
 using VideoBuilder.App;
 using VideoBuilder.App.Controls;
 using VideoBuilder.App.Services;
+using VideoBuilder.App.Shell;
 using VideoBuilder.App.Views;
+using VideoBuilder.App.Workspaces.Advanced;
+using VideoBuilder.App.Workspaces.Simple;
 using VideoBuilder.Core;
 
 [assembly: AvaloniaTestApplication(typeof(VideoBuilder.App.Tests.TestApp))]
@@ -49,6 +52,8 @@ public class UiTests
             _window = new MainWindow();
             _window.Show();
         }
+        // シンプル編集のテストのあとでも、詳細編集から始める
+        if (_window.Workspace.Mode != EditorMode.Advanced) EditorCommands.SetEditorMode(EditorMode.Advanced);
         Svc.Session.NewProject(new ProjectSettings());
         Svc.Settings.Snap = false;
         Pump();
@@ -792,12 +797,12 @@ public class UiTests
             s.SwitchScene("root");
             var so = s.AddObject(EffectRegistry.SceneRef, 3, 0, 30, o => o.Main.Values["scene"] = scene.Id)!;
 
-            Assert.Equal("テキスト", TimelineCanvas.ObjectLabel(s.Scene.Find(text.Id)!));
-            Assert.Equal("Text", TimelineCanvas.ObjectLabel(empty));                     // 本文がなければ種類の名前 (訳す)
-            Assert.Equal("Shape [Rectangle]", TimelineCanvas.ObjectLabel(shape));       // アプリの名前は訳す
-            Assert.Equal("Scene [説明]", TimelineCanvas.ObjectLabel(so));                // 型紙だけ訳す
-            Assert.Equal("Main", TimelineCanvas.SceneLabel(s.Project.Root));             // アプリが付けた既定の名前は訳す
-            Assert.Equal("説明", TimelineCanvas.SceneLabel(s.Project.FindScene(scene.Id)!));
+            Assert.Equal("テキスト", Labels.Object(s.Scene.Find(text.Id)!));
+            Assert.Equal("Text", Labels.Object(empty));                     // 本文がなければ種類の名前 (訳す)
+            Assert.Equal("Shape [Rectangle]", Labels.Object(shape));       // アプリの名前は訳す
+            Assert.Equal("Scene [説明]", Labels.Object(so));                // 型紙だけ訳す
+            Assert.Equal("Main", Labels.Scene(s.Project.Root));             // アプリが付けた既定の名前は訳す
+            Assert.Equal("説明", Labels.Scene(s.Project.FindScene(scene.Id)!));
 
             // タイムラインのシーンの一覧と、シーンオブジェクトのプロパティ
             Pump();
@@ -1176,5 +1181,151 @@ public class UiTests
         double withDraw = sw.Elapsed.TotalMilliseconds / 40;
         Console.WriteLine($"BENCH selection change: build {update:0.0} ms, build+layout+draw {withDraw:0.0} ms");
     }
-}
 
+    // ---------------- シンプル編集 ----------------
+
+    /// <summary>シンプル編集に切り替えたウィンドウ。</summary>
+    private static MainWindow OpenSimple()
+    {
+        var w = Open();
+        EditorCommands.SetEditorMode(EditorMode.Simple);
+        Pump();
+        return w;
+    }
+
+    private static StoryClip ColorTitle(string background, double seconds = 2) =>
+        new() { Kind = StoryClipKind.Title, Text = "T", Background = background, Duration = seconds };
+
+    [AvaloniaFact]
+    public void Editor_mode_switches_the_workspace_and_keeps_the_shared_preview()
+    {
+        var w = Open();
+        Assert.IsType<AdvancedWorkspace>(w.Workspace);
+        Assert.Contains(w.Timeline, w.GetVisualDescendants());
+        EditorCommands.SetEditorMode(EditorMode.Simple);
+        Pump();
+        Assert.IsType<SimpleWorkspace>(w.Workspace);
+        Assert.Equal(EditorMode.Simple, Svc.Settings.EditorMode);
+        Assert.DoesNotContain(w.Timeline, w.GetVisualDescendants());
+        Assert.Contains(w.Simple.Strip, w.GetVisualDescendants());
+        Assert.Contains(w.PreviewArea, w.GetVisualDescendants());
+        // 詳細編集だけのメニューはない
+        List<string?> FileMenu() => w.GetVisualDescendants().OfType<Menu>().First().Items.OfType<MenuItem>().First()
+            .Items.OfType<MenuItem>().Select(m => m.Header as string).ToList();
+        Assert.DoesNotContain("字幕を読み込む...", FileMenu());
+        Assert.Contains("メディアファイルを読み込む...", FileMenu());
+        EditorCommands.SetEditorMode(EditorMode.Advanced);
+        Pump();
+        Assert.Contains(w.Timeline, w.GetVisualDescendants());
+        Assert.Contains(w.PreviewArea, w.GetVisualDescendants());
+        Assert.Contains("字幕を読み込む...", FileMenu());
+    }
+
+    [AvaloniaFact]
+    public void Simple_mode_shortcuts_edit_the_storyboard_and_undo_restores_it()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        ed.AddClips(new[] { ColorTitle("#FF0000"), ColorTitle("#00FF00"), ColorTitle("#0000FF") });
+        Pump();
+        Assert.Equal(3, ed.Board!.Clips.Count);
+        Assert.Equal(6, Svc.Session.Project.Root.Objects.Count);   // 背景 + 文字 が 3 つ
+
+        ed.Select(ed.Board.Clips[1].Id);
+        w.Simple.Strip.Focus();
+        w.KeyPressQwerty(PhysicalKey.Delete, RawInputModifiers.None);
+        Pump();
+        Assert.Equal(new[] { "#FF0000", "#0000FF" }, ed.Board!.Clips.Select(c => c.Background));
+        Assert.True(ed.CanEdit);
+
+        // S: 現在位置 (1 つ目の真ん中) で分割
+        Svc.Session.CurrentFrame = 30;
+        w.KeyPressQwerty(PhysicalKey.S, RawInputModifiers.None);
+        Pump();
+        Assert.Equal(3, ed.Board!.Clips.Count);
+        Assert.Equal(1, ed.Board.Clips[0].Duration);
+
+        w.KeyPressQwerty(PhysicalKey.Z, RawInputModifiers.Control);
+        w.KeyPressQwerty(PhysicalKey.Z, RawInputModifiers.Control);
+        Pump();
+        Assert.Equal(new[] { "#FF0000", "#00FF00", "#0000FF" }, ed.Board!.Clips.Select(c => c.Background));
+        // 詳細編集だけのショートカット (P: キーフレーム) は効かない
+        w.KeyPressQwerty(PhysicalKey.P, RawInputModifiers.None);
+        Assert.True(ed.CanEdit);
+    }
+
+    [AvaloniaFact]
+    public void Clicking_the_storyboard_selects_and_seeks_and_dragging_reorders()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        ed.AddClips(new[] { ColorTitle("#FF0000"), ColorTitle("#00FF00"), ColorTitle("#0000FF") });
+        ed.Select(null);
+        Pump();
+        var strip = w.Simple.Strip;
+        var layout = ed.Layout;
+        Point At(int frame) => strip.TranslatePoint(new Point(strip.FrameToX(frame), StoryboardStrip.ClipTop + 40), w)!.Value;
+
+        var p = At(layout.Clips[1].Start + 10);
+        w.MouseDown(p, MouseButton.Left); w.MouseUp(p, MouseButton.Left);
+        Pump();
+        Assert.Equal(ed.Board!.Clips[1].Id, ed.SelectedId);
+        Assert.Equal(layout.Clips[1].Start + 10, Svc.Session.CurrentFrame);
+        // 設定の欄に、選んだクリップの設定が出る
+        Assert.Contains(w.Simple.Panel.GetVisualDescendants().OfType<TextBlock>(), t => t.Text == L.T("タイトル"));
+
+        // 1 つ目を、最後へドラッグ
+        string first = ed.Board.Clips[0].Id;
+        var from = At(10);
+        var to = At(layout.VideoLength - 2);
+        w.MouseDown(from, MouseButton.Left);
+        w.MouseMove(new Point(from.X + 10, from.Y));
+        w.MouseMove(to);
+        w.MouseUp(to, MouseButton.Left);
+        Pump();
+        Assert.Equal(first, ed.Board!.Clips[^1].Id);
+    }
+
+    [AvaloniaFact]
+    public void Project_changed_in_advanced_mode_shows_a_notice_in_simple_mode()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        ed.AddClips(new[] { ColorTitle("#FF0000") });
+        EditorCommands.SetEditorMode(EditorMode.Advanced);
+        var s = Svc.Session;
+        s.Edit("move", () => s.Project.Root.Objects[0].Layer = 20);
+        EditorCommands.SetEditorMode(EditorMode.Simple);
+        Pump();
+        Assert.False(w.Simple.CanEdit);
+        Assert.False(w.Simple.Strip.IsEffectivelyVisible);
+        Assert.Contains(w.GetVisualDescendants().OfType<TextBlock>(), t => t.Text == L.T("このプロジェクトは、詳細編集で変更されています。"));
+
+        var rebuild = w.GetVisualDescendants().OfType<Button>().First(b => (b.Content as string) is "シンプル編集の内容に戻す" or "Restore the simple editing content");
+        rebuild.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        Pump();
+        Assert.True(w.Simple.CanEdit);
+        Assert.True(w.Simple.Strip.IsEffectivelyVisible);
+        Assert.Equal(0, s.Project.Root.Objects[0].Layer);
+    }
+
+    [AvaloniaFact]
+    public async Task Simple_mode_preview_renders_the_storyboard()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        Svc.Session.NewProject(new ProjectSettings { Width = 320, Height = 180 });
+        ed.AddClips(new[] { ColorTitle("#FF0000") });
+        Svc.Session.CurrentFrame = 5;
+        Svc.Preview.Request();
+        SkiaSharp.SKColor pixel = default;
+        for (int i = 0; i < 100; i++)
+        {
+            await Task.Delay(20);
+            Pump();
+            Svc.Preview.WithFrame(b => pixel = b.GetPixel(b.Width / 2, b.Height / 4));
+            if (pixel.Red > 200) break;
+        }
+        Assert.True(pixel.Red > 200 && pixel.Green < 50, $"pixel {pixel}");
+    }
+}

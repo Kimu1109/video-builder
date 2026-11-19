@@ -4,11 +4,12 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
+using VideoBuilder.App.Controls;
 using VideoBuilder.App.Services;
 using VideoBuilder.Core;
 using VideoBuilder.Editing;
 
-namespace VideoBuilder.App.Controls;
+namespace VideoBuilder.App.Workspaces.Advanced;
 
 public enum TimelineArea { Corner, Ruler, Header, Content }
 public enum ObjectPart { None, Body, LeftEdge, RightEdge, KeyFrame }
@@ -377,7 +378,7 @@ public sealed class TimelineCanvas : Control
                         Icon.Draw(ctx, icon, Brushes.White, new Point(tx, y + (lh - 15) / 2), 14);
                         tx += 18;
                     }
-                    var label = Text(ObjectLabel(o), Brushes.White);
+                    var label = Text(Labels.Object(o), Brushes.White);
                     ctx.DrawText(label, new Point(tx, y + (lh - 1 - label.Height) / 2));
                 }
             }
@@ -438,34 +439,6 @@ public sealed class TimelineCanvas : Control
     }
 
     /// <summary>オブジェクトの帯に出す名前 (表示言語に合わせる)。</summary>
-    /// <summary>
-    /// オブジェクトの表示名 (表示する言語にしたもの)。テキストの本文・ファイル名・シーンの名前など、
-    /// 利用者が付けたものは訳さない。TextBlock に出すときは L.Verbatim を使うこと (自動の置き換えで訳されないように)。
-    /// </summary>
-    public static string ObjectLabel(TimelineObject o)
-    {
-        var main = o.Main;
-        string DefName() => L.T(main.Definition.Name);
-        switch (main.DefinitionId)
-        {
-            case EffectRegistry.Text:
-                var t = main.GetString("text").Split('\n')[0];
-                return t.Length > 0 ? t : DefName();
-            case EffectRegistry.Video or EffectRegistry.Image or EffectRegistry.Audio or EffectRegistry.Vector:
-                var f = main.GetString("file");
-                return f.Length > 0 ? Path.GetFileName(f) : DefName();
-            case EffectRegistry.SceneRef:
-                var sc = Svc.Session.Project.FindScene(main.GetString("scene"));
-                return sc != null ? L.Format("シーン [{0}]", SceneLabel(sc)) : DefName();
-            case EffectRegistry.Shape:
-                return L.T($"図形 [{EffectRegistry.ShapeTypes[Math.Clamp(main.GetInt("type"), 0, EffectRegistry.ShapeTypes.Length - 1)]}]");
-        }
-        return o.Definition.Category == EffectCategory.Filter ? L.T($"調整レイヤー [{main.Definition.Name}]") : DefName();
-    }
-
-    /// <summary>シーンの表示名。利用者が付けた名前は訳さない。アプリが付けた既定の名前 (メイン) だけは訳す。</summary>
-    public static string SceneLabel(Scene scene) => scene.Name == Scene.DefaultName ? L.T(scene.Name) : scene.Name;
-
     /// <summary>大目盛が 90px 以上になる間隔を選ぶ。</summary>
     private (long Major, long Minor) TickSteps()
     {

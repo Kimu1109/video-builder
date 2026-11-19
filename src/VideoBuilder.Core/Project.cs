@@ -190,6 +190,8 @@ public sealed class Project
     public GridSettings Grid { get; set; } = new();
     /// <summary>素材の絶対パス → プロジェクトファイルから見た相対パス。保存時に作り、フォルダごと移動したときの復元に使う。</summary>
     public Dictionary<string, string> MediaPaths { get; set; } = new();
+    /// <summary>シンプル編集のプロジェクトなら、その中身 (メインのシーンはこれから作る)。詳細編集だけのプロジェクトでは null。</summary>
+    public Storyboard? Storyboard { get; set; }
 
     public Scene Root => Scenes[0];
     public Scene? FindScene(string id) => Scenes.FirstOrDefault(s => s.Id == id);
@@ -215,7 +217,7 @@ public sealed class Project
     public Project CloneSharing(Project? previous)
     {
         if (previous == null) return Clone();
-        var p = new Project { FormatVersion = FormatVersion, Settings = Settings.Clone(), Scenes = new List<Scene>(Scenes.Count), Grid = Grid.Clone(), MediaPaths = new Dictionary<string, string>(MediaPaths) };
+        var p = new Project { FormatVersion = FormatVersion, Settings = Settings.Clone(), Scenes = new List<Scene>(Scenes.Count), Grid = Grid.Clone(), MediaPaths = new Dictionary<string, string>(MediaPaths), Storyboard = Storyboard?.Clone() };
         foreach (var s in Scenes) p.Scenes.Add(s.CloneSharing(previous.FindScene(s.Id)));
         return p;
     }
@@ -223,7 +225,7 @@ public sealed class Project
     /// <summary>レンダリングスレッドに渡すための複製。</summary>
     public Project Clone()
     {
-        var p = new Project { FormatVersion = FormatVersion, Settings = Settings.Clone(), Scenes = new List<Scene>(), Grid = Grid.Clone(), MediaPaths = new Dictionary<string, string>(MediaPaths) };
+        var p = new Project { FormatVersion = FormatVersion, Settings = Settings.Clone(), Scenes = new List<Scene>(), Grid = Grid.Clone(), MediaPaths = new Dictionary<string, string>(MediaPaths), Storyboard = Storyboard?.Clone() };
         foreach (var s in Scenes) p.Scenes.Add(s.Clone());
         return p;
     }

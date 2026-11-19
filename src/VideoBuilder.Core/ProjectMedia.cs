@@ -1,5 +1,14 @@
 namespace VideoBuilder.Core;
 
+/// <summary>素材ファイルを指している 1 か所 (エフェクトのファイルの欄、ストーリーボードのクリップなど)。</summary>
+public sealed class MediaRef
+{
+    private readonly Func<string> _get;
+    private readonly Action<string> _set;
+    public MediaRef(Func<string> get, Action<string> set) { _get = get; _set = set; }
+    public string Path { get => _get(); set => _set(value); }
+}
+
 /// <summary>プロジェクトが参照している素材ファイルの調査・付け替え・収集。</summary>
 public static class ProjectMedia
 {
@@ -16,8 +25,23 @@ public static class ProjectMedia
         }
     }
 
+    /// <summary>
+    /// ファイルを指している所をすべて列挙する。シーンのほか、ストーリーボード (シンプル編集) のクリップと音楽も含む。
+    /// シーンとストーリーボードを一緒に書き換えるので、付け替えたあとも、シーンはストーリーボードから作ったままになる。
+    /// </summary>
+    public static IEnumerable<MediaRef> References(Project project)
+    {
+        foreach (var (e, key) in FileParams(project))
+            yield return new MediaRef(() => e.Values[key], v => e.Values[key] = v);
+        if (project.Storyboard is not { } board) yield break;
+        foreach (var c in board.Clips.Where(c => c.UsesFile && c.File.Length > 0))
+            yield return new MediaRef(() => c.File, v => c.File = v);
+        foreach (var m in board.Music.Where(m => m.File.Length > 0))
+            yield return new MediaRef(() => m.File, v => m.File = v);
+    }
+
     public static List<string> UsedFiles(Project project) =>
-        FileParams(project).Select(f => f.Effect.Values[f.Key]).Distinct().ToList();
+        References(project).Select(r => r.Path).Distinct().ToList();
 
     public static List<string> FindMissing(Project project) =>
         UsedFiles(project).Where(f => !File.Exists(f)).ToList();
@@ -26,8 +50,8 @@ public static class ProjectMedia
     public static int Relink(Project project, string oldPath, string newPath)
     {
         int n = 0;
-        foreach (var (e, key) in FileParams(project).ToList())
-            if (e.Values[key] == oldPath) { e.Values[key] = newPath; n++; }
+        foreach (var r in References(project).ToList())
+            if (r.Path == oldPath) { r.Path = newPath; n++; }
         return n;
     }
 

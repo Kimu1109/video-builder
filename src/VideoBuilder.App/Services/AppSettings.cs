@@ -6,6 +6,11 @@ namespace VideoBuilder.App.Services;
 public enum ThemeMode { System, Light, Dark }
 public enum AccentMode { System, AppDefault, Custom }
 public enum WindowMode { Auto, Separate, Docked }
+/// <summary>
+/// 編集画面の種類。Advanced: レイヤーとオブジェクトで細かく組み立てる (AviUtl 風)。
+/// Simple: クリップを 1 列に並べるだけ (ムービーメーカー風)。
+/// </summary>
+public enum EditorMode { Advanced, Simple }
 /// <summary>Auto: 本物の GPU があれば GPU、なければ CPU。</summary>
 public enum RenderBackend { Auto, Gpu, Cpu }
 
@@ -13,6 +18,7 @@ public enum RenderBackend { Auto, Gpu, Cpu }
 public sealed class AppSettings
 {
     public Language Language { get; set; } = Language.Auto;
+    public EditorMode EditorMode { get; set; } = EditorMode.Advanced;
     public ThemeMode Theme { get; set; } = ThemeMode.System;
     public AccentMode Accent { get; set; } = AccentMode.System;
     public string CustomAccent { get; set; } = "#2F80ED";

@@ -45,6 +45,7 @@ public sealed class SnapshotCommand : IEditCommand
         target.Scenes = copy.Scenes;
         target.Grid = copy.Grid;
         target.MediaPaths = copy.MediaPaths;
+        target.Storyboard = copy.Storyboard;
     }
 }
 
