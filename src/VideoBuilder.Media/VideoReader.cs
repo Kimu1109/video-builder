@@ -27,9 +27,15 @@ public sealed unsafe class VideoReader : IDisposable
     private bool _converted;
     private bool _draining;
     private bool _eof;
-    private byte* _native;          // 変換済みフレーム (BGRA)。アンマネージドなので GC で動かない
-    private int _nativeSize;
+    // 変換済みフレーム (BGRA) の置き場を 2 つ持ち、変換のたびに交互に使う。
+    // 直前に返したフレームは、もう 1 回変換するまで書き換わらない (先読みしている間も前のフレームを描ける)。
+    // アンマネージドなので GC で動かない。大きさは元の動画の大きさで確保し、縮めて変換するときもそのまま使う
+    private readonly byte*[] _native = new byte*[2];
+    private int _nativeCapacity;
+    private int _nativeIndex;
     private bool _nativeValid;
+    private int _divisor = 1;
+    private int _pinned = -1;       // 書き換えない置き場 (PinCurrentFrame)。-1 ならなし
     private byte[] _managed = Array.Empty<byte>();
 
     public string Path { get; }
@@ -43,6 +49,42 @@ public sealed unsafe class VideoReader : IDisposable
     public bool IsHardware => _hardware;
     /// <summary>ハードウェアデコードを使わなかった (または途中でやめた) 理由。</summary>
     public string? HardwareError { get; private set; }
+
+    /// <summary>
+    /// 取り出すフレームを縦横 1/n に縮める (1 = 元の大きさ)。プレビューで、表示より大きくデコードしないために使う。
+    /// 変えると、今のフレームも次に取り出すときに新しい大きさで変換し直す。
+    /// </summary>
+    public int OutputDivisor
+    {
+        get => _divisor;
+        set
+        {
+            value = Math.Clamp(value, 1, 16);
+            if (value == _divisor) return;
+            _divisor = value;
+            // デコーダにフレームが残っていれば、新しい大きさで変換し直す (末尾を過ぎた後は残っていないので、前の大きさのまま)
+            if (_hasFrame && !_eof) _converted = false;
+        }
+    }
+
+    /// <summary>OutputDivisor を n にしたときの、取り出すフレームの大きさ。</summary>
+    public (int Width, int Height) OutputSizeFor(int divisor)
+    {
+        divisor = Math.Clamp(divisor, 1, 16);
+        return (Math.Max(1, (Width + divisor - 1) / divisor), Math.Max(1, (Height + divisor - 1) / divisor));
+    }
+
+    /// <summary>
+    /// 今のフレームの置き場を、UnpinFrame するまで書き換えないようにする。
+    /// 返したフレームを別のスレッドで使っている間に、このデコーダで先を読ませるときに使う。
+    /// </summary>
+    public void PinCurrentFrame() => _pinned = _nativeValid ? _nativeIndex : -1;
+
+    public void UnpinFrame() => _pinned = -1;
+
+    /// <summary>最後に取り出したフレームの大きさ (OutputDivisor で縮めた大きさ)。1 行は FrameWidth*4 バイト。</summary>
+    public int FrameWidth { get; private set; }
+    public int FrameHeight { get; private set; }
 
     /// <summary>最後に GetFrame が返したフレームの時刻 (秒)。同じフレームかどうかの判定に使う。</summary>
     public long CurrentFrameId => _curPts;
@@ -66,6 +108,7 @@ public sealed unsafe class VideoReader : IDisposable
             if (!wantHardware || !OpenHardwareDecoder(st)) OpenSoftwareDecoder(st);
 
             Width = _dec->width; Height = _dec->height;
+            FrameWidth = Width; FrameHeight = Height;
             _tb = st->time_base;
             _startPts = st->start_time != ffmpeg.AV_NOPTS_VALUE ? st->start_time : 0;
             var r = st->avg_frame_rate.num != 0 ? st->avg_frame_rate : st->r_frame_rate;
@@ -158,21 +201,22 @@ public sealed unsafe class VideoReader : IDisposable
     }
 
     /// <summary>
-    /// seconds の位置のフレームを返す (Width*Height*4 バイトの BGRA)。
+    /// seconds の位置のフレームを返す (FrameWidth*FrameHeight*4 バイトの BGRA)。
     /// 返す配列は内部バッファなので、次の呼び出しまでに使い切ること。
     /// </summary>
     public byte[]? GetFrame(double seconds)
     {
         var p = GetFramePointer(seconds);
         if (p == IntPtr.Zero) return null;
-        if (_managed.Length != _nativeSize) _managed = new byte[_nativeSize];
-        System.Runtime.InteropServices.Marshal.Copy(p, _managed, 0, _nativeSize);
+        int size = FrameWidth * FrameHeight * 4;
+        if (_managed.Length != size) _managed = new byte[size];
+        System.Runtime.InteropServices.Marshal.Copy(p, _managed, 0, size);
         return _managed;
     }
 
     /// <summary>
-    /// seconds の位置のフレーム (BGRA, 1 行 Width*4 バイト) を指すポインタを返す。複製しないので速い。
-    /// 中身は次に別のフレームを取り出すと書き換わる。取り出せなければ IntPtr.Zero。
+    /// seconds の位置のフレーム (BGRA, FrameWidth x FrameHeight, 1 行 FrameWidth*4 バイト) を指すポインタを返す。複製しないので速い。
+    /// 中身は、このあと別のフレームを 2 回取り出すと書き換わる (1 回なら前のフレームはそのまま残る)。取り出せなければ IntPtr.Zero。
     /// </summary>
     public IntPtr GetFramePointer(double seconds)
     {
@@ -208,7 +252,7 @@ public sealed unsafe class VideoReader : IDisposable
         if (!_hasFrame) return IntPtr.Zero;
         if (!_converted) Convert();
         // 変換できなかった場合 (末尾を過ぎた後など) は、最後に変換できたフレームを返す
-        return _nativeValid ? (IntPtr)_native : IntPtr.Zero;
+        return _nativeValid ? (IntPtr)_native[_nativeIndex] : IntPtr.Zero;
     }
 
     /// <summary>シークした回数 (計測・テスト用)。</summary>
@@ -281,20 +325,30 @@ public sealed unsafe class VideoReader : IDisposable
         }
         int w = source->width, h = source->height;
         if (w <= 0 || h <= 0) return;
-        _sws = ffmpeg.sws_getCachedContext(_sws, w, h, (AVPixelFormat)source->format, Width, Height,
+        var (ow, oh) = OutputSizeFor(_divisor);
+        _sws = ffmpeg.sws_getCachedContext(_sws, w, h, (AVPixelFormat)source->format, ow, oh,
             AVPixelFormat.AV_PIX_FMT_BGRA, ffmpeg.SWS_BILINEAR, null, null, null);
         if (_sws == null) return;
-        int size = Width * Height * 4;
-        if (_native == null || _nativeSize != size)
+        // 置き場は元の大きさで確保する (縮める大きさが変わっても確保し直さない)
+        int capacity = Width * Height * 4;
+        if (_native[0] == null || _nativeCapacity != capacity)
         {
-            if (_native != null) System.Runtime.InteropServices.NativeMemory.Free(_native);
-            _native = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc((nuint)size);
-            _nativeSize = size;
+            for (int i = 0; i < 2; i++)
+            {
+                if (_native[i] != null) System.Runtime.InteropServices.NativeMemory.Free(_native[i]);
+                _native[i] = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc((nuint)capacity);
+            }
+            _nativeCapacity = capacity;
             _nativeValid = false;
         }
-        var dst = new byte*[4] { _native, null, null, null };
-        var stride = new int[4] { Width * 4, 0, 0, 0 };
+        // 直前に返したフレームを残すため、もう一方の置き場に変換する
+        // (押さえられた置き場があれば、何回変換してもそちらには書かない)
+        int index = _pinned >= 0 ? _pinned ^ 1 : _nativeValid ? _nativeIndex ^ 1 : _nativeIndex;
+        var dst = new byte*[4] { _native[index], null, null, null };
+        var stride = new int[4] { ow * 4, 0, 0, 0 };
         ffmpeg.sws_scale(_sws, source->data, source->linesize, 0, h, dst, stride);
+        _nativeIndex = index;
+        FrameWidth = ow; FrameHeight = oh;
         _converted = true;
         _nativeValid = true;
         _convertedCount++;
@@ -308,6 +362,7 @@ public sealed unsafe class VideoReader : IDisposable
         if (_sws != null) { ffmpeg.sws_freeContext(_sws); _sws = null; }
         if (_dec != null) { var d = _dec; ffmpeg.avcodec_free_context(&d); _dec = null; }
         if (_fmt != null) { var f = _fmt; ffmpeg.avformat_close_input(&f); _fmt = null; }
-        if (_native != null) { System.Runtime.InteropServices.NativeMemory.Free(_native); _native = null; }
+        for (int i = 0; i < 2; i++)
+            if (_native[i] != null) { System.Runtime.InteropServices.NativeMemory.Free(_native[i]); _native[i] = null; }
     }
 }

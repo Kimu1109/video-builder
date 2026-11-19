@@ -209,6 +209,8 @@ public sealed class PreviewService : IDisposable
         }
         var sw = Stopwatch.StartNew();
         var engine = _engine!;
+        // 再生中は次のフレームを裏でデコードしておく (止まっているときは、次にどこを描くか分からないので読まない)
+        engine.Lookahead = IsPlaying;
         engine.RenderToBitmap(p, scene, frame, _back);
         LastRenderMs = sw.Elapsed.TotalMilliseconds;
         LastRenderSize = (w, h);
