@@ -198,6 +198,7 @@ public sealed class RenderEngine : IDisposable
                     case EffectCategory.VideoSource:
                     {
                         _sourceScale = 1;
+                        _sourceAnimated = false;
                         var src = GetSource(ctx, obj, bounds, frame, depth);
                         if (src == null) break;
                         var sprite = Sprite.Centered(src);
@@ -211,7 +212,7 @@ public sealed class RenderEngine : IDisposable
                         ctx.Modifiers = DrawModifiers.None;
                         int next = ApplyCachedFilters(ctx, obj, bounds, frame, depth, ref sprite);
                         sprite = Effects.ApplyRange(sprite, obj, bounds, ctx, next, obj.Effects.Count);
-                        bool changes = def.Id is EffectRegistry.Video or EffectRegistry.SceneRef;
+                        bool changes = def.Id is EffectRegistry.Video or EffectRegistry.SceneRef || (def.Id == EffectRegistry.Vector && _sourceAnimated);
                         if (Place(sprite, obj, bounds, frame, groups, cameras, W, H, ctx.Modifiers) is not { } place) break;
                         if (place.Camera >= 0 && cameras[place.Camera].ZSort)
                         {
@@ -741,6 +742,9 @@ public sealed class RenderEngine : IDisposable
 
     /// <summary>直前の GetSource が返した絵の倍率 (プロキシのとき 1 より大きい)。</summary>
     private float _sourceScale = 1;
+    /// <summary>直前の GetSource が返した絵が、フレームごとに変わるもの (Lottie) か。</summary>
+    private bool _sourceAnimated;
+    private readonly VectorSources _vectors = new();
 
     /// <summary>小さく作った絵を、元の大きさの絵にする。</summary>
     private static Sprite Upscale(RenderContext ctx, Sprite s, float scale)
@@ -792,12 +796,25 @@ public sealed class RenderEngine : IDisposable
                 string key = $"S|{type}|{Generators.F(size)}|{Generators.F(aspect)}|{Generators.F(line)}|{color}|{p.Settings.Width}x{p.Settings.Height}";
                 return Cached(key, () => Generators.RenderShape(type, size, aspect, line, ParseColor(color), p.Settings.Width, p.Settings.Height));
             }
+            case EffectRegistry.Vector:
+            {
+                string file = main.GetString("file");
+                float size = (float)main.Eval("size", bounds, frame);
+                var info = _vectors.Get(file);
+                if (info == null) return null;
+                if (!info.Animated)
+                    return Cached($"V|{file}|{info.Version}|{Generators.F(size)}", () => _vectors.Render(info, size, 0));
+                _sourceAnimated = true;
+                double t = SourceTime(p, obj, bounds, frame);
+                var img = _vectors.Render(info, size, main.GetBool("loop") ? t % Math.Max(1e-6, info.Duration) : Math.Min(t, info.Duration));
+                return img == null ? null : ctx.Own(img);
+            }
             case EffectRegistry.SceneRef:
             {
                 if (depth >= MaxSceneDepth) return null;
                 var scene = p.FindScene(main.GetString("scene"));
                 if (scene == null) return null;
-                int inner = frame - obj.Start + obj.SourceOffsetFrames + p.SecondsToFrames(main.Eval("position", bounds, frame));
+                int inner = SceneTime.InnerFrame(p, obj, scene, bounds, frame);
                 using var surface = ctx.CreateSurface(p.Settings.Width, p.Settings.Height);
                 if (surface == null) return null;
                 surface.Canvas.Clear(SKColors.Transparent);
@@ -862,6 +879,7 @@ public sealed class RenderEngine : IDisposable
         _gpuSurface = null;
         foreach (var img in _generated.Values) img?.Dispose();
         _generated.Clear();
+        _vectors.Dispose();
         Media.Dispose();
     }
 }

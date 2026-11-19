@@ -121,7 +121,7 @@ public sealed class TimelineView : UserControl
         foreach (var def in EffectRegistry.MediaObjects)
         {
             if (def.Id == EffectRegistry.GroupControl) media.Add(Menus.Sep());
-            bool file = def.Id is EffectRegistry.Video or EffectRegistry.Image or EffectRegistry.Audio;
+            bool file = def.Id is EffectRegistry.Video or EffectRegistry.Image or EffectRegistry.Audio or EffectRegistry.Vector;
             media.Add(Menus.Item(def.Name + (file ? "..." : ""), def.Icon, () =>
             {
                 if (file) _ = EditorCommands.ImportFilesAsync(hit.Layer, hit.Frame, def.Params.First(p => p.Kind == ParamKind.File).FileExtensions, def.Name);
@@ -131,11 +131,17 @@ public sealed class TimelineView : UserControl
         menu.Items.Add(Menus.Sub("オブジェクトを追加", "AddBox", media));
         menu.Items.Add(Menus.Sub("調整レイヤーを追加", "Filter",
             EffectRegistry.Filters.Select(f => (object)Menus.Item(f.Name, f.Icon, () => _session.AddObject(f.Id, hit.Layer, hit.Frame, len)))));
-        var aliases = Svc.Aliases.List();
-        if (aliases.Count > 0)
-            menu.Items.Add(Menus.Sub("プリセットから追加", "Layers", aliases.Select(a => (object)Menus.Item(a, null, () => EditorCommands.InsertAlias(a, hit.Layer, hit.Frame)))
-                .Append(Menus.Sep())
-                .Append(Menus.Sub("プリセットを削除", "Delete", aliases.Select(a => (object)Menus.Item(a, null, () => Svc.Aliases.Delete(a)))))));
+        var templates = Svc.Templates.List();
+        var templateItems = new List<object>();
+        foreach (var group in templates.GroupBy(t => t.Category))
+        {
+            var items = group.Select(t => (object)Menus.Item(t.Name, null, () => EditorCommands.InsertTemplate(t, hit.Layer, hit.Frame)));
+            if (group.Key.Length == 0) templateItems.AddRange(items);
+            else templateItems.Add(Menus.Sub(group.Key, null, items));
+        }
+        if (templateItems.Count > 0) templateItems.Add(Menus.Sep());
+        templateItems.Add(Menus.Item("テンプレートライブラリ...", "Template", () => _ = EditorCommands.ShowTemplateLibraryAsync()));
+        menu.Items.Add(Menus.Sub("テンプレートから追加", "Template", templateItems));
         menu.Items.Add(Menus.Sep());
         menu.Items.Add(Menus.Item("貼り付け", "Paste", () => _session.Paste(hit.Layer, hit.Frame), Shortcuts.First("edit.paste"), _session.HasClipboard));
         var scene = _session.Scene;
@@ -171,7 +177,7 @@ public sealed class TimelineView : UserControl
         menu.Items.Add(Menus.Item("切り取り", "Cut", _session.CutSelected, Shortcuts.First("edit.cut")));
         menu.Items.Add(Menus.Item("コピー", "Copy", _session.CopySelected, Shortcuts.First("edit.copy")));
         menu.Items.Add(Menus.Item("削除", "Delete", _session.DeleteSelected, Shortcuts.First("edit.delete")));
-        menu.Items.Add(Menus.Item("プリセットとして保存...", "Layers", () => _ = EditorCommands.CreateAliasAsync()));
+        menu.Items.Add(Menus.Item("テンプレートとして保存...", "Template", () => _ = EditorCommands.SaveTemplateAsync()));
         if (o.Main.DefinitionId == EffectRegistry.Video)
         {
             var file = o.Main.GetString("file");

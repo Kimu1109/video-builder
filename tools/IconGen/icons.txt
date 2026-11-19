@@ -77,3 +77,9 @@ toggle_off ToggleOff
 code Code
 extension Extension
 translate Translate
+interests Vector
+dashboard_customize Template
+format_paint Style
+search Search
+download Download
+upload Upload

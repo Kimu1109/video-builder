@@ -12,7 +12,7 @@ public static class ProjectSerializer
 {
     public const string Extension = ".vbproj";
 
-    private static readonly JsonSerializerOptions Options = new()
+    internal static readonly JsonSerializerOptions Options = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         // 字下げなしで書く (大きなプロジェクトで、保存の時間とファイルの大きさが 3〜4 割減る)

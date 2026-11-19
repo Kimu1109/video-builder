@@ -103,7 +103,7 @@ public static class EditorCommands
     public static async Task ImportFilesAsync(int layer, int frame, string[]? extensions = null, string title = "メディアファイル")
     {
         if (Main == null) return;
-        extensions ??= EffectRegistry.VideoExtensions.Concat(EffectRegistry.ImageExtensions).Concat(EffectRegistry.AudioExtensions).ToArray();
+        extensions ??= EffectRegistry.VideoExtensions.Concat(EffectRegistry.ImageExtensions).Concat(EffectRegistry.AudioExtensions).Concat(EffectRegistry.VectorExtensions).ToArray();
         var files = await Main.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
             Title = title + "を選択", AllowMultiple = true,
@@ -198,16 +198,68 @@ public static class EditorCommands
         if (Main != null) await new GridDialog().ShowDialog(Main);
     }
 
-    public static async Task CreateAliasAsync()
+    /// <summary>旧「プリセットとして保存」。今はテンプレートとして保存する (ショートカットの ID は互換のため変えない)。</summary>
+    public static Task CreateAliasAsync() => SaveTemplateAsync();
+
+    // ---------------- テンプレート ----------------
+
+    /// <summary>選んだオブジェクト (連結しているものを含む) をテンプレートとして保存する。</summary>
+    public static async Task SaveTemplateAsync()
     {
         var targets = Session.WithGroup(Session.SelectedObjects.ToList());
         if (Main == null || targets.Count == 0) return;
-        var name = await PromptDialog.Show(Main, "プリセットとして保存", "プリセットの名前", TimelineCanvasLabel(targets[0]));
-        if (name == null) return;
-        if (Svc.Aliases.Exists(name) &&
-            await MessageDialog.Show(Main, "プリセットとして保存", $"「{AliasStore.SafeName(name)}」はすでにあります。上書きしますか?", ("キャンセル", false), ("上書き", true)) != "上書き") return;
-        try { Svc.Aliases.Save(name, targets); }
-        catch (Exception ex) { await ShowErrorAsync("プリセットを保存できませんでした。\n" + ex.Message); }
+        var d = new TemplateSaveDialog(Session.Project, targets, TimelineCanvasLabel(targets[0]), Svc.Templates.Categories());
+        await d.ShowDialog(Main);
+        if (d.Result is not { } options) return;
+        if (Svc.Templates.Exists(options.Name) &&
+            await MessageDialog.Show(Main, "テンプレートとして保存", $"「{options.Name}」はすでにあります。上書きしますか?", ("キャンセル", false), ("上書き", true)) != "上書き") return;
+        try
+        {
+            var pkg = TemplatePackage.Create(Session.Project, targets, options);
+            pkg.Thumbnail = TemplateService.RenderThumbnail(pkg, Session.Project.Settings);
+            Svc.Templates.Save(pkg);
+        }
+        catch (Exception ex) { await ShowErrorAsync("テンプレートを保存できませんでした。\n" + ex.Message); }
+    }
+
+    /// <summary>テンプレートを置く。mode が null なら、テンプレートに保存された置き方。</summary>
+    public static void InsertTemplate(TemplateEntry entry, int layer, int frame, TemplateInsertMode? mode = null)
+    {
+        var (_, message) = TemplateService.Insert(entry, layer, frame, mode);
+        if (message != null) _ = ShowErrorAsync(message);
+    }
+
+    public static async Task ShowTemplateLibraryAsync()
+    {
+        if (Main != null) await new TemplateLibraryDialog().ShowDialog(Main);
+    }
+
+    // ---------------- スタイル ----------------
+
+    /// <summary>選択中のオブジェクトの effectIndex 番目のエフェクトを、スタイルとして保存する。</summary>
+    public static async Task SaveStyleAsync(int effectIndex)
+    {
+        var o = Session.Primary;
+        if (Main == null || o == null || effectIndex >= o.Effects.Count) return;
+        var effect = o.Effects[effectIndex];
+        var name = await PromptDialog.Show(Main, "スタイルとして保存", $"スタイルの名前 ({L.T(effect.Definition.Name)})", "");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        name = name.Trim();
+        if (Svc.Styles.Exists(effect.DefinitionId, name) &&
+            await MessageDialog.Show(Main, "スタイルとして保存", $"「{name}」はすでにあります。上書きしますか?", ("キャンセル", false), ("上書き", true)) != "上書き") return;
+        try { Svc.Styles.Save(EffectStyle.From(effect, name)); }
+        catch (Exception ex) { await ShowErrorAsync("スタイルを保存できませんでした。\n" + ex.Message); }
+    }
+
+    /// <summary>選んだオブジェクトすべてにスタイルを当てる。</summary>
+    public static void ApplyStyle(string definitionId, string name)
+    {
+        try
+        {
+            if (Session.ApplyStyle(Svc.Styles.Load(definitionId, name)) == 0)
+                _ = ShowErrorAsync("選んだオブジェクトには、このスタイルを当てられません");
+        }
+        catch (Exception ex) { _ = ShowErrorAsync("スタイルを読み込めませんでした。\n" + ex.Message); }
     }
 
     private static string TimelineCanvasLabel(TimelineObject o) => Controls.TimelineCanvas.ObjectLabel(o);
@@ -281,7 +333,8 @@ public static class EditorCommands
             new("range.start", "出力範囲の開始を現在位置に", "OemOpenBrackets", SetRangeStart),
             new("range.end", "出力範囲の終了を現在位置に", "OemCloseBrackets", SetRangeEnd),
             new("range.clear", "出力範囲を解除", "", ClearRange),
-            new("alias.create", "プリセットとして保存", "", () => _ = CreateAliasAsync()));
+            new("alias.create", "テンプレートとして保存", "", () => _ = SaveTemplateAsync()),
+            new("template.library", "テンプレートライブラリ", "", () => _ = ShowTemplateLibraryAsync()));
     }
 
     /// <summary>キー入力を処理したら true。文字入力中 (TextBox) は編集用のキーを横取りしない。</summary>

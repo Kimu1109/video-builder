@@ -16,12 +16,15 @@ public static class EffectRegistry
     public static readonly string[] VideoExtensions = { "mp4", "mkv", "mov", "webm", "avi", "m4v", "ts", "flv", "wmv", "mpg" };
     public static readonly string[] ImageExtensions = { "png", "jpg", "jpeg", "bmp", "webp", "gif" };
     public static readonly string[] AudioExtensions = { "wav", "mp3", "flac", "ogg", "m4a", "aac", "opus" };
+    /// <summary>ベクター画像: SVG と Lottie (JSON)。</summary>
+    public static readonly string[] VectorExtensions = { "svg", "json" };
 
     public const string Video = "builtin.video";
     public const string Image = "builtin.image";
     public const string Audio = "builtin.audio";
     public const string Text = "builtin.text";
     public const string Shape = "builtin.shape";
+    public const string Vector = "builtin.vector";
     public const string SceneRef = "builtin.scene";
     public const string GroupControl = "builtin.group";
     public const string CameraControl = "builtin.camera";
@@ -94,11 +97,26 @@ public static class EffectRegistry
         });
         Register(new EffectDefinition
         {
+            Id = Vector, Name = "ベクター画像", Category = EffectCategory.VideoSource, Icon = "Icon.Vector", Color = "#3A7F8F",
+            Params = new[]
+            {
+                T("size", "サイズ", 0, 8000, 0, 0, 0, 2000),
+                T("position", "開始位置", 0, 36000, 0, 2, 0, 600),
+                T("speed", "再生速度", 0, 2000, 100, 1, 0, 400),
+                C("loop", "ループ再生", true),
+                new ParamDefinition { Key = "file", Name = "ファイル", Kind = ParamKind.File, FileExtensions = VectorExtensions },
+            },
+        });
+        Register(new EffectDefinition
+        {
             Id = SceneRef, Name = "シーン", Category = EffectCategory.VideoSource, Icon = "Icon.MovieEdit", Color = "#A58A3A",
             Params = new[]
             {
                 T("position", "開始位置", 0, 36000, 0, 2, 0, 600),
                 new ParamDefinition { Key = "scene", Name = "シーン", Kind = ParamKind.Text, DefaultText = "" },
+                C("stretch", "長さに合わせて伸縮"),
+                T("intro", "先頭の固定 (秒)", 0, 3600, 0, 2, 0, 10),
+                T("outro", "末尾の固定 (秒)", 0, 3600, 0, 2, 0, 10),
             },
         });
         Register(new EffectDefinition
@@ -174,7 +192,13 @@ public static class EffectRegistry
             Register(new EffectDefinition { Id = id, Name = name, Category = EffectCategory.AudioFilter, Icon = icon, Color = "#7A7A7A", Params = ps });
         A("audio.fade", "音声フェード", "Icon.VolumeUp", T("in", "イン", 0, 30, 0.5, 2), T("out", "アウト", 0, 30, 0.5, 2));
         A("audio.echo", "エコー", "Icon.MusicNote", T("delay", "遅延 (ms)", 1, 2000, 250, 0, 1, 1000), T("feedback", "繰り返し", 0, 95, 40, 0), T("mix", "混ぜる量", 0, 100, 40, 0));
+        Builtin = Map.Keys.ToHashSet();
     }
+
+    // 組み込みのエフェクトの ID (ここに入っていないものはプラグインが追加したもの)
+    private static readonly HashSet<string> Builtin;
+
+    public static bool IsBuiltin(string id) => Builtin.Contains(id);
 
     public static void Register(EffectDefinition def)
     {

@@ -26,6 +26,7 @@ public static class ObjectFactory
         if (EffectRegistry.VideoExtensions.Contains(ext)) return EffectRegistry.Video;
         if (EffectRegistry.ImageExtensions.Contains(ext)) return EffectRegistry.Image;
         if (EffectRegistry.AudioExtensions.Contains(ext)) return EffectRegistry.Audio;
+        if (EffectRegistry.VectorExtensions.Contains(ext)) return EffectRegistry.Vector;
         return null;
     }
 

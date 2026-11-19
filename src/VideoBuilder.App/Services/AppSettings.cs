@@ -101,6 +101,10 @@ public static class AppPaths
     public static string CacheDir => Xdg("XDG_CACHE_HOME", Environment.SpecialFolder.LocalApplicationData, ".cache");
     public static string PluginDir => Path.Combine(DataDir, "plugins");
     public static string AliasDir => Path.Combine(DataDir, "aliases");
+    public static string TemplateDir => Path.Combine(DataDir, "templates");
+    public static string StyleDir => Path.Combine(DataDir, "styles");
+    /// <summary>テンプレートから取り出した素材。プロジェクトから参照されるので、キャッシュではなくデータの場所に置く。</summary>
+    public static string TemplateAssetDir => Path.Combine(DataDir, "template-assets");
     public static string SettingsFile => Path.Combine(ConfigDir, "settings.json");
     public static string AutoSaveDir => Path.Combine(DataDir, "autosave");
 }

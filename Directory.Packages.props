@@ -10,6 +10,8 @@
     <PackageVersion Include="Avalonia.Skia" Version="11.3.23" />
     <PackageVersion Include="SkiaSharp" Version="2.88.9" />
     <PackageVersion Include="SkiaSharp.NativeAssets.Linux" Version="2.88.9" />
+    <PackageVersion Include="SkiaSharp.Skottie" Version="2.88.9" />
+    <PackageVersion Include="Svg.Skia" Version="2.0.0.8" />
     <PackageVersion Include="FFmpeg.AutoGen" Version="6.1.0.1" />
     <PackageVersion Include="Silk.NET.OpenAL" Version="2.23.0" />
     <PackageVersion Include="MoonSharp" Version="2.0.0" />
