@@ -676,3 +676,91 @@ public class AudioReaderSharingTests
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
 }
+
+public class AudioEffectTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), $"vb-afx-{Guid.NewGuid():N}");
+    public AudioEffectTests() => Directory.CreateDirectory(_dir);
+    public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
+
+    private string Sine(string name, int freq, double seconds)
+    {
+        var path = Path.Combine(_dir, name);
+        return MediaTests.RunFfmpeg($"-f lavfi -i \"sine=frequency={freq}:sample_rate=48000:duration={seconds}\" \"{path}\"") ? path : "";
+    }
+
+    private static TimelineObject Audio(Project p, string file, int layer, int start, int length)
+    {
+        var a = ObjectFactory.Create(EffectRegistry.Audio, layer, start, length);
+        a.Main.Values["file"] = file;
+        p.Root.Objects.Add(a);
+        return a;
+    }
+
+    /// <summary>from 秒から seconds 秒ぶんを混ぜる (1600 サンプルずつ続けて)。</summary>
+    private static float[] Render(Project p, double from, double seconds)
+    {
+        using var mixer = new AudioMixer();
+        int total = (int)(seconds * 48000);
+        var all = new float[total * 2];
+        var buf = new float[1600 * 2];
+        for (int i = 0; i < total; i += 1600)
+        {
+            mixer.Mix(p, p.Root, (long)(from * 48000) + i, buf);
+            buf.AsSpan(0, Math.Min(buf.Length, all.Length - i * 2)).CopyTo(all.AsSpan(i * 2));
+        }
+        return all;
+    }
+
+    private static double Rms(ReadOnlySpan<float> s)
+    {
+        double sum = 0;
+        foreach (var x in s) sum += x * x;
+        return Math.Sqrt(sum / Math.Max(1, s.Length));
+    }
+
+    [Fact]
+    public void Equalizer_boosts_only_the_chosen_band()
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        var low = Sine("low.wav", 40, 1);   // シェルフの角 (100 Hz) より十分低い音
+        if (low.Length == 0) return;
+        var p = new Project();
+        var a = Audio(p, low, 0, 0, 30);
+        double plain = Rms(Render(p, 0.2, 0.5));
+        var eq = ObjectFactory.AddFilter(a, "audio.eq");
+        eq.Tracks["low"] = new AnimatedValue(12);
+        double boosted = Rms(Render(p, 0.2, 0.5));
+        Assert.InRange(boosted / plain, 3, 4.5);        // +12 dB ≒ 4 倍 (角の近くでは少し小さい)
+        eq.Tracks["low"] = new AnimatedValue(0);
+        eq.Tracks["high"] = new AnimatedValue(12);
+        Assert.InRange(Rms(Render(p, 0.2, 0.5)) / plain, 0.9, 1.2);   // 40 Hz は高音のつまみでは変わらない
+    }
+
+    [Fact]
+    public void Ducking_lowers_the_music_only_while_another_sound_plays()
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        var music = Sine("music.wav", 220, 4);
+        var voice = Sine("voice.wav", 1000, 1);
+        if (music.Length == 0 || voice.Length == 0) return;
+        Project Make(bool duck)
+        {
+            var p = new Project();
+            var m = Audio(p, music, 0, 0, 120);                 // 0〜4 秒
+            Audio(p, voice, 1, 45, 30);                         // 1.5〜2.5 秒
+            if (duck) ObjectFactory.AddFilter(m, "audio.duck");  // 既定: 12 dB 下げる
+            return p;
+        }
+        var plain = Render(Make(false), 0, 4);
+        var ducked = Render(Make(true), 0, 4);
+        var diff = new float[plain.Length];
+        for (int i = 0; i < diff.Length; i++) diff[i] = plain[i] - ducked[i];   // = 音楽 × (1 − 音量)
+        double musicRms = Rms(plain.AsSpan(0, 48000 * 2));                       // 声のない所 = 音楽だけ
+        double Seg(double a, double b) => Rms(diff.AsSpan((int)(a * 48000) * 2, (int)((b - a) * 48000) * 2));
+        Assert.True(Seg(0.2, 1.4) < musicRms * 0.01);           // 声の前は下げない
+        Assert.InRange(Seg(1.7, 2.4) / musicRms, 0.65, 0.85);   // 声の間は 12 dB (1/4) 下がる → 差は 3/4
+        Assert.True(Seg(3.5, 3.9) < musicRms * 0.1);            // 声のあとは戻る (戻す速さ 0.4 秒の時定数で、1 秒後には 9 割以上)
+    }
+}
+

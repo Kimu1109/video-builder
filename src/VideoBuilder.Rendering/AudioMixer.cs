@@ -71,6 +71,57 @@ public sealed class AudioMixer : IDisposable
         }
     }
 
+    private float[] _key = Array.Empty<float>();
+
+    /// <summary>有効な「自動音量調整 (ダッキング)」のエフェクト (最初の 1 つ)。</summary>
+    private static Effect? DuckEffect(TimelineObject obj)
+    {
+        for (int i = 1; i < obj.Effects.Count; i++)
+            if (obj.Effects[i].Enabled && obj.Effects[i].DefinitionId == AudioEffects.DuckId) return obj.Effects[i];
+        return null;
+    }
+
+    private sealed class DuckState
+    {
+        public float Envelope;
+        public float Gain = 1;
+    }
+
+    /// <summary>
+    /// key (ほかの音声を混ぜたもの) が「反応する大きさ」を超えている間、samples の音量を「下げる量」だけ下げる。
+    /// 包絡線は立ち上がりを即座に、下がりを 50ms で追う。音量の変化は「下げる速さ」「戻す速さ」でなめらかにする。
+    /// </summary>
+    private void ApplyDucking(Project project, TimelineObject obj, Span<float> samples, ReadOnlySpan<float> key, long objSample, int frame)
+    {
+        var e = DuckEffect(obj)!;
+        int rate = project.Settings.SampleRate;
+        var bounds = obj.Bounds;
+        float amount = (float)e.Eval("amount", bounds, frame), thresholdDb = (float)e.Eval("threshold", bounds, frame);
+        double attack = Math.Max(0.001, e.Eval("attack", bounds, frame)), release = Math.Max(0.001, e.Eval("release", bounds, frame));
+        float threshold = MathF.Pow(10, thresholdDb / 20), low = MathF.Pow(10, -amount / 20);
+        float attackCoef = (float)(1 - Math.Exp(-1 / (attack * rate))), releaseCoef = (float)(1 - Math.Exp(-1 / (release * rate)));
+        float detectDecay = (float)Math.Exp(-1 / (0.05 * rate));
+
+        var stateKey = (obj.Id, -1, AudioEffects.DuckId);
+        if (!_fxStates.TryGetValue(stateKey, out var fs)) _fxStates[stateKey] = fs = new FxState();
+        bool continuous = fs.Next == objSample && fs.LastMix == _mix - 1;
+        if (fs.State is not DuckState st || !continuous) fs.State = st = new DuckState();
+        float env = st.Envelope, gain = st.Gain;
+        int n = samples.Length / 2;
+        for (int i = 0; i < n; i++)
+        {
+            float level = Math.Max(Math.Abs(key[i * 2]), Math.Abs(key[i * 2 + 1]));
+            env = level > env ? level : env * detectDecay;
+            float target = env > threshold ? low : 1;
+            gain += (target - gain) * (target < gain ? attackCoef : releaseCoef);
+            samples[i * 2] *= gain;
+            samples[i * 2 + 1] *= gain;
+        }
+        st.Envelope = env; st.Gain = gain;
+        fs.Next = objSample + n;
+        fs.LastMix = _mix;
+    }
+
     /// <summary>しばらく使っていないエフェクトの状態を捨てる。</summary>
     private void PruneFxStates()
     {
@@ -92,14 +143,28 @@ public sealed class AudioMixer : IDisposable
             if (fps.Num == 0) return;
             int frame = (int)(startSample * fps.Num / ((long)rate * fps.Den));
 
+            // ダッキングの付いた音声は、ほかの音声 (キー) を混ぜ終わってから混ぜる (22.20.6)
+            var ducked = new List<TimelineObject>();
             foreach (var obj in scene.Objects)
             {
                 if (!obj.Enabled || obj.Effects.Count == 0 || obj.Main.DefinitionId != EffectRegistry.Audio) continue;
-                if (!scene.GetLayer(obj.Layer).Visible) continue;
+                if (DuckEffect(obj) != null) { ducked.Add(obj); continue; }
+                MixOne(obj, null, dst);
+            }
+            if (ducked.Count > 0)
+            {
+                if (_key.Length < dst.Length) _key = new float[dst.Length];
+                dst.CopyTo(_key);
+                foreach (var obj in ducked) MixOne(obj, _key, dst);
+            }
+
+            void MixOne(TimelineObject obj, float[]? key, Span<float> dst)
+            {
+                if (!obj.Enabled || obj.Effects.Count == 0 || obj.Main.DefinitionId != EffectRegistry.Audio) return;
+                if (!scene.GetLayer(obj.Layer).Visible) return;
                 long objStart = project.FrameToSample(obj.Start), objEnd = project.FrameToSample(obj.End + 1);
                 long from = Math.Max(startSample, objStart), to = Math.Min(endSample, objEnd);
-                if (to <= from) continue;
-
+                if (to <= from) return;
 
                 var bounds = obj.Bounds;
                 int f = Math.Clamp(frame, obj.Start, obj.End);
@@ -126,12 +191,12 @@ public sealed class AudioMixer : IDisposable
                 var temp = _temp.AsSpan(0, srcCount * 2);
                 long srcStart = (long)Math.Floor(srcPos);
                 var entry = GetReader(file, rate, srcStart);
-                if (entry?.Reader == null) continue;
+                if (entry?.Reader == null) return;
                 entry.Reader.Read(srcStart, temp);
                 entry.NextSample = srcStart + (long)Math.Floor(count * speed);
 
                 var o = dst.Slice((int)(from - startSample) * 2, count * 2);
-                if (HasAudioEffects(obj))
+                if (HasAudioEffects(obj) || key != null)
                 {
                     // エフェクトがあるときは、いったんオブジェクトだけの音を作り、エフェクトをかけてから混ぜる
                     if (_fxBuf.Length < count * 2) _fxBuf = new float[count * 2];
@@ -139,6 +204,7 @@ public sealed class AudioMixer : IDisposable
                     Resample(temp, fxs, count, srcPos - srcStart, speed, 1, 1);
                     int blockFrame = Math.Clamp((int)(from * fps.Num / ((long)rate * fps.Den)), obj.Start, obj.End);
                     ApplyAudioEffects(project, obj, fxs, from - objStart, objEnd - objStart, blockFrame);
+                    if (key != null) ApplyDucking(project, obj, fxs, key.AsSpan((int)(from - startSample) * 2, count * 2), from - objStart, blockFrame);
                     for (int i = 0; i < count; i++)
                     {
                         o[i * 2] += fxs[i * 2] * gl;

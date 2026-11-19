@@ -547,5 +547,14 @@ internal static class TranslationsEn
         ("SVG の要素の id をカンマ区切りで書きます", "Enter SVG element ids, separated by commas"),
         ("この SVG にある id:", "Ids in this SVG:"),
         ("dotLottie の中にアニメーションがありません", "There is no animation in the dotLottie file"),
+        ("イコライザ", "Equalizer"),
+        ("低音 (dB)", "Bass (dB)"),
+        ("中音 (dB)", "Mid (dB)"),
+        ("高音 (dB)", "Treble (dB)"),
+        ("自動音量調整 (ダッキング)", "Auto ducking"),
+        ("下げる量 (dB)", "Reduction (dB)"),
+        ("反応する大きさ (dB)", "Threshold (dB)"),
+        ("下げる速さ (秒)", "Attack (s)"),
+        ("戻す速さ (秒)", "Release (s)"),
     };
 }

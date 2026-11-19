@@ -196,6 +196,10 @@ public static class EffectRegistry
             Register(new EffectDefinition { Id = id, Name = name, Category = EffectCategory.AudioFilter, Icon = icon, Color = "#7A7A7A", Params = ps });
         A("audio.fade", "音声フェード", "Icon.VolumeUp", T("in", "イン", 0, 30, 0.5, 2), T("out", "アウト", 0, 30, 0.5, 2));
         A("audio.echo", "エコー", "Icon.MusicNote", T("delay", "遅延 (ms)", 1, 2000, 250, 0, 1, 1000), T("feedback", "繰り返し", 0, 95, 40, 0), T("mix", "混ぜる量", 0, 100, 40, 0));
+        A("audio.eq", "イコライザ", "Icon.Tune", T("low", "低音 (dB)", -24, 24, 0, 1), T("mid", "中音 (dB)", -24, 24, 0, 1), T("high", "高音 (dB)", -24, 24, 0, 1));
+        A("audio.duck", "自動音量調整 (ダッキング)", "Icon.VolumeUp",
+            T("amount", "下げる量 (dB)", 0, 60, 12, 1), T("threshold", "反応する大きさ (dB)", -80, 0, -40, 1),
+            T("attack", "下げる速さ (秒)", 0.001, 5, 0.05, 3, 0.001, 1), T("release", "戻す速さ (秒)", 0.01, 10, 0.4, 2, 0.01, 3));
         Builtin = Map.Keys.ToHashSet();
     }
 
