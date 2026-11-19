@@ -18,6 +18,7 @@ public sealed class PreviewArea : DockPanel
     private readonly IconButton _play;
 
     public PreviewView Preview { get; } = new();
+    public PerformanceOverlay Overlay { get; } = new();
 
     public PreviewArea()
     {
@@ -39,7 +40,8 @@ public sealed class PreviewArea : DockPanel
         border.Classes.Add("panel");
         SetDock(border, Dock.Bottom);
         Children.Add(border);
-        Children.Add(Preview);
+        // プレビューの上に、パフォーマンスチェックの表示を重ねる
+        Children.Add(new Grid { Children = { Preview, Overlay } });
 
         _session.FrameChanged += UpdateTime;
         _session.ProjectChanged += UpdateTime;

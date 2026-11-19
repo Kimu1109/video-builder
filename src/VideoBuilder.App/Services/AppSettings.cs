@@ -19,6 +19,8 @@ public sealed class AppSettings
 {
     public Language Language { get; set; } = Language.Auto;
     public EditorMode EditorMode { get; set; } = EditorMode.Advanced;
+    /// <summary>パフォーマンスチェックモード (プレビューの描画時間・FPS・出力の内訳などを表示する)。</summary>
+    public bool PerformanceMode { get; set; }
     public ThemeMode Theme { get; set; } = ThemeMode.System;
     public AccentMode Accent { get; set; } = AccentMode.System;
     public string CustomAccent { get; set; } = "#2F80ED";

@@ -47,6 +47,12 @@ public sealed class PreviewService : IDisposable
     public event Action? PlayStateChanged;
     /// <summary>直近 1 フレームの描画にかかった時間 (ミリ秒)。</summary>
     public double LastRenderMs { get; private set; }
+    /// <summary>1 フレーム描いた (描画のスレッドから呼ばれる)。(かかった時間 ms, 幅, 高さ)</summary>
+    public event Action<double, int, int>? Rendered;
+    /// <summary>再生中に音声を 1 回ぶんミックスした (音声のスレッドから呼ばれる)。(かかった時間 ms, 音声の長さ ms)</summary>
+    public event Action<double, double>? AudioMixed;
+    /// <summary>直近の描画の大きさ。</summary>
+    public (int Width, int Height) LastRenderSize { get; private set; }
     /// <summary>
     /// プレビューが画面に表示される大きさ (物理ピクセル)。PreviewView が知らせる。
     /// 自動のときは、これより大きく描いても見えないので、この大きさで描く。
@@ -205,6 +211,8 @@ public sealed class PreviewService : IDisposable
         var engine = _engine!;
         engine.RenderToBitmap(p, scene, frame, _back);
         LastRenderMs = sw.Elapsed.TotalMilliseconds;
+        LastRenderSize = (w, h);
+        Rendered?.Invoke(LastRenderMs, w, h);
         var quads = engine.LastQuads.ToList();
         bool post;
         lock (_frameLock)
@@ -263,7 +271,9 @@ public sealed class PreviewService : IDisposable
             {
                 var s = _snapshot;
                 if (s == null) { Array.Clear(buffer); return; }
+                long t0 = Stopwatch.GetTimestamp();
                 _mixer.Mix(s.Project, s.Project.FindScene(s.SceneId) ?? s.Project.Root, pos, buffer);
+                AudioMixed?.Invoke(Stopwatch.GetElapsedTime(t0).TotalMilliseconds, buffer.Length / 2 * 1000.0 / rate);
             });
         }
         Current();

@@ -13,6 +13,8 @@ public static class Svc
     public static AppSettings Settings { get; private set; } = new();
     public static ThemeService Theme { get; private set; } = null!;
     public static PreviewService Preview { get; private set; } = null!;
+    /// <summary>パフォーマンスチェックモードで表示する数値。</summary>
+    public static PerformanceMonitor Performance { get; private set; } = null!;
     public static WaveformCache Waveforms { get; } = new();
     public static ProxyService Proxies { get; } = new();
     public static ThumbnailCache Thumbnails { get; } = new();
@@ -40,6 +42,7 @@ public static class Svc
         Theme = new ThemeService(app, Settings);
         Theme.Apply();
         Preview = new PreviewService(Session, Settings);
+        Performance = new PerformanceMonitor(Preview, Settings);
         // プロキシができたら、プレビューを描き直す (開いている動画は次の描画でプロキシに切り替わる)
         VideoBuilder.Media.ProxyStore.Changed += () => Avalonia.Threading.Dispatcher.UIThread.Post(() => Preview.Request());
     }

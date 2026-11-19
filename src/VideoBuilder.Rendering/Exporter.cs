@@ -16,6 +16,8 @@ public sealed class ExportRequest
     public bool ImageSequence { get; init; }
     /// <summary>GPU で描画する (使えなければ自動的に CPU になる)。</summary>
     public bool UseGpu { get; init; }
+    /// <summary>かかった時間の内訳を書き込む先 (パフォーマンスチェック用)。null なら測らない。</summary>
+    public ExportStats? Stats { get; init; }
 }
 
 /// <summary>UI なしでプロジェクトをファイルに書き出す。</summary>
@@ -29,6 +31,24 @@ public static class Exporter
         int total = Math.Max(0, req.EndFrame - req.StartFrame + 1);
         if (total == 0) throw new InvalidOperationException("出力するフレームがありません");
         int w = project.Settings.Width, h = project.Settings.Height;
+        var stats = req.Stats;
+        stats?.Start(total);
+        try { RunCore(req, project, scene, total, w, h, stats, progress, cancel); }
+        finally { stats?.Stop(); }
+    }
+
+    private static void RunCore(ExportRequest req, Project project, Scene scene, int total, int w, int h, ExportStats? stats,
+        IProgress<(int Done, int Total)>? progress, CancellationToken cancel)
+    {
+        var watch = new System.Diagnostics.Stopwatch();
+        // 測るときだけ時間を数える
+        void Measure(Action action, Action<TimeSpan>? add)
+        {
+            if (stats == null || add == null) { action(); return; }
+            watch.Restart();
+            action();
+            add(watch.Elapsed);
+        }
 
         // GPU コンテキストは作ったスレッドでしか使えないので、この関数の中で作って捨てる
         using var gpu = req.UseGpu ? GpuContext.TryCreate(out _) : null;
@@ -42,11 +62,15 @@ public static class Exporter
             for (int i = 0; i < total; i++)
             {
                 cancel.ThrowIfCancellationRequested();
-                engine.RenderToBitmap(project, scene, req.StartFrame + i, bitmap);
-                using var image = SKImage.FromBitmap(bitmap);
-                using var data = image.Encode(SKEncodedImageFormat.Png, 100);
-                using var fs = File.Create(Path.Combine(dir, $"{name}_{i:00000}.png"));
-                data.SaveTo(fs);
+                Measure(() => engine.RenderToBitmap(project, scene, req.StartFrame + i, bitmap), stats == null ? null : stats.AddRender);
+                Measure(() =>
+                {
+                    using var image = SKImage.FromBitmap(bitmap);
+                    using var data = image.Encode(SKEncodedImageFormat.Png, 100);
+                    using var fs = File.Create(Path.Combine(dir, $"{name}_{i:00000}.png"));
+                    data.SaveTo(fs);
+                }, stats == null ? null : stats.AddEncode);
+                stats?.FrameDone();
                 progress?.Report((i + 1, total));
             }
             return;
@@ -73,13 +97,19 @@ public static class Exporter
             try
             {
                 int done = 0;
+                var encodeWatch = new System.Diagnostics.Stopwatch();
                 foreach (var (frame, audio) in queue.GetConsumingEnumerable())
                 {
+                    encodeWatch.Restart();
                     if (frame != IntPtr.Zero) writer.WritePreparedVideoFrame(frame);
                     if (audio != null) { writer.WriteAudio(audio); audioPool.Add(audio); }
+                    stats?.AddEncode(encodeWatch.Elapsed);
+                    stats?.FrameDone();
                     progress?.Report((++done, total));
                 }
+                encodeWatch.Restart();
                 writer.Finish();
+                stats?.AddEncode(encodeWatch.Elapsed);
             }
             catch (Exception ex)
             {
@@ -101,11 +131,13 @@ public static class Exporter
                     if (hasVideo)
                     {
                         if (!pool.TryTake(out var target)) target = new SKBitmap(Effects.Info(w, h));
-                        engine.RenderToBitmap(project, scene, frame, target);
+                        Measure(() => engine.RenderToBitmap(project, scene, frame, target), stats == null ? null : stats.AddRender);
+                        watch.Restart();
                         unsafe
                         {
                             prepared = writer.PrepareVideoFrame(new ReadOnlySpan<byte>((void*)target.GetPixels(), target.RowBytes * h), target.RowBytes);
                         }
+                        stats?.AddConvert(watch.Elapsed);
                         pool.Add(target);
                     }
                     float[]? audio = null;
@@ -115,9 +147,12 @@ public static class Exporter
                         int n = (int)(to - from) * 2;
                         // 音声の入れ物も使い回す (長さはフレームごとに 1 サンプル違うことがある)
                         if (!audioPool.TryTake(out audio) || audio.Length != n) audio = new float[n];
-                        mixer.Mix(project, scene, from, audio);
+                        var buffer = audio;
+                        Measure(() => mixer.Mix(project, scene, from, buffer), stats == null ? null : stats.AddAudio);
                     }
+                    watch.Restart();
                     queue.Add((prepared, audio), stop.Token);
+                    stats?.AddWait(watch.Elapsed);
                 }
             }
             finally

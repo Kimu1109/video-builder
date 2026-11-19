@@ -35,6 +35,8 @@ public sealed class MainWindow : Window, IShell
     private readonly List<(Control Control, Func<bool> Enabled)> _enablers = new();
     private MenuItem? _undoItem, _redoItem;
     private readonly IconButton _themeButton;
+    private readonly IconToggle _perfToggle = new("Info", "パフォーマンスチェック (Ctrl+Shift+P)");
+    private MenuItem? _perfItem;
 
     public PreviewArea PreviewArea { get; } = new();
     public AdvancedWorkspace Advanced { get; } = new();
@@ -68,6 +70,14 @@ public sealed class MainWindow : Window, IShell
         _session.SelectionChanged += UpdateState;
         _session.SceneChanged += UpdateState;
         Svc.Theme.Changed += UpdateThemeIcon;
+        _perfToggle.IsChecked = Svc.Performance.Enabled;
+        _perfToggle.IsCheckedChanged += (_, _) => Svc.Performance.Enabled = _perfToggle.IsChecked == true;
+        Svc.Performance.EnabledChanged += () =>
+        {
+            _perfToggle.IsChecked = Svc.Performance.Enabled;
+            if (_perfItem != null) _perfItem.IsChecked = Svc.Performance.Enabled;
+            EditorCommands.OnPerformanceModeChanged();
+        };
 
         Workspace = Svc.Settings.EditorMode == EditorMode.Simple ? Simple : Advanced;
         Rebuild();
@@ -85,12 +95,14 @@ public sealed class MainWindow : Window, IShell
             _xdnd = null;
             Svc.Proxies.CancelAll();
             Advanced.CloseWindows();
+            EditorCommands.ClosePerformanceWindow();
             Svc.Preview.Dispose();
         };
         Opened += (_, _) =>
         {
             Advanced.OnShellOpened();
             AttachDropTarget(this);
+            if (Svc.Performance.Enabled) EditorCommands.ShowPerformanceWindow();
         };
     }
 
@@ -122,7 +134,7 @@ public sealed class MainWindow : Window, IShell
     /// <summary>詳細編集のウィンドウ構成 (分ける / まとめる) を設定に合わせる。</summary>
     public void ApplyWindowMode() => Advanced.ApplyWindowMode();
 
-    public IEnumerable<Window> ToolWindows => Workspace.ToolWindows;
+    public IEnumerable<Window> ToolWindows => Workspace.ToolWindows.Concat(EditorCommands.PerformanceWindow is { } pw ? new Window[] { pw } : Array.Empty<Window>());
     public void ShowSettingsPanel() => Advanced.ShowSettingsPanel();
     public void ShowTimelinePanel() => Advanced.ShowTimelinePanel();
 
@@ -259,6 +271,9 @@ public sealed class MainWindow : Window, IShell
                 Zoom("ウィンドウに合わせる", 0), Zoom("25%", 0.25), Zoom("50%", 0.5), Zoom("100%", 1), Zoom("200%", 2),
             }),
         };
+        _perfItem = Menus.Item("パフォーマンスチェック", "Info", EditorCommands.TogglePerformanceMode, Shortcuts.First("view.performance"), isChecked: Svc.Performance.Enabled);
+        viewItems.Add(_perfItem);
+        viewItems.Add(Menus.Item("パフォーマンスの詳細...", null, EditorCommands.ShowPerformanceWindow));
         var extra = Workspace.BuildViewMenu(this).ToList();
         if (extra.Count > 0) { viewItems.Add(Menus.Sep()); viewItems.AddRange(extra); }
         var view = Menus.Sub("表示(_V)", null, viewItems);
@@ -292,9 +307,11 @@ public sealed class MainWindow : Window, IShell
         (_proxyStatus.Parent as Panel)?.Children.Remove(_proxyStatus);
         (_projectInfo.Parent as Panel)?.Children.Remove(_projectInfo);
         (_themeButton.Parent as Panel)?.Children.Remove(_themeButton);
+        (_perfToggle.Parent as Panel)?.Children.Remove(_perfToggle);
         var right = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(4, 0) };
         right.Children.Add(_proxyStatus);
         right.Children.Add(_projectInfo);
+        right.Children.Add(_perfToggle);
         right.Children.Add(_themeButton);
         right.Children.Add(new IconButton("Settings", "環境設定", () => _ = EditorCommands.PreferencesAsync()));
 

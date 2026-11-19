@@ -1351,4 +1351,63 @@ public class UiTests
         }
         Assert.True(pixel.Red > 200 && pixel.Green < 50, $"pixel {pixel}");
     }
+
+    // ---------------- パフォーマンスチェック ----------------
+
+    [AvaloniaFact]
+    public async Task Performance_check_shows_preview_numbers_in_both_editing_modes()
+    {
+        var w = Open();
+        var perf = Svc.Performance;
+        try
+        {
+            Svc.Session.AddObject(EffectRegistry.Shape, 0, 0, 60);
+            Assert.False(w.PreviewArea.Overlay.IsVisible);
+            // ショートカットでオンにすると、プレビューの上の表示と詳細の窓が出る
+            w.KeyPressQwerty(PhysicalKey.P, RawInputModifiers.Control | RawInputModifiers.Shift);
+            Pump();
+            Assert.True(perf.Enabled);
+            Assert.True(Svc.Settings.PerformanceMode);
+            Assert.True(w.PreviewArea.Overlay.IsEffectivelyVisible);
+            Assert.NotNull(EditorCommands.PerformanceWindow);
+
+            async Task WaitForRenders(int count)
+            {
+                for (int i = 0; i < 200 && perf.RenderMs.Summarize().Count < count; i++)
+                {
+                    Svc.Session.CurrentFrame = (Svc.Session.CurrentFrame + 1) % 60;
+                    await Task.Delay(10);
+                    Pump();
+                }
+            }
+            await WaitForRenders(3);
+            Assert.True(perf.RenderMs.Summarize().Count >= 3);
+            Assert.True(perf.RenderSize.Width > 0);
+            Assert.Contains("fps", perf.Report());
+
+            // シンプル編集でも同じ表示が出る (プレビューは共通)
+            Svc.Session.NewProject(new ProjectSettings());
+            EditorCommands.SetEditorMode(EditorMode.Simple);
+            Svc.Storyboard.AddClips(new[] { ColorTitle("#FF0000") });
+            Pump();
+            Assert.True(w.PreviewArea.Overlay.IsEffectivelyVisible);
+            perf.Reset();
+            await WaitForRenders(2);
+            Assert.True(perf.RenderMs.Summarize().Count >= 2);
+
+            // 出力の内訳も記録される (出力ダイアログから呼ばれるのと同じ)
+            var stats = perf.BeginExport();
+            perf.EndExport(stats, "MP4", "/tmp/x.mp4", 2, null);
+            Assert.Single(perf.Exports);
+            Pump();
+        }
+        finally
+        {
+            perf.Enabled = false;
+            perf.Exports.Clear();
+            Pump();
+        }
+        Assert.False(w.PreviewArea.Overlay.IsVisible);
+        Assert.Null(EditorCommands.PerformanceWindow);
+    }
 }

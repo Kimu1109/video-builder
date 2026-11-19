@@ -201,6 +201,42 @@ public static class EditorCommands
 
     public static void ShowSettings() => Main?.ShowSettingsPanel();
 
+    private static PerformanceWindow? _performanceWindow;
+
+    /// <summary>パフォーマンスチェックモードを切り替える。オンにしたら詳細の窓も開く。</summary>
+    public static void TogglePerformanceMode()
+    {
+        Svc.Performance.Enabled = !Svc.Performance.Enabled;
+    }
+
+    /// <summary>パフォーマンスの詳細の窓を開く (モードがオフならオンにする)。</summary>
+    public static void ShowPerformanceWindow()
+    {
+        if (Main == null) return;
+        if (!Svc.Performance.Enabled) { Svc.Performance.Enabled = true; return; }   // オンにしたときに開く (OnPerformanceModeChanged)
+        _performanceWindow ??= new PerformanceWindow();
+        _performanceWindow.Open(Main);
+    }
+
+    /// <summary>モードが変わった: オンなら詳細の窓を開き、オフなら閉じる。</summary>
+    public static void OnPerformanceModeChanged()
+    {
+        if (Svc.Performance.Enabled) ShowPerformanceWindow();
+        else _performanceWindow?.Hide();
+    }
+
+    /// <summary>アプリの終了時。</summary>
+    public static void ClosePerformanceWindow()
+    {
+        if (_performanceWindow == null) return;
+        _performanceWindow.AllowClose = true;
+        _performanceWindow.Close();
+        _performanceWindow = null;
+    }
+
+    /// <summary>パフォーマンスの詳細の窓 (開いていなければ null)。</summary>
+    public static PerformanceWindow? PerformanceWindow => _performanceWindow is { IsVisible: true } w ? w : null;
+
     /// <summary>編集画面 (詳細 / シンプル) を切り替えて、設定に覚える。</summary>
     public static void SetEditorMode(EditorMode mode)
     {
@@ -389,6 +425,7 @@ public static class EditorCommands
             new("edit.split", "現在位置で分割", "S", Split),
             new("edit.addKey", "キーフレームを追加", "P", AddKeyFrame, Mode: Adv),
             new("play.toggle", "再生 / 停止", "Space", () => Svc.Preview.TogglePlay()),
+            new("view.performance", "パフォーマンスチェック", "Ctrl+Shift+P", TogglePerformanceMode, true),
             new("move.prev", "1 フレーム戻る", "Left", () => Step(-1)),
             new("move.next", "1 フレーム進む", "Right", () => Step(1)),
             new("move.prev10", "10 フレーム戻る", "Shift+Left", () => Step(-10)),

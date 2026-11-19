@@ -32,7 +32,7 @@ public sealed class ExportDialog : DialogBase
     private readonly NumberBox _crf = new() { Minimum = 0, Maximum = 51, Decimals = 0, Value = 20, Width = 64, HorizontalAlignment = HorizontalAlignment.Left };
     private readonly ComboBox _preset = new() { ItemsSource = new[] { "ultrafast", "veryfast", "fast", "medium", "slow", "veryslow" }, SelectedIndex = 3, Width = 120, HorizontalAlignment = HorizontalAlignment.Left };
     private readonly ProgressBar _progress = new() { Minimum = 0, Maximum = 1, Height = 8 };
-    private readonly TextBlock _status = new() { Text = " " };
+    private readonly TextBlock _status = new() { Text = " ", TextWrapping = Avalonia.Media.TextWrapping.Wrap };
     private readonly Button _start, _close;
     private readonly StackPanel _options = new() { Spacing = 8 };
     private readonly CheckBox _rangeOnly = new();
@@ -140,8 +140,10 @@ public sealed class ExportDialog : DialogBase
         var f = Current;
         Svc.Preview.Stop();
 
+        var stats = Svc.Performance.BeginExport();
         var request = new ExportRequest
         {
+            Stats = stats,
             Project = session.Project.Clone(), SceneId = session.Scene.Id,
             StartFrame = _rangeOnly.IsChecked == true ? session.EffectiveRange.Start : 0,
             EndFrame = _rangeOnly.IsChecked == true ? session.EffectiveRange.End : session.Scene.Length - 1,
@@ -149,6 +151,7 @@ public sealed class ExportDialog : DialogBase
             UseGpu = Svc.Preview.IsGpuActive,   // プレビューと同じ描画方式で出力する
             Settings = new ExportSettings { Path = path, VideoCodec = f.VideoCodec, AudioCodec = f.AudioCodec, Crf = (int)_crf.Value, Preset = (string)_preset.SelectedItem! },
         };
+        _status.SetValue(L.VerbatimProperty, false);
         _cancel = new CancellationTokenSource();
         var token = _cancel.Token;
         _options.IsEnabled = false; _start.IsEnabled = false; _close.Content = "キャンセル";
@@ -165,6 +168,7 @@ public sealed class ExportDialog : DialogBase
             _status.Text = $"{v.Done} / {v.Total} フレーム   経過 {elapsed:mm\\:ss}   残り 約 {remain:mm\\:ss}";
         });
         string result;
+        string? error = null;
         try
         {
             await Task.Run(() => Exporter.Run(request, progress, token), token);
@@ -172,9 +176,17 @@ public sealed class ExportDialog : DialogBase
             _progress.Value = 1;
             result = $"出力が完了しました ({DateTime.UtcNow - started:mm\\:ss})";
         }
-        catch (OperationCanceledException) { result = "キャンセルしました"; _progress.Value = 0; }
-        catch (Exception ex) { result = "出力に失敗しました: " + ex.Message; }
+        catch (OperationCanceledException) { result = "キャンセルしました"; _progress.Value = 0; error = L.T("キャンセル"); }
+        catch (Exception ex) { result = "出力に失敗しました: " + ex.Message; error = ex.Message; }
+        Svc.Performance.EndExport(stats, f.Name, path, session.Project.FrameToSeconds(request.EndFrame - request.StartFrame + 1), error);
+        // パフォーマンスチェックモードなら、時間の内訳も出す
+        bool verbatim = Svc.Performance.Enabled && error == null;
+        if (verbatim)
+            result = L.Display(result) + "\n" + string.Join("  ", PerformanceMonitor.Describe(stats, session.Project.FrameToSeconds(request.EndFrame - request.StartFrame + 1))
+                .Skip(2).Select(x => $"{L.T(x.Label)} {x.Value}"));
         _cancel.Dispose(); _cancel = null;
+        // 内訳を付けたときは、もう訳してあるので、そのまま出す
+        _status.SetValue(L.VerbatimProperty, verbatim);
         _status.Text = result;
         _options.IsEnabled = true; _start.IsEnabled = true; _close.Content = "閉じる";
     }
