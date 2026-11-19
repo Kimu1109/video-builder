@@ -961,3 +961,72 @@ public class TransitionTests
     }
 }
 
+public class TextAnimationTests
+{
+    private static (Project P, TimelineObject T) Setup(int anim, double interval, double duration, bool reverse = false)
+    {
+        var p = new Project { Settings = { Width = 320, Height = 240, FrameRate = "30" } };
+        var t = ObjectFactory.Create(EffectRegistry.Text, 0, 0, 90);
+        t.Main.Values["text"] = "MM";
+        t.Main.Values["color"] = "#FFFFFF";
+        t.Main.Tracks["size"] = new AnimatedValue(80);
+        t.Main.Values["anim"] = anim.ToString();
+        t.Main.Tracks["interval"] = new AnimatedValue(interval);
+        t.Main.Tracks["duration"] = new AnimatedValue(duration);
+        t.Main.Values["reverse"] = reverse ? "1" : "0";
+        p.Root.Objects.Add(t);
+        return (p, t);
+    }
+
+    /// <summary>画面の左半分・右半分の、明るい画素の数と、いちばん明るい値。</summary>
+    private static (int Left, int Right, int Max) Lit(Project p, int frame)
+    {
+        using var engine = new RenderEngine();
+        using var img = engine.RenderImage(p, p.Root, frame);
+        using var bmp = SKBitmap.FromImage(img);
+        int left = 0, right = 0, max = 0;
+        for (int y = 60; y < 180; y++)
+        for (int x = 60; x < 260; x++)
+        {
+            int v = bmp.GetPixel(x, y).Red;
+            max = Math.Max(max, v);
+            if (v > 128) { if (x < 160) left++; else right++; }
+        }
+        return (left, right, max);
+    }
+
+    [Fact]
+    public void Typewriter_shows_one_character_at_a_time_and_can_be_reversed()
+    {
+        var (p, _) = Setup(1, 1, 0);
+        var f0 = Lit(p, 0);
+        Assert.True(f0.Left > 100 && f0.Right == 0, f0.ToString());
+        var f30 = Lit(p, 30);
+        Assert.True(f30.Left > 100 && f30.Right > 100, f30.ToString());
+        var (r, _) = Setup(1, 1, 0, reverse: true);
+        var g0 = Lit(r, 0);
+        Assert.True(g0.Left == 0 && g0.Right > 100, g0.ToString());
+    }
+
+    [Fact]
+    public void Fade_rise_and_pop_animate_and_end_like_plain_text()
+    {
+        var (fade, _) = Setup(2, 0, 1);
+        Assert.Equal(0, Lit(fade, 0).Max);
+        Assert.InRange(Lit(fade, 15).Max, 60, 200);              // 半分くらいの明るさ
+        var (rise, _) = Setup(3, 0, 1);
+        Assert.Equal(0, Lit(rise, 0).Max);
+        var (pop, _) = Setup(4, 0, 1);
+        var half = Lit(pop, 15);
+        var full = Lit(pop, 60);
+        Assert.True(half.Left + half.Right < full.Left + full.Right, $"{half} {full}");
+
+        // 終わったあとは、アニメーションなしと同じ絵 (位置も同じ)
+        var (plain, t) = Setup(0, 0, 1);
+        Assert.Equal(Lit(plain, 60), full);
+        Assert.Equal(Lit(plain, 60), Lit(fade, 60));
+        Assert.Equal(Lit(plain, 60), Lit(rise, 60));
+        Assert.Equal(4, Generators.CountChars("ab\nc"));   // 改行も 1 文字 (a, b, 改行, c)
+    }
+}
+

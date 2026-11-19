@@ -47,7 +47,22 @@ public static class Generators
 
     private readonly record struct Run(string Text, SKTypeface Face, float Width);
 
-    public static SKImage? RenderText(string text, string family, float size, SKColor color, bool bold, bool italic, int align, float spacing, float leading)
+    /// <summary>1 文字ごとの描き方 (透明度 0〜1・下へのずれ px・拡大率)。</summary>
+    public readonly record struct CharStyle(float Alpha, float Dy, float Scale);
+
+    /// <summary>テキストの文字 (テキストの要素) の数。改行も 1 文字として数える (テキストアニメーションの順番)。</summary>
+    public static int CountChars(string text)
+    {
+        var lines = text.Replace("\r\n", "\n").Split('\n');
+        return lines.Sum(l => new StringInfo(l).LengthInTextElements) + lines.Length - 1;
+    }
+
+    /// <param name="perChar">
+    /// null でなければ、文字ごとに描き方を変える (テキストアニメーション)。引数は文字の番号 (改行も 1 文字)。
+    /// 字の並びはアニメーションがないときと同じ。下からのずれ・拡大で絵からはみ出さないよう、上下に余白を足す (中心は変わらない)。
+    /// </param>
+    public static SKImage? RenderText(string text, string family, float size, SKColor color, bool bold, bool italic, int align, float spacing, float leading,
+        Func<int, CharStyle>? perChar = null)
     {
         if (string.IsNullOrEmpty(text) || size <= 0) return null;
         if (string.IsNullOrWhiteSpace(family)) family = DefaultFontFamily;
@@ -122,21 +137,50 @@ public static class Generators
         float lineHeight = m.Descent - m.Ascent + m.Leading + leading;
         float maxWidth = lines.Max(l => l.Width);
         const int pad = 2;
+        int padY = pad + (perChar != null ? (int)MathF.Ceiling(size * 0.7f) : 0);
         int w = (int)MathF.Ceiling(maxWidth) + pad * 2 + (italic ? (int)(size * 0.25f) : 0);
-        int h = (int)MathF.Ceiling(lineHeight * lines.Count - leading) + pad * 2;
+        int h = (int)MathF.Ceiling(lineHeight * lines.Count - leading) + padY * 2;
         if (w <= pad * 2 || h <= 0 || w > 16384 || h > 16384) { Cleanup(); return null; }
 
         using var surface = SKSurface.Create(Effects.Info(w, h));
         var canvas = surface.Canvas;
         canvas.Clear(SKColors.Transparent);
-        float y = pad - m.Ascent;
+        float y = padY - m.Ascent;
+        int index = 0;
+        using var charPaint = perChar != null ? new SKPaint { IsAntialias = true } : null;
         foreach (var (runs, width) in lines)
         {
             float x = pad + align switch { 1 => (maxWidth - width) / 2, 2 => maxWidth - width, _ => 0 };
             foreach (var run in runs)
             {
                 font.Typeface = run.Face;
-                if (spacing == 0) canvas.DrawText(run.Text, x, y, font, paint);
+                if (perChar != null)
+                {
+                    // 1 文字ずつ、決めた透明度・ずれ・拡大率で描く
+                    float cx = x;
+                    var e = StringInfo.GetTextElementEnumerator(run.Text);
+                    while (e.MoveNext())
+                    {
+                        string el = e.GetTextElement();
+                        float adv = MeasureRaw(el, run.Face);
+                        var st = perChar(index++);
+                        if (st.Alpha > 0 && st.Scale > 0)
+                        {
+                            charPaint!.Color = color.WithAlpha((byte)Math.Clamp(color.Alpha * st.Alpha, 0, 255));
+                            canvas.Save();
+                            canvas.Translate(0, st.Dy);
+                            if (st.Scale != 1)
+                            {
+                                float mx = cx + adv / 2, my = y + (m.Ascent + m.Descent) / 2;
+                                canvas.Scale(st.Scale, st.Scale, mx, my);
+                            }
+                            canvas.DrawText(el, cx, y, font, charPaint);
+                            canvas.Restore();
+                        }
+                        cx += adv + spacing;
+                    }
+                }
+                else if (spacing == 0) canvas.DrawText(run.Text, x, y, font, paint);
                 else
                 {
                     float cx = x;
@@ -151,6 +195,7 @@ public static class Generators
                 x += run.Width;
             }
             y += lineHeight;
+            index++;   // 改行も 1 文字
         }
         var img = surface.Snapshot();
         Cleanup();

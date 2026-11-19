@@ -13,6 +13,7 @@ public static class EffectRegistry
 
     public static readonly string[] ShapeTypes = { "背景", "円", "四角形", "三角形", "五角形", "六角形", "星型" };
     public static readonly string[] MaskShapes = { "四角形", "円", "角丸四角形" };
+    public static readonly string[] TextAnimations = { "なし", "1 文字ずつ表示", "1 文字ずつフェードイン", "1 文字ずつ下から", "1 文字ずつ拡大" };
     public static readonly string[] TransitionTypes =
     {
         "フェード", "ワイプ (左から)", "ワイプ (右から)", "ワイプ (上から)", "ワイプ (下から)", "円形ワイプ",
@@ -86,6 +87,10 @@ public static class EffectRegistry
                 Col("color", "文字色", "#FFFFFF"),
                 C("bold", "太字"), C("italic", "イタリック"),
                 new ParamDefinition { Key = "align", Name = "揃え", Kind = ParamKind.Choice, Choices = new[] { "左寄せ", "中央揃え", "右寄せ" }, Default = 1 },
+                // テキストアニメーション (1 文字ずつ)。時間はオブジェクトの先頭から数える
+                new ParamDefinition { Key = "anim", Name = "文字の出し方", Kind = ParamKind.Choice, Choices = TextAnimations },
+                T("interval", "文字の間隔 (秒)", 0, 10, 0.05, 3, 0, 0.5), T("duration", "1 文字の長さ (秒)", 0, 10, 0.3, 2, 0, 2),
+                C("reverse", "逆順 (最後の文字から)"),
                 new ParamDefinition { Key = "text", Name = "テキスト", Kind = ParamKind.MultilineText, DefaultText = "テキスト" },
             },
         });

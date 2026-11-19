@@ -580,5 +580,14 @@ internal static class TranslationsEn
         ("下のレイヤーに空きがありません", "There is no room on the layers below"),
         ("クロスフェード", "Crossfade"),
         ("クロスフェードの長さ (秒)", "Crossfade length (s)"),
+        ("文字の出し方", "Text animation"),
+        ("文字の間隔 (秒)", "Delay per character (s)"),
+        ("1 文字の長さ (秒)", "Character duration (s)"),
+        ("逆順 (最後の文字から)", "Reverse (from the last character)"),
+        ("1 文字ずつ表示", "Typewriter"),
+        ("1 文字ずつフェードイン", "Fade in by character"),
+        ("1 文字ずつ下から", "Rise by character"),
+        ("1 文字ずつ拡大", "Pop by character"),
+        ("なし", "None"),
     };
 }

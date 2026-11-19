@@ -786,7 +786,32 @@ public sealed class RenderEngine : IDisposable
                 bool bold = main.GetBool("bold"), italic = main.GetBool("italic");
                 int align = main.GetInt("align");
                 string key = $"T|{text}|{font}|{Generators.F(size)}|{color}|{bold}|{italic}|{align}|{Generators.F(sp)}|{Generators.F(ld)}";
-                return Cached(key, () => Generators.RenderText(text, font, size, ParseColor(color), bold, italic, align, sp, ld));
+                int anim = main.GetInt("anim");
+                if (anim <= 0 || text.Length == 0)
+                    return Cached(key, () => Generators.RenderText(text, font, size, ParseColor(color), bold, italic, align, sp, ld));
+                // テキストアニメーション: 動いている間は毎フレーム描く。終わったら同じ絵を使い回す
+                double t = p.FrameToSeconds(frame - obj.Start);
+                double interval = main.Eval("interval", bounds, obj.Start), duration = main.Eval("duration", bounds, obj.Start);
+                bool reverse = main.GetBool("reverse");
+                int count = Generators.CountChars(text);
+                double end = Math.Max(0, count - 1) * interval + (anim == 1 ? 0 : duration);
+                Generators.CharStyle Style(int i)
+                {
+                    int order = reverse ? count - 1 - i : i;
+                    double local = t - order * interval;
+                    if (anim == 1) return new(local >= 0 ? 1 : 0, 0, 1);
+                    double q = duration <= 0 ? (local >= 0 ? 1 : 0) : Math.Clamp(local / duration, 0, 1);
+                    float e = (float)(q * q * (3 - 2 * q));
+                    return anim switch
+                    {
+                        2 => new(e, 0, 1),
+                        3 => new(e, (1 - e) * size * 0.6f, 1),
+                        _ => new(e > 0 ? 1 : 0, 0, e),
+                    };
+                }
+                if (t >= end) return Cached($"{key}|A{anim}|{reverse}|done", () => Generators.RenderText(text, font, size, ParseColor(color), bold, italic, align, sp, ld, Style));
+                var img = Generators.RenderText(text, font, size, ParseColor(color), bold, italic, align, sp, ld, Style);
+                return img == null ? null : ctx.Own(img);
             }
             case EffectRegistry.Shape:
             {
