@@ -16,6 +16,7 @@ public static class Effects
         Register(new ColorCorrect()); Register(new Blur()); Register(new Border()); Register(new Shadow());
         Register(new Clip()); Register(new Mosaic()); Register(new ChromaKey()); Register(new Mono());
         Register(new Flip()); Register(new Fade()); Register(new ScriptEffect());
+        Register(new Mask());
     }
 
     private static readonly Dictionary<string, VideoBuilder.Plugins.IVideoSource> Sources = new();
@@ -34,7 +35,7 @@ public static class Effects
     // 組み込みの効果のうち、結果が入力とパラメータだけで決まるもの (結果を使い回してよい)
     private static readonly HashSet<string> BuiltInDeterministic = new()
     {
-        "filter.color", "filter.blur", "filter.border", "filter.shadow", "filter.clip", "filter.mosaic", "filter.chromakey", "filter.mono", "filter.flip",
+        "filter.color", "filter.blur", "filter.border", "filter.shadow", "filter.clip", "filter.mosaic", "filter.chromakey", "filter.mono", "filter.flip", "filter.mask",
     };
 
     /// <summary>結果を使い回してよい効果か (EffectFlags.Deterministic)。</summary>
@@ -465,6 +466,58 @@ public static class Effects
                 c.DrawImage(s.Image, x, y, paint);
             });
             return new Sprite(r.Image, h ? s.Width - s.Cx : s.Cx, v ? s.Height - s.Cy : s.Cy);
+        }
+    }
+
+    /// <summary>
+    /// マスクの形 (絵の座標)。shape: 0 = 四角形, 1 = 円 (楕円), 2 = 角丸四角形。中心 (cx, cy)・幅・高さ・回転 (度)。
+    /// </summary>
+    internal static SKPath MaskPath(int shape, float cx, float cy, float width, float height, float rotation, float radius)
+    {
+        var path = new SKPath();
+        var rect = SKRect.Create(cx - width / 2, cy - height / 2, Math.Max(0, width), Math.Max(0, height));
+        switch (shape)
+        {
+            case 1: path.AddOval(rect); break;
+            case 2:
+                float r = Math.Clamp(radius, 0, Math.Min(rect.Width, rect.Height) / 2);
+                path.AddRoundRect(rect, r, r);
+                break;
+            default: path.AddRect(rect); break;
+        }
+        if (rotation != 0) path.Transform(SKMatrix.CreateRotationDegrees(rotation, cx, cy));
+        return path;
+    }
+
+    /// <summary>
+    /// 絵を path で切り抜く (invert なら path の外側を残す)。feather は境界のぼかしの幅 (px)。絵の大きさは変えない。
+    /// </summary>
+    internal static Sprite Masked(Sprite s, EffectArgs a, SKPath path, float feather, bool invert)
+    {
+        return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
+        {
+            c.DrawImage(s.Image, x, y);
+            // マスクの層を DstIn (反転なら DstOut) で重ねる。層の透明な所も合成されるので、図形の外は消える
+            using var layerPaint = new SKPaint { BlendMode = invert ? SKBlendMode.DstOut : SKBlendMode.DstIn };
+            c.SaveLayer(layerPaint);
+            using var shapePaint = new SKPaint { IsAntialias = true, Color = SKColors.White };
+            if (feather > 0) shapePaint.MaskFilter = SKMaskFilter.CreateBlur(SKBlurStyle.Normal, feather / 2);
+            c.Translate(x, y);
+            c.DrawPath(path, shapePaint);
+            c.Restore();
+        });
+    }
+
+    /// <summary>エフェクト「マスク」: オブジェクトの絵を図形で切り抜く。</summary>
+    private sealed class Mask : IVideoEffect
+    {
+        public string Id => "filter.mask";
+        public Sprite Apply(Sprite s, EffectArgs a)
+        {
+            float w = a.Track("width"), h = a.Track("height");
+            bool invert = a.Check("invert");
+            using var path = MaskPath(a.Effect.GetInt("shape"), s.Cx + a.Track("x"), s.Cy + a.Track("y"), w, h, a.Track("rotation"), a.Track("radius"));
+            return Masked(s, a, path, a.Track("feather"), invert);
         }
     }
 

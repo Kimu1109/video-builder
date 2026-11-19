@@ -12,6 +12,7 @@ public static class EffectRegistry
     };
 
     public static readonly string[] ShapeTypes = { "背景", "円", "四角形", "三角形", "五角形", "六角形", "星型" };
+    public static readonly string[] MaskShapes = { "四角形", "円", "角丸四角形" };
 
     public static readonly string[] VideoExtensions = { "mp4", "mkv", "mov", "webm", "avi", "m4v", "ts", "flv", "wmv", "mpg" };
     public static readonly string[] ImageExtensions = { "png", "jpg", "jpeg", "bmp", "webp", "gif" };
@@ -188,6 +189,12 @@ public static class EffectRegistry
         F("filter.mono", "単色化", "Icon.InvertColors", T("strength", "強さ", 0, 100, 100), Col("color", "色", "#FFFFFF"), C("keep", "輝度を保持する", true));
         F("filter.flip", "反転", "Icon.Flip", C("vertical", "上下反転"), C("horizontal", "左右反転"), C("luma", "輝度反転"));
         F("filter.fade", "フェード", "Icon.Gradient", T("in", "イン", 0, 30, 0.5, 2), T("out", "アウト", 0, 30, 0.5, 2));
+        F("filter.mask", "マスク", "Icon.Crop",
+            new ParamDefinition { Key = "shape", Name = "形", Kind = ParamKind.Choice, Choices = MaskShapes },
+            T("x", "X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "Y", -99999.9, 99999.9, 0, 1, -2000, 2000),
+            T("width", "幅", 0, 16384, 400, 0, 0, 4000), T("height", "高さ", 0, 16384, 300, 0, 0, 4000),
+            T("rotation", "回転", -3600, 3600, 0, 2, -360, 360), T("radius", "角の丸み", 0, 4000, 40, 0, 0, 500),
+            T("feather", "ぼかし", 0, 1000, 0, 0, 0, 200), C("invert", "反転 (図形の外側を残す)"));
         F("filter.script", "スクリプト制御", "Icon.Code",
             new ParamDefinition { Key = "code", Name = "Lua スクリプト", Kind = ParamKind.MultilineText, DefaultText = "-- obj.ox, obj.oy : 位置のずれ   obj.zoom : 拡大率 (1 = 等倍)\n-- obj.rz : 回転   obj.alpha : 不透明度 (1 = そのまま)\nobj.oy = math.sin(obj.time * 4) * 20" });
 

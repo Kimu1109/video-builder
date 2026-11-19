@@ -556,5 +556,10 @@ internal static class TranslationsEn
         ("反応する大きさ (dB)", "Threshold (dB)"),
         ("下げる速さ (秒)", "Attack (s)"),
         ("戻す速さ (秒)", "Release (s)"),
+        ("マスク", "Mask"),
+        ("形", "Shape"),
+        ("角丸四角形", "Rounded rectangle"),
+        ("角の丸み", "Corner radius"),
+        ("反転 (図形の外側を残す)", "Invert (keep outside the shape)"),
     };
 }

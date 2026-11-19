@@ -799,3 +799,61 @@ public class VectorFileTests : IDisposable
     }
 }
 
+public class MaskTests
+{
+    internal static Project WithBackground(string color, out TimelineObject bg)
+    {
+        var p = new Project { Settings = { Width = 320, Height = 240 } };
+        bg = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 60);
+        bg.Main.Values["type"] = "0";       // 背景 (画面いっぱい)
+        bg.Main.Values["color"] = color;
+        p.Root.Objects.Add(bg);
+        return p;
+    }
+
+    internal static SKColor Pixel(Project p, int frame, int x, int y)
+    {
+        using var engine = new RenderEngine();
+        using var img = engine.RenderImage(p, p.Root, frame);
+        using var bmp = SKBitmap.FromImage(img);
+        return bmp.GetPixel(x, y);
+    }
+
+    [Fact]
+    public void Mask_cuts_out_a_shape_inverts_and_feathers()
+    {
+        var p = WithBackground("#00FF00", out var bg);
+        var black = Pixel(new Project { Settings = { Width = 320, Height = 240 } }, 0, 0, 0);
+        var green = new SKColor(0, 255, 0);
+        var mask = ObjectFactory.AddFilter(bg, "filter.mask");
+        mask.Values["shape"] = "1";                            // 円
+        mask.Tracks["width"] = new AnimatedValue(100);
+        mask.Tracks["height"] = new AnimatedValue(100);
+        Assert.Equal(green, Pixel(p, 0, 160, 120));
+        Assert.Equal(black, Pixel(p, 0, 10, 10));
+        Assert.Equal(black, Pixel(p, 0, 160 + 45, 120 + 45));  // 円の外 (四角形なら内側)
+
+        mask.Tracks["x"] = new AnimatedValue(100);             // 中心を右へ
+        Assert.Equal(black, Pixel(p, 0, 160, 120));
+        Assert.Equal(green, Pixel(p, 0, 260, 120));
+
+        mask.Values["invert"] = "1";
+        Assert.Equal(green, Pixel(p, 0, 160, 120));
+        Assert.Equal(black, Pixel(p, 0, 260, 120));
+
+        // ぼかし: 境界は途中の明るさになる
+        mask.Values["invert"] = "0";
+        mask.Values["shape"] = "0";
+        mask.Tracks["x"] = new AnimatedValue(0);
+        mask.Tracks["feather"] = new AnimatedValue(40);
+        var edge = Pixel(p, 0, 160 + 50, 120);
+        Assert.InRange(edge.Green, 40, 215);
+        Assert.True(Pixel(p, 0, 160, 120).Green >= 245);   // 中心はほぼそのまま (ぼかしが少しだけ届く)
+
+        // 回転: 45 度回すと、四角形の角の方向に広がる
+        mask.Tracks["feather"] = new AnimatedValue(0);
+        mask.Tracks["rotation"] = new AnimatedValue(45);
+        Assert.Equal(green, Pixel(p, 0, 160 + 62, 120));        // 対角線の半分 (≒ 70) より内側
+    }
+}
+
