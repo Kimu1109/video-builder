@@ -465,6 +465,153 @@ public class UiTests
         finally { Svc.Aliases.Delete("テスト用"); }
     }
 
+    private static void Shot(Window w, string name)
+    {
+        // VB_UI_SHOT_DIR を指定すると、画面の確認用にスクリーンショットを保存する
+        var dir = Environment.GetEnvironmentVariable("VB_UI_SHOT_DIR");
+        if (string.IsNullOrEmpty(dir)) return;
+        Directory.CreateDirectory(dir);
+        w.CaptureRenderedFrame()?.Save(Path.Combine(dir, name + ".png"));
+    }
+
+    [AvaloniaFact]
+    public void Template_is_inserted_as_one_object_and_its_exposed_items_are_edited_in_the_properties()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        var t = s.AddObject(EffectRegistry.Text, 0, 0, 60)!;
+        t.Main.Values["text"] = "元の名前";
+        var shape = s.AddObject(EffectRegistry.Shape, 1, 0, 60)!;
+        var pkg = TemplatePackage.Create(s.Project, new[] { t, shape }, new TemplateOptions
+        {
+            Name = "UI テスト用テンプレート", Category = "テスト", IntroSeconds = 0.5,
+            Exposed = new() { new ExposedParam { ObjectId = t.Id, Effect = 0, Key = "text", Label = "名前" },
+                              new ExposedParam { ObjectId = shape.Id, Effect = 0, Key = "color", Label = "帯の色" } },
+        });
+        pkg.Thumbnail = TemplateService.RenderThumbnail(pkg, s.Project.Settings);
+        Assert.NotNull(pkg.Thumbnail);
+        Assert.Equal(new byte[] { 0x89, 0x50, 0x4E, 0x47 }, pkg.Thumbnail![..4]);
+        Svc.Templates.Save(pkg);
+        var entry = Svc.Templates.List().Single(e => e.Name == "UI テスト用テンプレート");
+        try
+        {
+            EditorCommands.InsertTemplate(entry, 4, 200);
+            var placed = s.Primary!;
+            Assert.Equal(EffectRegistry.SceneRef, placed.Main.DefinitionId);
+            Assert.Equal((4, 200), (placed.Layer, placed.Start));
+            s.CurrentFrame = 210;
+            Pump();
+
+            // プロパティの先頭に「テンプレートの項目」が出て、中のテキストを編集できる
+            var settings = w.GetVisualDescendants().OfType<ObjectSettingsView>().Single();
+            Assert.Contains(settings.GetVisualDescendants().OfType<TextBlock>(), b => b.Text == L.T("テンプレートの項目") && b.IsEffectivelyVisible);
+            var box = settings.GetVisualDescendants().OfType<TextBox>().First(b => b.Text == "元の名前" && b.IsEffectivelyVisible);
+            box.Text = "新しい名前";
+            Pump();
+            var scene = s.Project.FindScene(s.Primary!.Main.GetString("scene"))!;
+            Assert.Equal("新しい名前", scene.Objects.Single(o => o.Main.DefinitionId == EffectRegistry.Text).Main.GetString("text"));
+            Shot(w, "template-properties");
+
+            s.Undo();
+            Pump();
+            scene = s.Project.FindScene(s.Primary!.Main.GetString("scene"))!;
+            Assert.Equal("元の名前", scene.Objects.Single(o => o.Main.DefinitionId == EffectRegistry.Text).Main.GetString("text"));
+            Assert.Equal("元の名前", box.Text);
+
+            // シーンの中で、パラメータの公開をやめられる
+            s.SwitchScene(scene.Id);
+            var inner = s.Scene.Objects.Single(o => o.Main.DefinitionId == EffectRegistry.Text);
+            s.SetExposed(inner, 0, "text", null);
+            Assert.Single(s.Scene.Exposed!);
+        }
+        finally { Svc.Templates.Delete(entry); }
+    }
+
+    [AvaloniaFact]
+    public void Template_dialogs_show_candidates_and_the_library()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        var t = s.AddObject(EffectRegistry.Text, 0, 0, 60)!;
+        var img = s.AddObject(EffectRegistry.Image, 1, 0, 60)!;
+        var save = new TemplateSaveDialog(s.Project, new[] { t, img }, "見出し", new[] { "テロップ" });
+        save.Show(w);
+        Pump();
+        // テキストの本文と画像のファイルは、最初から公開する項目に選ばれている
+        var checkedRows = save.GetVisualDescendants().OfType<CheckBox>().Where(c => c.IsChecked == true).ToList();
+        Assert.Equal(2, checkedRows.Count);
+        Shot(save, "template-save-dialog");
+        save.Close();
+
+        var pkg = TemplatePackage.Create(s.Project, new[] { t }, new TemplateOptions { Name = "ライブラリ表示用", Category = "テロップ" });
+        pkg.Thumbnail = TemplateService.RenderThumbnail(pkg, s.Project.Settings);
+        Svc.Templates.Save(pkg);
+        var entry = Svc.Templates.List().Single(e => e.Name == "ライブラリ表示用");
+        try
+        {
+            var lib = new TemplateLibraryDialog();
+            lib.Show(w);
+            Pump();
+            var list = lib.GetVisualDescendants().OfType<ListBox>().Single();
+            Assert.True(list.ItemCount >= 1);
+            Assert.Contains(lib.GetVisualDescendants().OfType<TextBlock>(), b => b.Text == "ライブラリ表示用");
+            Shot(lib, "template-library");
+            var insert = lib.GetVisualDescendants().OfType<Button>().Single(b => b.Content as string == "挿入");
+            int before = s.Scene.Objects.Count;
+            insert.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+            Pump();
+            Assert.Equal(before + 1, s.Scene.Objects.Count);
+        }
+        finally { Svc.Templates.Delete(entry); }
+    }
+
+    [AvaloniaFact]
+    public void Vector_files_and_templates_can_be_dropped_on_the_timeline()
+    {
+        Open();
+        var s = Svc.Session;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-ui-vector-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var lottie = Path.Combine(dir, "a.json");
+            File.WriteAllText(lottie, """{"v":"5.7.4","fr":30,"ip":0,"op":45,"w":100,"h":100,"layers":[]}""");
+            Assert.Null(MediaImport.AddFile(lottie, 0, 0));
+            Assert.Equal(EffectRegistry.Vector, s.Primary!.Main.DefinitionId);
+            Assert.Equal(45, s.Primary.Length);   // Lottie の長さ (1.5 秒)
+
+            var pkg = TemplatePackage.Create(s.Project, new[] { s.Primary }, new TemplateOptions { Name = "ドロップ用" });
+            var file = Path.Combine(dir, "drop" + TemplatePackage.Extension);
+            pkg.Save(file);
+            Assert.Null(MediaImport.AddFile(file, 3, 10));
+            Assert.Equal(EffectRegistry.SceneRef, s.Primary!.Main.DefinitionId);
+            Assert.Equal((3, 10), (s.Primary.Layer, s.Primary.Start));
+            Assert.Contains(Svc.Templates.List(), e => e.Name == "ドロップ用");   // ライブラリにも取り込まれる
+        }
+        finally
+        {
+            foreach (var e in Svc.Templates.List().Where(e => e.Name == "ドロップ用")) Svc.Templates.Delete(e);
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [AvaloniaFact]
+    public void Style_is_saved_and_applied_to_the_selection()
+    {
+        Open();
+        var s = Svc.Session;
+        var a = s.AddObject(EffectRegistry.Text, 0, 0, 30)!;
+        a.Main.Values["color"] = "#123456";
+        Svc.Styles.Save(EffectStyle.From(a.Main, "UI テスト"));
+        try
+        {
+            var b = s.AddObject(EffectRegistry.Text, 1, 0, 30)!;
+            EditorCommands.ApplyStyle(EffectRegistry.Text, "UI テスト");
+            Assert.Equal("#123456", s.Scene.Find(b.Id)!.Main.GetString("color"));
+        }
+        finally { Svc.Styles.Delete(EffectRegistry.Text, "UI テスト"); }
+    }
+
     [AvaloniaFact]
     public void English_translation_covers_fixed_and_composed_strings()
     {

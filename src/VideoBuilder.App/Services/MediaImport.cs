@@ -8,14 +8,16 @@ public static class MediaImport
     /// <summary>ファイルをタイムラインに追加する。追加できなければ理由を返す。</summary>
     public static string? AddFile(string path, int layer, int frame)
     {
+        if (path.EndsWith(TemplatePackage.Extension, StringComparison.OrdinalIgnoreCase)) return TemplateService.InsertFile(path, layer, frame);
         var session = Svc.Session;
         var project = session.Project;
         var defId = ObjectFactory.DefinitionForFile(path);
         if (defId == null) return $"対応していないファイル形式です: {Path.GetFileName(path)}";
 
-        if (defId == EffectRegistry.Image)
+        if (defId is EffectRegistry.Image or EffectRegistry.Vector)
         {
-            int len = project.SecondsToFrames(Svc.Settings.DefaultObjectSeconds);
+            double seconds = defId == EffectRegistry.Vector ? LottieSeconds(path) ?? Svc.Settings.DefaultObjectSeconds : Svc.Settings.DefaultObjectSeconds;
+            int len = Math.Max(1, project.SecondsToFrames(seconds));
             return session.AddMediaFile(path, layer, frame, len, false) == null ? "空いているレイヤーがありません" : null;
         }
 
@@ -48,5 +50,22 @@ public static class MediaImport
         // 重い動画 (4K・H.265 など) は、裏でプロキシを作っておく
         if (error == null && defId == EffectRegistry.Video && Svc.Settings.AutoProxy && ProxyStore.IsHeavy(info)) Svc.Proxies.Enqueue(path);
         return error;
+    }
+
+    /// <summary>Lottie (JSON) のアニメーションの長さ (秒)。Lottie でなければ null。</summary>
+    public static double? LottieSeconds(string path)
+    {
+        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) return null;
+        try
+        {
+            using var fs = File.OpenRead(path);
+            using var doc = System.Text.Json.JsonDocument.Parse(fs);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("fr", out var fr) || !root.TryGetProperty("op", out var op)) return null;
+            double ip = root.TryGetProperty("ip", out var ipEl) ? ipEl.GetDouble() : 0;
+            double rate = fr.GetDouble(), frames = op.GetDouble() - ip;
+            return rate > 0 && frames > 0 ? frames / rate : null;
+        }
+        catch (Exception e) when (e is IOException or System.Text.Json.JsonException or InvalidOperationException or UnauthorizedAccessException) { return null; }
     }
 }

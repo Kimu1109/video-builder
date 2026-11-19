@@ -448,7 +448,7 @@ public sealed class TimelineCanvas : Control
             case EffectRegistry.Text:
                 var t = main.GetString("text").Split('\n')[0];
                 return t.Length > 0 ? t : main.Definition.Name;
-            case EffectRegistry.Video or EffectRegistry.Image or EffectRegistry.Audio:
+            case EffectRegistry.Video or EffectRegistry.Image or EffectRegistry.Audio or EffectRegistry.Vector:
                 var f = main.GetString("file");
                 return f.Length > 0 ? Path.GetFileName(f) : main.Definition.Name;
             case EffectRegistry.SceneRef:

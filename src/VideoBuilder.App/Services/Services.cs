@@ -15,11 +15,15 @@ public static class Svc
     public static ProxyService Proxies { get; } = new();
     public static ThumbnailCache Thumbnails { get; } = new();
     public static AliasStore Aliases { get; private set; } = new(AppPaths.AliasDir);
+    public static TemplateStore Templates { get; private set; } = new(AppPaths.TemplateDir, AppPaths.TemplateAssetDir, AppPaths.AliasDir);
+    public static StyleStore Styles { get; private set; } = new(AppPaths.StyleDir);
 
     public static void Initialize(Application app)
     {
         Settings = AppSettings.Load();
         Aliases = new AliasStore(AppPaths.AliasDir);
+        Templates = new TemplateStore(AppPaths.TemplateDir, AppPaths.TemplateAssetDir, AppPaths.AliasDir);
+        Styles = new StyleStore(AppPaths.StyleDir);
         VideoBuilder.Media.HardwareDecoding.Mode = Settings.HardwareDecode;
         VideoBuilder.Media.ProxyStore.Directory = Path.Combine(AppPaths.CacheDir, "proxy");
         VideoBuilder.Media.ProxyStore.Enabled = Settings.UseProxies;

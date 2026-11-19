@@ -81,6 +81,8 @@ public sealed class TemplatePackage
 
     /// <summary>同梱する素材 (assets の中のファイル名 → 読み出し元)。</summary>
     private readonly Dictionary<string, Func<Stream>> _assets = new();
+    /// <summary>作ったときの素材の元のパス (assets の中のファイル名 → パス)。読み込んだテンプレートでは空。</summary>
+    private readonly Dictionary<string, string> _assetSources = new();
     public IReadOnlyCollection<string> AssetNames => _assets.Keys;
 
     public Scene Body => Scenes[0];
@@ -156,6 +158,7 @@ public sealed class TemplatePackage
                 byPath[path] = name;
                 var source = path;
                 pkg._assets[name] = () => File.OpenRead(source);
+                pkg._assetSources[name] = source;
             }
             effect.Values[key] = AssetPrefix + name;
         }
@@ -196,6 +199,22 @@ public sealed class TemplatePackage
     {
         using var fs = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// 本体を描くためのプロジェクト (先頭のシーンが本体)。サムネイル用。
+    /// 同梱した素材は、作ったばかりのテンプレートなら元のファイルを指す (読み込んだものでは描かれない)。
+    /// </summary>
+    public Project PreviewProject(ProjectSettings settings)
+    {
+        var p = new Project { Settings = settings.Clone(), Scenes = Scenes.Select(s => s.Clone()).ToList() };
+        foreach (var (effect, key) in FileParams(p.Scenes))
+        {
+            var v = effect.Values[key];
+            if (v.StartsWith(AssetPrefix, StringComparison.Ordinal) && _assetSources.TryGetValue(v[AssetPrefix.Length..], out var src))
+                effect.Values[key] = src;
+        }
+        return p;
     }
 
     // ---------------- 保存・読み込み ----------------

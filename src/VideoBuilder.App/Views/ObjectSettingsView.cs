@@ -122,7 +122,121 @@ public sealed class ObjectSettingsView : UserControl
 
     /// <summary>欄の組み立て方が同じになるオブジェクトどうしで等しくなる文字列。</summary>
     private string BodySignature(TimelineObject o) =>
-        string.Join(",", o.Effects.Select(e => e.DefinitionId)) + "|" + _session.Project.Scenes.Count;
+        string.Join(",", o.Effects.Select(e => e.DefinitionId)) + "|" + _session.Project.Scenes.Count + "|" + ExposedSignature(o);
+
+    // ---------------- テンプレートの項目 ----------------
+
+    /// <summary>シーンオブジェクトの参照先のシーンと、その公開項目。</summary>
+    private (Scene Scene, List<ExposedParam> Items)? ExposedOf(TimelineObject? o)
+    {
+        if (o == null || o.Main.DefinitionId != EffectRegistry.SceneRef) return null;
+        var scene = _session.Project.FindScene(o.Main.GetString("scene"));
+        return scene?.Exposed is { Count: > 0 } items ? (scene, items) : null;
+    }
+
+    /// <summary>公開項目の並び (種類と名前)。同じなら欄を使い回せる。</summary>
+    private string ExposedSignature(TimelineObject o)
+    {
+        if (ExposedOf(o) is not { } x) return "";
+        return string.Join(";", x.Items.Select(i => i.Resolve(x.Scene) is { } r ? $"{r.Effect.DefinitionId}/{r.Param.Key}/{i.Label}" : "-"));
+    }
+
+    private Slot ExposedSlot(int index)
+    {
+        (TimelineObject Object, Effect Effect, ParamDefinition Param)? Resolve()
+        {
+            if (ExposedOf(Target) is not { } x || index >= x.Items.Count) return null;
+            return x.Items[index].Resolve(x.Scene);
+        }
+        int Frame()
+        {
+            var t = Target;
+            if (t == null || ExposedOf(t) is not { } x) return 0;
+            return SceneTime.InnerFrame(_session.Project, t, x.Scene, t.Bounds, Math.Clamp(_session.CurrentFrame, t.Start, t.End));
+        }
+        return new Slot(() => Resolve()?.Object, () => Resolve()?.Effect, Frame, "x" + index);
+    }
+
+    private static ParamDefinition Relabel(ParamDefinition p, string name) => new()
+    {
+        Key = p.Key, Name = name.Length > 0 ? name : p.Name, Kind = p.Kind, Min = p.Min, Max = p.Max, Default = p.Default, Decimals = p.Decimals,
+        DefaultText = p.DefaultText, Choices = p.Choices, FileExtensions = p.FileExtensions, SoftMin = p.SoftMin, SoftMax = p.SoftMax,
+    };
+
+    /// <summary>シーンオブジェクトのプロパティの先頭に出す「テンプレートの項目」欄。</summary>
+    private Control? BuildExposed(TimelineObject o)
+    {
+        if (ExposedOf(o) is not { } x) return null;
+        var rows = new StackPanel { Margin = new Thickness(8, 4, 18, 8), Spacing = 2 };
+        for (int i = 0; i < x.Items.Count; i++)
+        {
+            if (x.Items[i].Resolve(x.Scene) is not { } r) continue;
+            rows.Children.Add(BuildParam(ExposedSlot(i), Relabel(r.Param, x.Items[i].Label)));
+        }
+        var head = new DockPanel { Margin = new Thickness(4, 0, 16, 0), Height = 24 };
+        var icon = new Icon("Template", 14) { Margin = new Thickness(26, 0, 6, 0) };
+        DockPanel.SetDock(icon, Dock.Left);
+        head.Children.Add(icon);
+        head.Children.Add(new TextBlock { Text = "テンプレートの項目", VerticalAlignment = VerticalAlignment.Center, FontWeight = FontWeight.SemiBold });
+        var headBorder = new Border { Child = head, BorderThickness = new Thickness(0, 0, 0, 1) };
+        headBorder[!Border.BackgroundProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Bg.Elevated");
+        headBorder[!Border.BorderBrushProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Border.Default");
+        return new StackPanel { Children = { headBorder, rows } };
+    }
+
+    /// <summary>
+    /// パラメータの行の右クリックで「テンプレートの項目として公開」できるようにする。
+    /// 欄は別のシーンのオブジェクトでも使い回すので、メニューの中身は開くときに決める。
+    /// </summary>
+    private Control Exposable(Control row, int effectIndex, ParamDefinition p)
+    {
+        if (p.Key == "scene") return row;
+        row.ContextRequested += (_, e) =>
+        {
+            var o = Target;
+            if (o == null || _session.Scene == _session.Project.Root) return;
+            e.Handled = true;
+            var current = _session.FindExposed(o, effectIndex, p.Key);
+            var menu = new ContextMenu();
+            if (current == null)
+                menu.Items.Add(Menus.Item("テンプレートの項目として公開...", "Template", async () =>
+                {
+                    if (TopLevel.GetTopLevel(this) is not Window w) return;
+                    var label = await PromptDialog.Show(w, "テンプレートの項目として公開", "表示名", L.T(p.Name));
+                    if (label != null && Target is { } t) _session.SetExposed(t, effectIndex, p.Key, label.Trim());
+                }));
+            else
+            {
+                menu.Items.Add(Menus.Item($"公開をやめる ({current.Label})", "Remove", () => { if (Target is { } t) _session.SetExposed(t, effectIndex, p.Key, null); }));
+                menu.Items.Add(Menus.Item("表示名を変更...", null, async () =>
+                {
+                    if (TopLevel.GetTopLevel(this) is not Window w) return;
+                    var label = await PromptDialog.Show(w, "表示名を変更", "表示名", current.Label);
+                    if (label != null && Target is { } t) _session.SetExposed(t, effectIndex, p.Key, label.Trim());
+                }));
+            }
+            menu.Open(row);
+        };
+        return row;
+    }
+
+    // ---------------- スタイル ----------------
+
+    private void OpenStyleMenu(Control anchor, int effectIndex)
+    {
+        var e = EffectAt(effectIndex);
+        if (e == null || !EffectRegistry.Exists(e.DefinitionId)) return;
+        string defId = e.DefinitionId;
+        var names = Svc.Styles.List(defId);
+        var menu = new ContextMenu();
+        menu.Items.Add(Menus.Item("スタイルとして保存...", "Style", () => _ = EditorCommands.SaveStyleAsync(effectIndex)));
+        menu.Items.Add(Menus.Sub("スタイルを適用", "Style", names.Count == 0
+            ? new object[] { Menus.Item("(保存したスタイルはありません)", null, () => { }, null, false) }
+            : names.Select(n => (object)Menus.Item(n, null, () => EditorCommands.ApplyStyle(defId, n)))));
+        if (names.Count > 0)
+            menu.Items.Add(Menus.Sub("スタイルを削除", "Delete", names.Select(n => (object)Menus.Item(n, null, () => Svc.Styles.Delete(defId, n)))));
+        menu.Open(anchor);
+    }
 
     private void Rebuild()
     {
@@ -174,6 +288,7 @@ public sealed class ObjectSettingsView : UserControl
         {
             panel = new Panel(new StackPanel(), new List<Action>(), new List<Action>());
             _refreshers = panel.Refreshers; _frameWatchers = panel.FrameWatchers;
+            if (BuildExposed(o) is { } exposed) panel.Body.Children.Add(exposed);
             for (int i = 0; i < o.Effects.Count; i++) panel.Body.Children.Add(BuildEffect(o, i));
             if (_panels.Count >= MaxPanels)
             {
@@ -199,6 +314,15 @@ public sealed class ObjectSettingsView : UserControl
         return o != null && index < o.Effects.Count ? o.Effects[index] : null;
     }
 
+    /// <summary>
+    /// 入力欄が編集する場所。ふつうは選択中のオブジェクトのエフェクトだが、
+    /// テンプレートの項目では、シーンオブジェクトの参照先のシーンの中のオブジェクトのエフェクトになる。
+    /// Frame はそのオブジェクトから見た現在位置 (トラックバーの区間を決める)。Id は取り消しをまとめる鍵に使う。
+    /// </summary>
+    private sealed record Slot(Func<TimelineObject?> Owner, Func<Effect?> Effect, Func<int> Frame, string Id);
+
+    private Slot MainSlot(int effectIndex) => new(() => Target, () => EffectAt(effectIndex), () => _session.CurrentFrame, effectIndex.ToString());
+
     private Control BuildEffect(TimelineObject obj, int index)
     {
         var effect = obj.Effects[index];
@@ -207,7 +331,7 @@ public sealed class ObjectSettingsView : UserControl
         string collapseKey = index + "/" + def.Id;
 
         var rows = new StackPanel { Margin = new Thickness(8, 4, 18, 8), Spacing = 2 };
-        foreach (var p in def.Params) rows.Children.Add(BuildParam(index, p));
+        foreach (var p in def.Params) rows.Children.Add(Exposable(BuildParam(MainSlot(index), p), index, p));
         if (def.Id == "filter.script")
         {
             // スクリプトのエラーを入力欄の下に出す
@@ -269,20 +393,33 @@ public sealed class ObjectSettingsView : UserControl
         var headBorder = new Border { Child = head, BorderThickness = new Thickness(0, 0, 0, 1) };
         headBorder[!Border.BackgroundProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Bg.Elevated");
         headBorder[!Border.BorderBrushProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Border.Default");
+        // 見出しの右クリック: スタイルの保存・適用
+        headBorder.ContextRequested += (_, e) => { e.Handled = true; OpenStyleMenu(headBorder, index); };
+        ToolTip.SetTip(head.Children.OfType<TextBlock>().First(), "右クリックでスタイルの保存・適用");
         return new StackPanel { Children = { headBorder, rows } };
     }
 
-    private Control BuildParam(int effectIndex, ParamDefinition p) => p.Kind switch
+    private Control BuildParam(Slot slot, ParamDefinition p) => p.Kind switch
     {
-        ParamKind.Track => BuildTrack(effectIndex, p),
-        ParamKind.Check => BuildCheck(effectIndex, p),
-        ParamKind.Choice => Labeled(p.Name, BuildChoice(effectIndex, p)),
-        ParamKind.Color => Labeled(p.Name, BuildColor(effectIndex, p)),
-        ParamKind.File => Labeled(p.Name, BuildFile(effectIndex, p)),
-        ParamKind.Font => Labeled(p.Name, BuildFont(effectIndex, p)),
-        ParamKind.MultilineText => BuildText(effectIndex, p, true),
-        _ => p.Key == "scene" ? Labeled(p.Name, BuildScene(effectIndex, p)) : Labeled(p.Name, BuildText(effectIndex, p, false)),
+        ParamKind.Track => BuildTrack(slot, p),
+        ParamKind.Check => BuildCheck(slot, p),
+        ParamKind.Choice => Labeled(p.Name, BuildChoice(slot, p)),
+        ParamKind.Color => Labeled(p.Name, BuildColor(slot, p)),
+        ParamKind.File => Labeled(p.Name, BuildFile(slot, p)),
+        ParamKind.Font => Labeled(p.Name, BuildFont(slot, p)),
+        ParamKind.MultilineText => BuildMultiline(slot, p),
+        _ => p.Key == "scene" ? Labeled(p.Name, BuildScene(slot, p)) : Labeled(p.Name, BuildText(slot, p, false)),
     };
+
+    /// <summary>複数行のテキスト。テンプレートの項目では、名前がわかるよう見出しを付ける。</summary>
+    private Control BuildMultiline(Slot slot, ParamDefinition p)
+    {
+        var box = BuildText(slot, p, true);
+        if (!slot.Id.StartsWith('x')) return box;
+        var label = new TextBlock { Text = p.Name };
+        label.Classes.Add("secondary");
+        return new StackPanel { Spacing = 2, Children = { label, box } };
+    }
 
     private static Control Labeled(string label, Control control)
     {
@@ -296,16 +433,16 @@ public sealed class ObjectSettingsView : UserControl
         return grid;
     }
 
-    private void SetValue(int effectIndex, string key, string value, string? mergeKey = null)
+    private void SetValue(Slot slot, string key, string value, string? mergeKey = null)
     {
-        var e = EffectAt(effectIndex); var o = Target;
+        var e = slot.Effect(); var o = slot.Owner();
         if (e == null || o == null || e.GetString(key) == value && e.Values.ContainsKey(key)) return;
-        _session.Edit("設定の変更", () => e.Values[key] = value, mergeKey == null ? null : $"{o.Id}/{effectIndex}/{key}/{mergeKey}");
+        _session.Edit("設定の変更", () => e.Values[key] = value, mergeKey == null ? null : $"{o.Id}/{slot.Id}/{key}/{mergeKey}");
     }
 
     // ---------------- トラックバー ----------------
 
-    private Control BuildTrack(int effectIndex, ParamDefinition p)
+    private Control BuildTrack(Slot slot, ParamDefinition p)
     {
         var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,56,*,Auto,*,56,Auto"), Height = 24 };
         var left = new NumberBox { Minimum = p.Min, Maximum = p.Max, Decimals = p.Decimals };
@@ -315,23 +452,23 @@ public sealed class ObjectSettingsView : UserControl
         var name = new Button { Content = p.Name, Width = 96, Padding = new Thickness(2, 0), Focusable = false };
         ToolTip.SetTip(name, "クリックで移動方法を選択");
 
-        AnimatedValue? Track() => EffectAt(effectIndex)?.Tracks.GetValueOrDefault(p.Key);
+        AnimatedValue? Track() => slot.Effect()?.Tracks.GetValueOrDefault(p.Key);
         int Index(bool isRight)
         {
-            var o = Target!;
-            int section = o.SectionAt(Math.Clamp(_session.CurrentFrame, o.Start, o.End));
+            var o = slot.Owner()!;
+            int section = o.SectionAt(Math.Clamp(slot.Frame(), o.Start, o.End));
             return isRight ? section + 1 : section;
         }
         void Write(bool isRight, double v)
         {
-            var o = Target; var t = Track(); if (o == null || t == null) return;
+            var o = slot.Owner(); var t = Track(); if (o == null || t == null) return;
             t.EnsureSections(o.Sections);
             t.Values[Index(isRight)] = Math.Round(Math.Clamp(v, p.Min, p.Max), p.Decimals);
         }
         void Commit(bool isRight, double v)
         {
-            var o = Target; if (o == null || Track() == null) return;
-            _session.Edit("パラメータの変更", () => Write(isRight, v), $"{o.Id}/{effectIndex}/{p.Key}/{isRight}");
+            var o = slot.Owner(); if (o == null || Track() == null) return;
+            _session.Edit("パラメータの変更", () => Write(isRight, v), $"{o.Id}/{slot.Id}/{p.Key}/{isRight}");
         }
 
         left.Committed += v => Commit(false, v);
@@ -348,14 +485,14 @@ public sealed class ObjectSettingsView : UserControl
             var dec = new RepeatButton { Content = new Icon("StepLeft", 14), Width = 13, MinWidth = 13, Padding = new Thickness(0), Focusable = false };
             var inc = new RepeatButton { Content = new Icon("StepRight", 14), Width = 13, MinWidth = 13, Padding = new Thickness(0), Focusable = false };
             dec.Classes.Add("flat"); inc.Classes.Add("flat");
-            dec.Click += (_, _) => { var t = Track(); if (t != null && Target != null) Commit(isRight, t.Values[Index(isRight)] - p.Step); };
-            inc.Click += (_, _) => { var t = Track(); if (t != null && Target != null) Commit(isRight, t.Values[Index(isRight)] + p.Step); };
+            dec.Click += (_, _) => { var t = Track(); if (t != null && slot.Owner() != null) Commit(isRight, t.Values[Index(isRight)] - p.Step); };
+            inc.Click += (_, _) => { var t = Track(); if (t != null && slot.Owner() != null) Commit(isRight, t.Values[Index(isRight)] + p.Step); };
             return new StackPanel { Orientation = Orientation.Horizontal, Children = { dec, inc } };
         }
         var leftSteps = Steps(left, false);
         var rightSteps = Steps(right, true);
 
-        name.Click += (_, _) => OpenMovementMenu(name, effectIndex, p);
+        name.Click += (_, _) => OpenMovementMenu(name, slot, p);
 
         grid.Children.Add(leftSteps);
         Grid.SetColumn(left, 1); grid.Children.Add(left);
@@ -367,9 +504,9 @@ public sealed class ObjectSettingsView : UserControl
 
         _refreshers.Add(() =>
         {
-            var o = Target; var t = Track(); if (o == null || t == null) return;
+            var o = slot.Owner(); var t = Track(); if (o == null || t == null) return;
             t.EnsureSections(o.Sections);
-            int section = o.SectionAt(Math.Clamp(_session.CurrentFrame, o.Start, o.End));
+            int section = o.SectionAt(Math.Clamp(slot.Frame(), o.Start, o.End));
             double l = t.Values[section], r = t.Values[section + 1];
             bool moving = t.IsMoving;
             left.Value = l; leftSlider.Value = l;
@@ -392,13 +529,13 @@ public sealed class ObjectSettingsView : UserControl
 
     private static string ModeName(MovementMode mode) => Modes.First(m => m.Mode == mode).Name;
 
-    private void OpenMovementMenu(Control anchor, int effectIndex, ParamDefinition p)
+    private void OpenMovementMenu(Control anchor, Slot slot, ParamDefinition p)
     {
-        var t = EffectAt(effectIndex)?.Tracks.GetValueOrDefault(p.Key);
+        var t = slot.Effect()?.Tracks.GetValueOrDefault(p.Key);
         if (t == null) return;
         void Change(string what, Action<AnimatedValue> action)
         {
-            var track = EffectAt(effectIndex)?.Tracks.GetValueOrDefault(p.Key);
+            var track = slot.Effect()?.Tracks.GetValueOrDefault(p.Key);
             if (track != null) _session.Edit(what, () => action(track));
         }
         var menu = new ContextMenu();
@@ -426,23 +563,23 @@ public sealed class ObjectSettingsView : UserControl
 
     // ---------------- その他の入力 ----------------
 
-    private Control BuildCheck(int effectIndex, ParamDefinition p)
+    private Control BuildCheck(Slot slot, ParamDefinition p)
     {
         var box = new CheckBox { Content = p.Name };
-        box.IsCheckedChanged += (_, _) => { if (!_refreshing) SetValue(effectIndex, p.Key, box.IsChecked == true ? "1" : "0"); };
-        _refreshers.Add(() => { var e = EffectAt(effectIndex); if (e != null) box.IsChecked = e.GetBool(p.Key); });
+        box.IsCheckedChanged += (_, _) => { if (!_refreshing) SetValue(slot, p.Key, box.IsChecked == true ? "1" : "0"); };
+        _refreshers.Add(() => { var e = slot.Effect(); if (e != null) box.IsChecked = e.GetBool(p.Key); });
         return box;
     }
 
-    private Control BuildChoice(int effectIndex, ParamDefinition p)
+    private Control BuildChoice(Slot slot, ParamDefinition p)
     {
         var combo = new ComboBox { ItemsSource = p.Choices };
-        combo.SelectionChanged += (_, _) => { if (!_refreshing && combo.SelectedIndex >= 0) SetValue(effectIndex, p.Key, combo.SelectedIndex.ToString()); };
-        _refreshers.Add(() => { var e = EffectAt(effectIndex); if (e != null) combo.SelectedIndex = Math.Clamp(e.GetInt(p.Key), 0, p.Choices.Length - 1); });
+        combo.SelectionChanged += (_, _) => { if (!_refreshing && combo.SelectedIndex >= 0) SetValue(slot, p.Key, combo.SelectedIndex.ToString()); };
+        _refreshers.Add(() => { var e = slot.Effect(); if (e != null) combo.SelectedIndex = Math.Clamp(e.GetInt(p.Key), 0, p.Choices.Length - 1); });
         return combo;
     }
 
-    private Control BuildText(int effectIndex, ParamDefinition p, bool multiline)
+    private Control BuildText(Slot slot, ParamDefinition p, bool multiline)
     {
         var box = new TextBox();
         if (multiline)
@@ -450,16 +587,16 @@ public sealed class ObjectSettingsView : UserControl
             box.AcceptsReturn = true; box.Height = 88; box.TextWrapping = TextWrapping.Wrap;
             box.VerticalContentAlignment = VerticalAlignment.Top; box.FontSize = 13;
         }
-        box.TextChanged += (_, _) => { if (!_refreshing) SetValue(effectIndex, p.Key, box.Text ?? "", "text"); };
+        box.TextChanged += (_, _) => { if (!_refreshing) SetValue(slot, p.Key, box.Text ?? "", "text"); };
         _refreshers.Add(() =>
         {
-            var e = EffectAt(effectIndex);
+            var e = slot.Effect();
             if (e != null && box.Text != e.GetString(p.Key)) box.Text = e.GetString(p.Key);
         });
         return box;
     }
 
-    private Control BuildColor(int effectIndex, ParamDefinition p)
+    private Control BuildColor(Slot slot, ParamDefinition p)
     {
         var swatch = new Border { Width = 28, Height = 16, BorderThickness = new Thickness(1) };
         swatch[!Border.BorderBrushProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Border.Strong");
@@ -474,12 +611,12 @@ public sealed class ObjectSettingsView : UserControl
         view.ColorChanged += (_, e) =>
         {
             if (_refreshing) return;
-            SetValue(effectIndex, p.Key, $"#{e.NewColor.R:X2}{e.NewColor.G:X2}{e.NewColor.B:X2}", "color");
+            SetValue(slot, p.Key, $"#{e.NewColor.R:X2}{e.NewColor.G:X2}{e.NewColor.B:X2}", "color");
         };
         button.Flyout = new Flyout { Content = view, Placement = PlacementMode.BottomEdgeAlignedLeft };
         _refreshers.Add(() =>
         {
-            var e = EffectAt(effectIndex); if (e == null) return;
+            var e = slot.Effect(); if (e == null) return;
             var text = e.GetString(p.Key);
             if (!Color.TryParse(text, out var c)) c = Colors.White;
             swatch.Background = new SolidColorBrush(c);
@@ -489,7 +626,7 @@ public sealed class ObjectSettingsView : UserControl
         return button;
     }
 
-    private Control BuildFile(int effectIndex, ParamDefinition p)
+    private Control BuildFile(Slot slot, ParamDefinition p)
     {
         var box = new TextBox { IsReadOnly = true, Watermark = "(ファイル未選択)" };
         var browse = new IconButton("FolderOpen", "ファイルを選択", flat: false) { Margin = new Thickness(4, 0, 0, 0) };
@@ -507,11 +644,11 @@ public sealed class ObjectSettingsView : UserControl
                 },
             });
             var path = files.FirstOrDefault()?.TryGetLocalPath();
-            if (path != null) SetValue(effectIndex, p.Key, path);
+            if (path != null) SetValue(slot, p.Key, path);
         };
         _refreshers.Add(() =>
         {
-            var e = EffectAt(effectIndex); if (e == null) return;
+            var e = slot.Effect(); if (e == null) return;
             var path = e.GetString(p.Key);
             box.Text = Path.GetFileName(path);
             ToolTip.SetTip(box, path.Length == 0 ? null : File.Exists(path) ? path : path + "\n(ファイルが見つかりません)");
@@ -526,18 +663,18 @@ public sealed class ObjectSettingsView : UserControl
 
     private static IReadOnlyList<string>? _fonts;
 
-    private Control BuildFont(int effectIndex, ParamDefinition p)
+    private Control BuildFont(Slot slot, ParamDefinition p)
     {
         _fonts ??= new[] { $"(既定: {Generators.DefaultFontFamily})" }.Concat(Generators.FontFamilies).ToList();
         var combo = new ComboBox { ItemsSource = _fonts, MaxDropDownHeight = 360 };
         combo.SelectionChanged += (_, _) =>
         {
             if (_refreshing || combo.SelectedIndex < 0) return;
-            SetValue(effectIndex, p.Key, combo.SelectedIndex == 0 ? "" : _fonts[combo.SelectedIndex]);
+            SetValue(slot, p.Key, combo.SelectedIndex == 0 ? "" : _fonts[combo.SelectedIndex]);
         };
         _refreshers.Add(() =>
         {
-            var e = EffectAt(effectIndex); if (e == null) return;
+            var e = slot.Effect(); if (e == null) return;
             var f = e.GetString(p.Key);
             int i = f.Length == 0 ? 0 : _fonts.ToList().IndexOf(f);
             combo.SelectedIndex = Math.Max(0, i);
@@ -545,18 +682,18 @@ public sealed class ObjectSettingsView : UserControl
         return combo;
     }
 
-    private Control BuildScene(int effectIndex, ParamDefinition p)
+    private Control BuildScene(Slot slot, ParamDefinition p)
     {
         var combo = new ComboBox();
         List<Scene> scenes = new();
         combo.SelectionChanged += (_, _) =>
         {
             if (_refreshing || combo.SelectedIndex < 0 || combo.SelectedIndex >= scenes.Count) return;
-            SetValue(effectIndex, p.Key, scenes[combo.SelectedIndex].Id);
+            SetValue(slot, p.Key, scenes[combo.SelectedIndex].Id);
         };
         _refreshers.Add(() =>
         {
-            var e = EffectAt(effectIndex); if (e == null) return;
+            var e = slot.Effect(); if (e == null) return;
             // 自分自身のシーンは選ばせない (無限に入れ子になるため)
             scenes = _session.Project.Scenes.Where(s => s.Id != _session.Scene.Id).ToList();
             combo.ItemsSource = scenes.Select(s => s.Name).ToList();
