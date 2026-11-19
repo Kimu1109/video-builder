@@ -76,12 +76,15 @@ public class TemplateTests : IDisposable
         Assert.Equal(60, pkg.Meta.Length);
         Assert.Equal((0, 0), (pkg.Body.Objects.Min(o => o.Layer), pkg.Body.Objects.Min(o => o.Start)));
         pkg.Thumbnail = new byte[] { 1, 2, 3 };
+        pkg.Preview = new byte[] { 4, 5 };
 
         var store = new TemplateStore(Path.Combine(_dir, "templates"), Path.Combine(_dir, "assets"));
         store.Save(pkg);
         var entry = Assert.Single(store.List());
         Assert.Equal(("名前テロップ", "テロップ", TemplateInsertMode.Scene), (entry.Name, entry.Category, entry.InsertAs));
         Assert.Equal(new byte[] { 1, 2, 3 }, store.Thumbnail(entry));
+        Assert.Equal(new byte[] { 4, 5 }, store.Preview(entry));
+        Assert.Equal(new byte[] { 4, 5 }, TemplatePackage.Load(entry.Path).Preview);
 
         // 素材を消しても、同梱したものから使える
         File.Delete(image.Main.GetString("file"));

@@ -256,6 +256,7 @@ public static class EditorCommands
         {
             var pkg = TemplatePackage.Create(Session.Project, targets, options);
             pkg.Thumbnail = TemplateService.RenderThumbnail(pkg, Session.Project.Settings);
+            pkg.Preview = TemplateService.RenderPreview(pkg, Session.Project.Settings);
             Svc.Templates.Save(pkg);
         }
         catch (Exception ex) { await ShowErrorAsync("テンプレートを保存できませんでした。\n" + ex.Message); }

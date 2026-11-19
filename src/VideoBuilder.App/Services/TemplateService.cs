@@ -56,6 +56,40 @@ public static class TemplateService
         return Insert(entry, layer, frame).Message;
     }
 
+    public const int PreviewSide = 160;
+
+    /// <summary>
+    /// 本体を等間隔に TemplatePackage.PreviewFrames 枚描き、長辺 160px にして横に並べた PNG にする (ライブラリのプレビュー再生用)。
+    /// 描けなければ null。
+    /// </summary>
+    public static byte[]? RenderPreview(TemplatePackage pkg, ProjectSettings settings)
+    {
+        try
+        {
+            var project = pkg.PreviewProject(settings);
+            var body = project.Root;
+            int n = TemplatePackage.PreviewFrames, length = Math.Max(1, body.Length);
+            float scale = (float)PreviewSide / Math.Max(settings.Width, settings.Height);
+            int w = Math.Max(1, (int)(settings.Width * scale)), h = Math.Max(1, (int)(settings.Height * scale));
+            using var engine = new RenderEngine();
+            using var strip = SKSurface.Create(new SKImageInfo(w * n, h));
+            using var paint = new SKPaint { FilterQuality = SKFilterQuality.Medium };
+            for (int i = 0; i < n; i++)
+            {
+                int frame = (int)((long)i * (length - 1) / Math.Max(1, n - 1));
+                using var image = engine.RenderImage(project, body, frame);
+                strip.Canvas.DrawImage(image, SKRect.Create(i * w, 0, w, h), paint);
+            }
+            using var snap = strip.Snapshot();
+            using var data = snap.Encode(SKEncodedImageFormat.Png, 100);
+            return data.ToArray();
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     /// <summary>本体の中間のフレームを描いて、長辺 320px の PNG にする。描けなければ null。</summary>
     public static byte[]? RenderThumbnail(TemplatePackage pkg, ProjectSettings settings)
     {

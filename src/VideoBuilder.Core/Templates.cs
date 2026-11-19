@@ -78,6 +78,11 @@ public sealed class TemplatePackage
     /// <summary>先頭が本体、2 つめ以降は本体から参照しているシーン。</summary>
     public List<Scene> Scenes { get; set; } = new();
     public byte[]? Thumbnail { get; set; }
+    /// <summary>プレビュー再生用の絵 (PreviewFrames 枚を横に並べた PNG)。ないときは null。</summary>
+    public byte[]? Preview { get; set; }
+
+    /// <summary>preview.png に並べるフレームの数。</summary>
+    public const int PreviewFrames = 12;
 
     /// <summary>同梱する素材 (assets の中のファイル名 → 読み出し元)。</summary>
     private readonly Dictionary<string, Func<Stream>> _assets = new();
@@ -234,6 +239,11 @@ public sealed class TemplatePackage
                 using var s = zip.CreateEntry("thumbnail.png", CompressionLevel.NoCompression).Open();
                 s.Write(Thumbnail);
             }
+            if (Preview != null)
+            {
+                using var s = zip.CreateEntry("preview.png", CompressionLevel.NoCompression).Open();
+                s.Write(Preview);
+            }
             foreach (var (name, open) in _assets)
             {
                 // 動画などはもう圧縮されているので、圧縮し直さない
@@ -263,6 +273,7 @@ public sealed class TemplatePackage
             var p = new Project { Scenes = content.Scenes };
             pkg.Scenes = ProjectSerializer.FromJson(ProjectSerializer.ToJson(p)).Scenes;
             pkg.Thumbnail = ReadBytes(zip, "thumbnail.png");
+            pkg.Preview = ReadBytes(zip, "preview.png");
             foreach (var e in zip.Entries)
             {
                 if (!e.FullName.StartsWith("assets/", StringComparison.Ordinal) || e.FullName.Length <= 7) continue;
@@ -315,13 +326,18 @@ public sealed class TemplatePackage
     }
 
     /// <summary>サムネイル (PNG) だけを読む。なければ null。</summary>
-    public static byte[]? ReadThumbnail(string path)
+    public static byte[]? ReadThumbnail(string path) => ReadEntry(path, "thumbnail.png");
+
+    /// <summary>プレビュー再生用の絵 (PNG) だけを読む。なければ null。</summary>
+    public static byte[]? ReadPreview(string path) => ReadEntry(path, "preview.png");
+
+    private static byte[]? ReadEntry(string path, string name)
     {
         try
         {
             using var fs = File.OpenRead(path);
             using var zip = new ZipArchive(fs, ZipArchiveMode.Read);
-            return ReadBytes(zip, "thumbnail.png");
+            return ReadBytes(zip, name);
         }
         catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException) { return null; }
     }

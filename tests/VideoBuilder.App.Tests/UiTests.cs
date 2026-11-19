@@ -545,6 +545,9 @@ public class UiTests
 
         var pkg = TemplatePackage.Create(s.Project, new[] { t }, new TemplateOptions { Name = "ライブラリ表示用", Category = "テロップ" });
         pkg.Thumbnail = TemplateService.RenderThumbnail(pkg, s.Project.Settings);
+        pkg.Preview = TemplateService.RenderPreview(pkg, s.Project.Settings);
+        using (var strip = SkiaSharp.SKBitmap.Decode(pkg.Preview!))
+            Assert.Equal((160 * TemplatePackage.PreviewFrames, 90), (strip.Width, strip.Height));   // 長辺 160px を 12 枚
         Svc.Templates.Save(pkg);
         var entry = Svc.Templates.List().Single(e => e.Name == "ライブラリ表示用");
         try
@@ -556,6 +559,16 @@ public class UiTests
             Assert.True(list.ItemCount >= 1);
             Assert.Contains(lib.GetVisualDescendants().OfType<TextBlock>(), b => b.Text == "ライブラリ表示用");
             Shot(lib, "template-library");
+            // マウスを乗せるとプレビューを再生し、離すとサムネイルに戻る
+            int index = Enumerable.Range(0, list.ItemCount).First(i => ((Control)((IList<Control>)list.ItemsSource!)[i]).GetVisualDescendants().OfType<TextBlock>().Any(b => b.Text == "ライブラリ表示用"));
+            var image = ((Control)((IList<Control>)list.ItemsSource!)[index]).GetVisualDescendants().OfType<Image>().First();
+            var thumb = image.Source;
+            lib.HoverForTest(index, true);
+            Assert.Equal(0, lib.PreviewFrame);
+            Assert.NotSame(thumb, image.Source);
+            lib.HoverForTest(index, false);
+            Assert.Equal(-1, lib.PreviewFrame);
+            Assert.Same(thumb, image.Source);
             var insert = lib.GetVisualDescendants().OfType<Button>().Single(b => b.Content as string == "挿入");
             int before = s.Scene.Objects.Count;
             insert.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));

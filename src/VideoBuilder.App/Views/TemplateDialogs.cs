@@ -6,6 +6,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
+using Avalonia.VisualTree;
 using VideoBuilder.App.Controls;
 using VideoBuilder.App.Services;
 using VideoBuilder.Core;
@@ -172,6 +173,7 @@ public sealed class TemplateLibraryDialog : DialogBase
 
         Reload();
         Opened += (_, _) => _search.Focus();
+        Closed += (_, _) => StopPreview();
     }
 
     private const string AllCategories = "すべてのカテゴリ";
@@ -228,7 +230,62 @@ public sealed class TemplateLibraryDialog : DialogBase
         label.Width = 160; label.TextTrimming = TextTrimming.CharacterEllipsis; label.Margin = new Thickness(0, 4, 0, 0);
         var panel = new StackPanel { Margin = new Thickness(4), Children = { frame, label } };
         ToolTip.SetTip(panel, L.Verbatim(e.Description.Length > 0 ? $"{e.Name}\n{e.Description}" : e.Name));
+        // マウスを乗せている間、プレビュー (横に並べた 12 枚) を 1 秒に 8 枚で繰り返す。離したらサムネイルに戻す
+        if (picture is Image image)
+        {
+            panel.PointerEntered += (_, _) => StartPreview(e, image);
+            panel.PointerExited += (_, _) => StopPreview();
+        }
         return panel;
+    }
+
+    private readonly Dictionary<string, Bitmap?> _previews = new();
+    private Avalonia.Threading.DispatcherTimer? _previewTimer;
+    private (Image Image, IImage? Original)? _playing;
+
+    /// <summary>プレビュー再生の今のコマ (テスト用)。再生していなければ -1。</summary>
+    public int PreviewFrame { get; private set; } = -1;
+
+    private void StartPreview(TemplateEntry e, Image image)
+    {
+        StopPreview();
+        if (!_previews.TryGetValue(e.Path, out var strip))
+        {
+            var png = Svc.Templates.Preview(e);
+            try { strip = png == null ? null : new Bitmap(new MemoryStream(png)); } catch { strip = null; }
+            _previews[e.Path] = strip;
+        }
+        if (strip == null) return;   // プレビューのない (古い) テンプレートはサムネイルのまま
+        int n = TemplatePackage.PreviewFrames, fw = strip.PixelSize.Width / n, fh = strip.PixelSize.Height;
+        if (fw <= 0) return;
+        _playing = (image, image.Source);
+        void Show()
+        {
+            PreviewFrame = (PreviewFrame + 1) % n;
+            image.Source = new CroppedBitmap(strip, new PixelRect(PreviewFrame * fw, 0, fw, fh));
+        }
+        PreviewFrame = -1;
+        Show();
+        _previewTimer = new Avalonia.Threading.DispatcherTimer(TimeSpan.FromMilliseconds(125), Avalonia.Threading.DispatcherPriority.Background, (_, _) => Show());
+        _previewTimer.Start();
+    }
+
+    private void StopPreview()
+    {
+        _previewTimer?.Stop();
+        _previewTimer = null;
+        if (_playing is { } p) p.Image.Source = p.Original;
+        _playing = null;
+        PreviewFrame = -1;
+    }
+
+    /// <summary>テスト用: index 番目のタイルにマウスを乗せた / 離したときと同じことをする。</summary>
+    public void HoverForTest(int index, bool enter)
+    {
+        if (index < 0 || index >= _shown.Count) return;
+        var tile = (Control)((IList<Control>)_list.ItemsSource!)[index];
+        if (enter && tile.GetVisualDescendants().OfType<Image>().FirstOrDefault() is { } img) StartPreview(_shown[index], img);
+        else StopPreview();
     }
 
     private TemplateEntry? Selected => _list.SelectedIndex >= 0 && _list.SelectedIndex < _shown.Count ? _shown[_list.SelectedIndex] : null;

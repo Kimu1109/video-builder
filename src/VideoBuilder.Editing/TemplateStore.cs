@@ -126,6 +126,8 @@ public sealed class TemplateStore
 
     public byte[]? Thumbnail(TemplateEntry entry) => entry.Legacy ? null : TemplatePackage.ReadThumbnail(entry.Path);
 
+    public byte[]? Preview(TemplateEntry entry) => entry.Legacy ? null : TemplatePackage.ReadPreview(entry.Path);
+
     public void Delete(TemplateEntry entry)
     {
         if (entry.Shared) throw new InvalidOperationException("共有フォルダのテンプレートは削除できません");
