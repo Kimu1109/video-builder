@@ -603,9 +603,9 @@ public sealed class ObjectSettingsView : UserControl
     private static (string? Original, bool Missing)? VectorColor(Effect e, string key)
     {
         if (e.DefinitionId != EffectRegistry.Vector) return null;
-        int slot = LottieColors.SlotOf(key);
+        int slot = VectorColors.SlotOf(key);
         if (slot < 0) return null;
-        var palette = LottieColors.PaletteOfFile(e.GetString("file"));
+        var palette = VectorColors.PaletteOfFile(e.GetString("file"));
         return slot < palette.Count ? (palette[slot], false) : (null, true);
     }
 

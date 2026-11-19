@@ -105,9 +105,9 @@ public static class EffectRegistry
                 T("speed", "再生速度", 0, 2000, 100, 1, 0, 400),
                 C("loop", "ループ再生", true),
                 new ParamDefinition { Key = "file", Name = "ファイル", Kind = ParamKind.File, FileExtensions = VectorExtensions },
-            }.Concat(Enumerable.Range(0, LottieColors.Slots).Select(i =>
+            }.Concat(Enumerable.Range(0, VectorColors.Slots).Select(i =>
                 // Lottie の色の置き換え。空ならファイルの色のまま
-                new ParamDefinition { Key = LottieColors.ParamKey(i), Name = $"色 {i + 1}", Kind = ParamKind.Color, DefaultText = "" })).ToArray(),
+                new ParamDefinition { Key = VectorColors.ParamKey(i), Name = $"色 {i + 1}", Kind = ParamKind.Color, DefaultText = "" })).ToArray(),
         });
         Register(new EffectDefinition
         {

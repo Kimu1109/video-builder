@@ -40,13 +40,13 @@ internal sealed class VectorSources : IDisposable
     private const int MaxRecolored = 16;
 
     /// <summary>
-    /// 色を置き換えた Lottie を返す。map が空、または Lottie でなければ Get(path) と同じ。
+    /// 色を置き換えたベクター画像 (SVG / Lottie) を返す。map が空なら Get(path) と同じ。
     /// 元のファイルが書き換わったら作り直す。
     /// </summary>
     public Item? Get(string path, IReadOnlyDictionary<string, string> map)
     {
         var item = Get(path);
-        if (item == null || !item.Animated || map.Count == 0) return item;
+        if (item == null || map.Count == 0) return item;
         string key = path + "|" + string.Join(",", map.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => kv.Key + ">" + kv.Value));
         _tick++;
         if (_recolored.TryGetValue(key, out var hit) && hit.Version == item.Version)
@@ -55,7 +55,14 @@ internal sealed class VectorSources : IDisposable
             return hit.Item;
         }
         if (_recolored.Remove(key, out var stale)) stale.Item.Dispose();
-        var made = LoadLottie(LottieColors.Recolor(File.ReadAllText(path), map));
+        Item? made;
+        try
+        {
+            var text = VectorColors.RecolorFile(path, map);
+            // 書き換えた SVG は文字列から読む (中から相対パスで参照している画像は読めない)
+            made = item.Animated ? LoadLottie(text) : LoadSvg(svg => svg.Load(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(text))));
+        }
+        catch (Exception e) when (e is not OutOfMemoryException) { made = null; }
         if (made == null) return item;
         made.Time = item.Time; made.Version = ++_version;
         if (_recolored.Count >= MaxRecolored)
@@ -74,6 +81,22 @@ internal sealed class VectorSources : IDisposable
         using var stream = new SKMemoryStream(data);
         if (!Animation.TryCreate(stream, out var anim) || anim == null) return null;
         return new Item { Lottie = anim, Size = anim.Size };
+    }
+
+    private static Item? LoadSvg(Func<Svg.Skia.SKSvg, SKPicture?> load)
+    {
+        using (var svg = new Svg.Skia.SKSvg())
+        {
+            var picture = load(svg);
+            if (picture == null) return null;
+            // SKSvg を閉じても使えるよう、描き直して自分の持ち物にする
+            var bounds = picture.CullRect;
+            using var recorder = new SKPictureRecorder();
+            var canvas = recorder.BeginRecording(bounds);
+            canvas.DrawPicture(picture);
+            var own = recorder.EndRecording();
+            return new Item { Picture = own, Size = new SKSize(bounds.Width, bounds.Height) };
+        }
     }
 
     /// <summary>ファイルを読む。読めなければ null。</summary>
@@ -101,24 +124,8 @@ internal sealed class VectorSources : IDisposable
     {
         try
         {
-            if (Path.GetExtension(path).Equals(".svg", StringComparison.OrdinalIgnoreCase))
-            {
-                using var svg = new Svg.Skia.SKSvg();
-                var picture = svg.Load(path);
-                if (picture == null) return null;
-                // SKSvg を閉じても使えるよう、描き直して自分の持ち物にする
-                var bounds = picture.CullRect;
-                using var recorder = new SKPictureRecorder();
-                var canvas = recorder.BeginRecording(bounds);
-                canvas.DrawPicture(picture);
-                var own = recorder.EndRecording();
-                return new Item { Picture = own, Size = new SKSize(bounds.Width, bounds.Height) };
-            }
-            using var data = SKData.Create(path);
-            if (data == null) return null;
-            using var stream = new SKMemoryStream(data);
-            if (!Animation.TryCreate(stream, out var anim) || anim == null) return null;
-            return new Item { Lottie = anim, Size = anim.Size };
+            if (Path.GetExtension(path).Equals(".svg", StringComparison.OrdinalIgnoreCase)) return LoadSvg(svg => svg.Load(path));
+            return LoadLottie(File.ReadAllText(path));
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {

@@ -405,29 +405,29 @@ public class LottieColorTests : IDisposable
     [Fact]
     public void Palette_lists_colors_in_order_and_recolor_replaces_every_occurrence()
     {
-        Assert.Equal(new[] { "#FF0000", "#00FF00", "#0000FF", "#FFFFFF" }, LottieColors.Palette(Json));
-        var recolored = LottieColors.Recolor(Json, new Dictionary<string, string> { ["#FF0000"] = "#336699", ["#0000FF"] = "#ABCDEF" });
+        Assert.Equal(new[] { "#FF0000", "#00FF00", "#0000FF", "#FFFFFF" }, VectorColors.LottiePalette(Json));
+        var recolored = VectorColors.RecolorLottie(Json, new Dictionary<string, string> { ["#FF0000"] = "#336699", ["#0000FF"] = "#ABCDEF" });
         // 塗りと、線のキーフレームの終わりの両方が置き換わる。並びは変わらない
-        Assert.Equal(new[] { "#336699", "#00FF00", "#ABCDEF", "#FFFFFF" }, LottieColors.Palette(recolored));
+        Assert.Equal(new[] { "#336699", "#00FF00", "#ABCDEF", "#FFFFFF" }, VectorColors.LottiePalette(recolored));
         Assert.Contains("\"sc\":\"#abcdef\"", recolored);
-        Assert.Empty(LottieColors.Palette("{ not json"));
-        Assert.Equal("#AABBCC", LottieColors.Normalize("#abc"));
-        Assert.Equal("#112233", LottieColors.Normalize("#FF112233"));
-        Assert.Null(LottieColors.Normalize("red"));
-        Assert.Equal(2, LottieColors.SlotOf("color3"));
-        Assert.Equal(-1, LottieColors.SlotOf("color9"));
+        Assert.Empty(VectorColors.LottiePalette("{ not json"));
+        Assert.Equal("#AABBCC", VectorColors.Normalize("#abc"));
+        Assert.Equal("#112233", VectorColors.Normalize("#FF112233"));
+        Assert.Null(VectorColors.Normalize("red"));
+        Assert.Equal(2, VectorColors.SlotOf("color3"));
+        Assert.Equal(-1, VectorColors.SlotOf("color9"));
     }
 
     [Fact]
     public void Map_uses_only_set_slots()
     {
         var e = new Effect(EffectRegistry.Get(EffectRegistry.Vector));
-        var palette = LottieColors.Palette(Json);
-        Assert.Empty(LottieColors.MapFor(e, palette));
+        var palette = VectorColors.LottiePalette(Json);
+        Assert.Empty(VectorColors.MapFor(e, palette));
         e.Values["color2"] = "#123456";
         e.Values["color4"] = "#ffffff";    // 元と同じ色は置き換えない
         e.Values["color8"] = "#000000";    // パレットにない番号は無視
-        Assert.Equal(new Dictionary<string, string> { ["#00FF00"] = "#123456" }, LottieColors.MapFor(e, palette));
+        Assert.Equal(new Dictionary<string, string> { ["#00FF00"] = "#123456" }, VectorColors.MapFor(e, palette));
     }
 
     private static SKColor Pixel(Project p, int frame, int x, int y)
@@ -468,6 +468,87 @@ public class LottieColorTests : IDisposable
         Assert.Equal(ParamKind.Color, param.Kind);
         target.Edit("色", () => effect.Values["color1"] = "#00FF00");
         Assert.Equal(new SKColor(0, 255, 0), Pixel(target.Project, 0, 160, 120));
+    }
+}
+
+public class SvgColorTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), $"vb-svgcolor-{Guid.NewGuid():N}");
+
+    public SvgColorTests() => Directory.CreateDirectory(_dir);
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_dir, true); } catch { }
+    }
+
+    private const string Svg = """
+    <svg xmlns="http://www.w3.org/2000/svg" width="100" height="50">
+      <style>.b { fill: rgb(0, 0, 255); }</style>
+      <defs><linearGradient id="g"><stop offset="0" stop-color="#ff0"/><stop offset="1" style="stop-color: white"/></linearGradient></defs>
+      <rect width="50" height="50" fill="#FF0000" stroke="none"/>
+      <rect x="50" width="50" height="50" style="fill:red;stroke:#00ff0080"/>
+      <circle class="b" r="5" fill="currentColor" color="url(#g)"/>
+    </svg>
+    """;
+
+    [Fact]
+    public void Svg_palette_reads_attributes_styles_and_css_in_order()
+    {
+        Assert.Equal(new[] { "#0000FF", "#FFFF00", "#FFFFFF", "#FF0000", "#00FF00" }, VectorColors.SvgPalette(Svg));
+    }
+
+    [Fact]
+    public void Svg_recolor_replaces_every_form_and_keeps_alpha()
+    {
+        var map = new Dictionary<string, string> { ["#FF0000"] = "#123456", ["#00FF00"] = "#ABCDEF", ["#0000FF"] = "#010203" };
+        var r = VectorColors.RecolorSvg(Svg, map);
+        Assert.Contains("fill=\"#123456\"", r);
+        Assert.Contains("fill:#123456;", r);            // 名前の色 (red) も置き換わる
+        Assert.Contains("stroke:#abcdef80", r);          // 透明度は残る
+        Assert.Contains("fill: #010203;", r);            // <style> の中
+        Assert.Contains("stroke=\"none\"", r);
+        Assert.Contains("fill=\"currentColor\"", r);
+        Assert.Equal(new[] { "#010203", "#FFFF00", "#FFFFFF", "#123456", "#ABCDEF" }, VectorColors.SvgPalette(r));
+        Assert.Contains("rgba(1,2,3,0.5)", VectorColors.RecolorSvg("<a fill='rgba(0,0,255,0.5)'/>", map));
+    }
+
+    private static SKColor Pixel(Project p, int x, int y)
+    {
+        using var engine = new RenderEngine();
+        using var img = engine.RenderImage(p, p.Root, 0);
+        using var bmp = SKBitmap.FromImage(img);
+        return bmp.GetPixel(x, y);
+    }
+
+    [Fact]
+    public void Svg_color_is_replaced_when_rendering_and_through_an_exposed_template_item()
+    {
+        var path = Path.Combine(_dir, "two.svg");
+        // 左半分が赤、右半分が緑。大きさ 100x50 で、画面 (320x240) の中央に置かれる
+        File.WriteAllText(path, "<svg xmlns='http://www.w3.org/2000/svg' width='100' height='50'><rect width='50' height='50' fill='red'/><rect x='50' width='50' height='50' fill='#00ff00'/></svg>");
+        var s = new EditorSession();
+        s.Project.Settings.Width = 320; s.Project.Settings.Height = 240;
+        var o = s.AddObject(EffectRegistry.Vector, 0, 0, 30, x => x.Main.Values["file"] = path)!;
+        Assert.Equal(new[] { "#FF0000", "#00FF00" }, VectorColors.PaletteOfFile(path));
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(s.Project, 135, 120));
+        o.Main.Values["color2"] = "#0000FF";
+        Assert.Equal(new SKColor(255, 0, 0), Pixel(s.Project, 135, 120));
+        Assert.Equal(new SKColor(0, 0, 255), Pixel(s.Project, 185, 120));
+
+        var pkg = TemplatePackage.Create(s.Project, new[] { o }, new TemplateOptions
+        {
+            Name = "ロゴ",
+            Exposed = new() { new ExposedParam { ObjectId = o.Id, Effect = 0, Key = "color1", Label = "左の色" } },
+        });
+        var target = new EditorSession();
+        target.Project.Settings.Width = 320; target.Project.Settings.Height = 240;
+        Assert.Equal(1, target.InsertTemplate(pkg.Instantiate(target.Project, Path.Combine(_dir, "assets"), TemplateInsertMode.Scene), 0, 0));
+        var scene = target.Project.FindScene(target.Primary!.Main.GetString("scene"))!;
+        var (_, effect, _) = scene.Exposed![0].Resolve(scene)!.Value;
+        target.Edit("色", () => effect.Values["color1"] = "#FFFF00");
+        Assert.Equal(new SKColor(255, 255, 0), Pixel(target.Project, 135, 120));
+        Assert.Equal(new SKColor(0, 0, 255), Pixel(target.Project, 185, 120));   // 保存したときの「色 2」も引き継がれる
     }
 }
 
