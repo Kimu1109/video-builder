@@ -54,6 +54,8 @@ public sealed class TimelineView : UserControl
         _scenes.Height = TimelineCanvas.RulerHeight - 1; _scenes.MinHeight = 0;
         _scenes.HorizontalAlignment = HorizontalAlignment.Left; _scenes.VerticalAlignment = VerticalAlignment.Top;
         _scenes.BorderThickness = new Thickness(0);
+        // シーンの名前は利用者が付けたものなので訳さない (並べる文字は SceneLabel などで、もう表示する言語にしてある)
+        _scenes.ItemTemplate = Menus.VerbatimItems();
         ToolTip.SetTip(_scenes, "シーンの切替");
         grid.Children.Add(_scenes);
         Content = grid;
@@ -90,10 +92,12 @@ public sealed class TimelineView : UserControl
         _syncing = false;
     }
 
+    private static string AddSceneLabel => L.T("+ シーンを追加");
+
     private void SyncScenes()
     {
         _syncing = true;
-        var names = _session.Project.Scenes.Select(s => s.Name).Append("+ シーンを追加").ToList();
+        var names = _session.Project.Scenes.Select(TimelineCanvas.SceneLabel).Append(AddSceneLabel).ToList();
         if (_scenes.ItemsSource is not List<string> old || !old.SequenceEqual(names)) _scenes.ItemsSource = names;
         _scenes.SelectedIndex = _session.Project.Scenes.IndexOf(_session.Scene);
         _syncing = false;

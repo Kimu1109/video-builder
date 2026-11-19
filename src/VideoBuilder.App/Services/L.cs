@@ -15,6 +15,8 @@ public static class L
 {
     private static Dictionary<string, string> _exact = new();
     private static List<(Regex Pattern, string Template)> _patterns = new();
+    // "{0}" を含む対応 (日本語の型紙 → 英語の型紙)。Format で使う
+    private static Dictionary<string, string> _templates = new();
     private static bool _installed;
     private static readonly Dictionary<string, string> Memo = new();
 
@@ -31,10 +33,12 @@ public static class L
         lock (Memo) Memo.Clear();
         if (!English) return;
         _exact = new Dictionary<string, string>();
+        _templates = new Dictionary<string, string>();
         var patterns = new List<(Regex, string, int)>();
         foreach (var (ja, en) in TranslationsEn.Pairs)
         {
             if (!ja.Contains("{0}")) { _exact[ja] = en; continue; }
+            _templates[ja] = en;
             // "{0}" を含むものは、実行時の値が入る型紙として扱う
             string regex = "^" + Regex.Replace(Regex.Escape(ja), @"\\\{(\d)}", m => $"(?<g{m.Groups[1].Value}>.*?)") + "$";
             patterns.Add((new Regex(regex, RegexOptions.Singleline | RegexOptions.CultureInvariant), en, ja.Length));
@@ -80,6 +84,21 @@ public static class L
         foreach (char c in s)
             if (c is >= '぀' and <= 'ヿ' or >= '一' and <= '鿿') return true;
         return false;
+    }
+
+    /// <summary>
+    /// 型紙 (例: "シーン [{0}]") だけを訳し、{0} {1} ... には args をそのまま入れる。
+    /// 利用者が付けた名前を含む文を作るときに使う (T に渡すと、名前の部分まで訳されてしまう)。
+    /// 結果を TextBlock に出すときは Verbatim を使う。
+    /// </summary>
+    public static string Format(string template, params string[] args)
+    {
+        var t = English && _templates.TryGetValue(template, out var en) ? en : template;
+        return System.Text.RegularExpressions.Regex.Replace(t, @"\{(\d)}", m =>
+        {
+            int i = m.Groups[1].Value[0] - '0';
+            return i < args.Length ? args[i] : m.Value;
+        });
     }
 
     /// <summary>

@@ -83,11 +83,9 @@ public sealed class TemplateSaveDialog : DialogBase
                     var check = new CheckBox { IsChecked = suggested, VerticalAlignment = VerticalAlignment.Center };
                     var labelBox = new TextBox { Text = label, Width = 160, IsEnabled = suggested };
                     check.IsCheckedChanged += (_, _) => labelBox.IsEnabled = check.IsChecked == true;
-                    var where = new TextBlock
-                    {
-                        Text = $"{TimelineCanvas.ObjectLabel(o)} › {L.T(e.Definition.Name)} › {L.T(p.Name)}",
-                        VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(8, 0, 0, 0),
-                    };
+                    // オブジェクトの表示名 (テキストの本文など) を含むので、組み立てた文字はもう訳さない
+                    var where = L.Verbatim($"{TimelineCanvas.ObjectLabel(o)} › {L.T(e.Definition.Name)} › {L.T(p.Name)}");
+                    where.VerticalAlignment = VerticalAlignment.Center; where.TextTrimming = TextTrimming.CharacterEllipsis; where.Margin = new Thickness(8, 0, 0, 0);
                     where.Classes.Add("secondary");
                     var row = new DockPanel { Children = { check, labelBox, where } };
                     DockPanel.SetDock(check, Dock.Left); DockPanel.SetDock(labelBox, Dock.Left);
@@ -350,9 +348,10 @@ public sealed class ExposedItemsDialog : DialogBase
             label.TextChanged += (_, _) => item.Label = label.Text?.Trim() ?? "";
             var group = new AutoCompleteBox { Text = item.Group, ItemsSource = groups, FilterMode = AutoCompleteFilterMode.StartsWith, MinimumPrefixLength = 0, Watermark = "(なし)", Margin = new Thickness(0, 0, 4, 0), ItemTemplate = Menus.VerbatimItems() };
             group.TextChanged += (_, _) => item.Group = group.Text?.Trim() ?? "";
-            var where = new TextBlock { Text = Describe(item), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(4, 0) };
+            var where = L.Verbatim(Describe(item));
+            where.VerticalAlignment = VerticalAlignment.Center; where.TextTrimming = TextTrimming.CharacterEllipsis; where.Margin = new Thickness(4, 0);
             where.Classes.Add("secondary");
-            ToolTip.SetTip(where, where.Text);
+            ToolTip.SetTip(where, L.Verbatim(where.Text ?? ""));
             var buttons = new StackPanel
             {
                 Orientation = Orientation.Horizontal,

@@ -756,7 +756,8 @@ public sealed class ObjectSettingsView : UserControl
 
     private Control BuildScene(Slot slot, ParamDefinition p)
     {
-        var combo = new ComboBox();
+        // シーンの名前は訳さない (SceneLabel で、アプリが付けた名前だけ訳してある)
+        var combo = new ComboBox { ItemTemplate = Menus.VerbatimItems() };
         List<Scene> scenes = new();
         combo.SelectionChanged += (_, _) =>
         {
@@ -768,7 +769,7 @@ public sealed class ObjectSettingsView : UserControl
             var e = slot.Effect(); if (e == null) return;
             // 自分自身のシーンは選ばせない (無限に入れ子になるため)
             scenes = _session.Project.Scenes.Where(s => s.Id != _session.Scene.Id).ToList();
-            combo.ItemsSource = scenes.Select(s => s.Name).ToList();
+            combo.ItemsSource = scenes.Select(TimelineCanvas.SceneLabel).ToList();
             combo.SelectedIndex = scenes.FindIndex(s => s.Id == e.GetString(p.Key));
             combo.PlaceholderText = scenes.Count == 0 ? "(ほかのシーンがありません)" : "(シーンを選択)";
         });

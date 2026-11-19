@@ -83,7 +83,10 @@ public sealed class Scene
     public const int LayerCount = 100;
 
     public string Id { get; set; } = "root";
-    public string Name { get; set; } = "メイン";
+    /// <summary>新しいプロジェクトのメインのシーンの名前 (アプリが付けた名前なので、表示するときは訳す)。</summary>
+    public const string DefaultName = "メイン";
+
+    public string Name { get; set; } = DefaultName;
     public List<TimelineObject> Objects { get; set; } = new();
     /// <summary>既定値と違うレイヤーだけを保持する (キー = レイヤー番号, 0 始まり)。</summary>
     public Dictionary<int, LayerInfo> Layers { get; set; } = new();

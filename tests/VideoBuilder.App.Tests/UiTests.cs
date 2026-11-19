@@ -761,6 +761,58 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public void Object_labels_and_scene_names_keep_what_the_user_typed()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        bool wasEnglish = L.English;
+        try
+        {
+            L.Initialize(Language.English);
+            // 本文・シーン名が対応表の言葉 (「テキスト」「説明」) と同じでも、そのまま出す
+            var text = s.AddObject(EffectRegistry.Text, 0, 0, 30)!;
+            s.Edit("本文", () => s.Scene.Find(text.Id)!.Main.Values["text"] = "テキスト");
+            var empty = s.AddObject(EffectRegistry.Text, 1, 0, 30, o => o.Main.Values["text"] = "")!;
+            var shape = s.AddObject(EffectRegistry.Shape, 2, 0, 30)!;
+            var scene = s.AddScene();
+            s.Edit("名前", () => s.Project.FindScene(scene.Id)!.Name = "説明");
+            s.SwitchScene("root");
+            var so = s.AddObject(EffectRegistry.SceneRef, 3, 0, 30, o => o.Main.Values["scene"] = scene.Id)!;
+
+            Assert.Equal("テキスト", TimelineCanvas.ObjectLabel(s.Scene.Find(text.Id)!));
+            Assert.Equal("Text", TimelineCanvas.ObjectLabel(empty));                     // 本文がなければ種類の名前 (訳す)
+            Assert.Equal("Shape [Rectangle]", TimelineCanvas.ObjectLabel(shape));       // アプリの名前は訳す
+            Assert.Equal("Scene [説明]", TimelineCanvas.ObjectLabel(so));                // 型紙だけ訳す
+            Assert.Equal("Main", TimelineCanvas.SceneLabel(s.Project.Root));             // アプリが付けた既定の名前は訳す
+            Assert.Equal("説明", TimelineCanvas.SceneLabel(s.Project.FindScene(scene.Id)!));
+
+            // タイムラインのシーンの一覧と、シーンオブジェクトのプロパティ
+            Pump();
+            var settings = w.GetVisualDescendants().OfType<ObjectSettingsView>().Single();
+            var texts = settings.GetVisualDescendants().OfType<TextBlock>().Where(t => t.IsEffectivelyVisible).Select(t => t.Text).ToList();
+            Assert.Contains("説明", texts);
+            Assert.DoesNotContain("Description", texts);
+
+            // テンプレートの保存のダイアログの「どこの項目か」も、本文をそのまま出す
+            var d = new TemplateSaveDialog(s.Project, new[] { s.Scene.Find(text.Id)! }, "x", Array.Empty<string>());
+            d.Show(w);
+            Pump();
+            Assert.Contains(d.GetVisualDescendants().OfType<TextBlock>(), t => t.Text != null && t.Text.StartsWith("テキスト › Text › "));
+            d.Close();
+
+            // タイムラインのシーンの一覧: 選んだシーンの名前がそのまま出る
+            var sceneBox = w.Timeline.GetVisualDescendants().OfType<ComboBox>().First();
+            Assert.Contains("説明", (IEnumerable<string>)sceneBox.ItemsSource!);
+            s.SwitchScene(scene.Id);
+            Pump();
+            Assert.Contains("説明", sceneBox.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text));
+            Shot(w, "verbatim-labels");
+            s.SwitchScene("root");
+        }
+        finally { L.Initialize(wasEnglish ? Language.English : Language.Japanese); }
+    }
+
+    [AvaloniaFact]
     public void Style_is_saved_and_applied_to_the_selection()
     {
         Open();
