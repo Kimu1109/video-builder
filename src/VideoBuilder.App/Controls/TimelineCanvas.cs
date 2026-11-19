@@ -873,7 +873,7 @@ public sealed class TimelineCanvas : Control
         var errors = new List<string>();
         foreach (var path in paths)
         {
-            if (Directory.Exists(path)) { errors.Add($"フォルダは置けません: {Path.GetFileName(path)}"); continue; }
+            if (Directory.Exists(path)) { errors.Add($"フォルダは置けません: {L.Name(Path.GetFileName(path))}"); continue; }
             var error = MediaImport.AddFile(path, layer, frame);
             if (error != null) { errors.Add(error); continue; }
             var added = _session.Primary;

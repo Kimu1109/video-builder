@@ -12,7 +12,7 @@ public static class MediaImport
         var session = Svc.Session;
         var project = session.Project;
         var defId = ObjectFactory.DefinitionForFile(path);
-        if (defId == null) return $"対応していないファイル形式です: {Path.GetFileName(path)}";
+        if (defId == null) return $"対応していないファイル形式です: {L.Name(Path.GetFileName(path))}";
 
         if (defId is EffectRegistry.Image or EffectRegistry.Vector)
         {
@@ -23,13 +23,13 @@ public static class MediaImport
 
         if (!FFmpegLoader.EnsureLoaded()) return "FFmpeg が見つからないため、動画・音声を読み込めません。\n" + FFmpegLoader.Error;
         var info = MediaInfo.Probe(path);
-        if (info == null) return $"ファイルを開けません: {Path.GetFileName(path)}";
+        if (info == null) return $"ファイルを開けません: {L.Name(Path.GetFileName(path))}";
         if (defId == EffectRegistry.Video && !info.HasVideo)
         {
-            if (!info.HasAudio) return $"映像も音声も含まれていません: {Path.GetFileName(path)}";
+            if (!info.HasAudio) return $"映像も音声も含まれていません: {L.Name(Path.GetFileName(path))}";
             defId = EffectRegistry.Audio;
         }
-        if (defId == EffectRegistry.Audio && !info.HasAudio) return $"音声が含まれていません: {Path.GetFileName(path)}";
+        if (defId == EffectRegistry.Audio && !info.HasAudio) return $"音声が含まれていません: {L.Name(Path.GetFileName(path))}";
 
         // 最初の動画を読み込むときは、プロジェクトの画像サイズとフレームレートを動画に合わせる (AviUtl と同じ)
         bool adopt = defId == EffectRegistry.Video && project.Scenes.All(s => s.Objects.Count == 0) && info.Width > 0 && info.FrameRate > 0;

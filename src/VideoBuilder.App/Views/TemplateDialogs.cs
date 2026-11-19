@@ -264,7 +264,7 @@ public sealed class TemplateLibraryDialog : DialogBase
             var path = f.TryGetLocalPath();
             if (path == null) continue;
             try { Svc.Templates.Import(path); }
-            catch (Exception ex) { errors.Add($"{Path.GetFileName(path)}: {ex.Message}"); }
+            catch (Exception ex) { errors.Add($"{L.Name(Path.GetFileName(path))}: {ex.Message}"); }
         }
         Reload();
         if (errors.Count > 0) await MessageDialog.Show(this, "テンプレートを読み込む", string.Join("\n", errors));
@@ -293,7 +293,7 @@ public sealed class TemplateLibraryDialog : DialogBase
     {
         var e = Selected;
         if (e == null) return;
-        if (await MessageDialog.Show(this, "テンプレートの削除", $"「{e.Name}」を削除しますか?", ("キャンセル", false), ("削除", true)) != "削除") return;
+        if (await MessageDialog.Show(this, "テンプレートの削除", $"「{L.Name(e.Name)}」を削除しますか?", ("キャンセル", false), ("削除", true)) != "削除") return;
         try { Svc.Templates.Delete(e); }
         catch (Exception ex) { await MessageDialog.Show(this, "テンプレートの削除", ex.Message); }
         _thumbs.Remove(e.Path);

@@ -25,7 +25,7 @@ public sealed class ProxyService
     public event Action? Changed;
 
     public string Status => Current == null ? ""
-        : $"プロキシ作成中 {Path.GetFileName(Current)} {Progress * 100:0}%" + (_queue.Count > 0 ? $" (残り {_queue.Count})" : "");
+        : $"プロキシ作成中 {L.Name(Path.GetFileName(Current))} {Progress * 100:0}%" + (_queue.Count > 0 ? $" (残り {_queue.Count})" : "");
 
     public bool IsQueued(string path) => _queued.Contains(path);
 
@@ -80,7 +80,7 @@ public sealed class ProxyService
                     await Task.Run(() => ProxyGenerator.Create(path, destination, divisor, progress, token), token);
             }
             catch (OperationCanceledException) { /* 中止 */ }
-            catch (Exception ex) { LastError = $"{Path.GetFileName(path)}: {ex.Message}"; }
+            catch (Exception ex) { LastError = $"{L.Name(Path.GetFileName(path))}: {ex.Message}"; }
             finally
             {
                 _queued.Remove(path);

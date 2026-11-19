@@ -224,7 +224,7 @@ public sealed class ObjectSettingsView : UserControl
                 }));
             else
             {
-                menu.Items.Add(Menus.Item($"公開をやめる ({current.Label})", "Remove", () => { if (Target is { } t) _session.SetExposed(t, effectIndex, p.Key, null); }));
+                menu.Items.Add(Menus.Item($"公開をやめる ({L.Name(current.Label)})", "Remove", () => { if (Target is { } t) _session.SetExposed(t, effectIndex, p.Key, null); }));
                 menu.Items.Add(Menus.Item("表示名を変更...", null, async () =>
                 {
                     if (TopLevel.GetTopLevel(this) is not Window w) return;

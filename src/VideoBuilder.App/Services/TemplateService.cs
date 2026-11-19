@@ -51,8 +51,8 @@ public static class TemplateService
             var stored = Path.GetDirectoryName(full) == Path.GetFullPath(Svc.Templates.Directory) ? full : Svc.Templates.Import(full);
             entry = Svc.Templates.List().FirstOrDefault(e => !e.Legacy && Path.GetFullPath(e.Path) == stored);
         }
-        catch (Exception ex) { return $"テンプレートを取り込めませんでした: {Path.GetFileName(path)}\n{ex.Message}"; }
-        if (entry == null) return $"テンプレートを取り込めませんでした: {Path.GetFileName(path)}";
+        catch (Exception ex) { return $"テンプレートを取り込めませんでした: {L.Name(Path.GetFileName(path))}\n{ex.Message}"; }
+        if (entry == null) return $"テンプレートを取り込めませんでした: {L.Name(Path.GetFileName(path))}";
         return Insert(entry, layer, frame).Message;
     }
 

@@ -59,7 +59,7 @@ public static class EditorCommands
         }
         catch (Exception ex)
         {
-            if (Main != null) await MessageDialog.Show(Main, "開けません", $"{Path.GetFileName(path)} を開けませんでした。\n{ex.Message}");
+            if (Main != null) await MessageDialog.Show(Main, "開けません", $"{L.Name(Path.GetFileName(path))} を開けませんでした。\n{ex.Message}");
         }
     }
 
@@ -212,7 +212,7 @@ public static class EditorCommands
         await d.ShowDialog(Main);
         if (d.Result is not { } options) return;
         if (Svc.Templates.Exists(options.Name) &&
-            await MessageDialog.Show(Main, "テンプレートとして保存", $"「{options.Name}」はすでにあります。上書きしますか?", ("キャンセル", false), ("上書き", true)) != "上書き") return;
+            await MessageDialog.Show(Main, "テンプレートとして保存", $"「{L.Name(options.Name)}」はすでにあります。上書きしますか?", ("キャンセル", false), ("上書き", true)) != "上書き") return;
         try
         {
             var pkg = TemplatePackage.Create(Session.Project, targets, options);
@@ -246,7 +246,7 @@ public static class EditorCommands
         if (string.IsNullOrWhiteSpace(name)) return;
         name = name.Trim();
         if (Svc.Styles.Exists(effect.DefinitionId, name) &&
-            await MessageDialog.Show(Main, "スタイルとして保存", $"「{name}」はすでにあります。上書きしますか?", ("キャンセル", false), ("上書き", true)) != "上書き") return;
+            await MessageDialog.Show(Main, "スタイルとして保存", $"「{L.Name(name)}」はすでにあります。上書きしますか?", ("キャンセル", false), ("上書き", true)) != "上書き") return;
         try { Svc.Styles.Save(EffectStyle.From(effect, name)); }
         catch (Exception ex) { await ShowErrorAsync("スタイルを保存できませんでした。\n" + ex.Message); }
     }
@@ -298,7 +298,7 @@ public static class EditorCommands
         catch (Exception ex) { await ShowErrorAsync("素材を収集できませんでした。\n" + ex.Message); return; }
         var missing = ProjectMedia.FindMissing(Session.Project).Count;
         await MessageDialog.Show(Main, "素材を収集して保存",
-            $"{copied} 個のファイルを次のフォルダにコピーしました。\n{dir}" + (missing > 0 ? $"\n\n見つからない素材が {missing} 個あり、それらはコピーしていません。" : ""));
+            $"{copied} 個のファイルを次のフォルダにコピーしました。\n{L.Name(dir)}" + (missing > 0 ? $"\n\n見つからない素材が {missing} 個あり、それらはコピーしていません。" : ""));
     }
 
     // ---------------- ショートカット ----------------

@@ -316,7 +316,7 @@ public sealed class MainWindow : Window
         {
             recent.Items.Clear();
             foreach (var path in Svc.Settings.RecentFiles.Where(File.Exists))
-                recent.Items.Add(Menus.Item(Path.GetFileName(path), null, async () => { if (await EditorCommands.ConfirmDiscardAsync()) await EditorCommands.OpenPathAsync(path); }));
+                recent.Items.Add(Menus.Item(Path.GetFileName(path), null, async () => { if (await EditorCommands.ConfirmDiscardAsync()) await EditorCommands.OpenPathAsync(path); }, verbatim: true));
             if (recent.Items.Count == 0) recent.Items.Add(new MenuItem { Header = "(なし)", IsEnabled = false });
         };
 
@@ -458,7 +458,7 @@ public sealed class MainWindow : Window
     private void UpdateState()
     {
         var p = _session.Project;
-        string name = _session.FilePath != null ? Path.GetFileName(_session.FilePath) : L.T("無題");
+        string name = _session.FilePath != null ? L.Name(Path.GetFileName(_session.FilePath)) : L.T("無題");
         Title = $"{name}{(_session.IsDirty ? " *" : "")} - video-builder";
         _projectInfo.Text = $"{p.Settings.Width}x{p.Settings.Height}  {p.Settings.Fps.Value:0.###}fps";
         foreach (var (c, enabled) in _enablers) c.IsEnabled = enabled();

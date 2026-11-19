@@ -813,6 +813,49 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public void File_names_in_messages_and_the_title_are_not_translated()
+    {
+        var w = Open();
+        bool wasEnglish = L.English;
+        try
+        {
+            L.Initialize(Language.English);
+            // 「テキスト」は対応表にある言葉。名前の目印を付けると、文の型紙だけが訳される
+            Assert.Equal("Could not open ⁨テキスト⁩.\nboom", L.T($"{L.Name("テキスト")} を開けませんでした。\nboom"));
+            Assert.Equal("Could not open テキスト.\nboom", L.Display($"{L.Name("テキスト")} を開けませんでした。\nboom"));
+            Assert.Equal("Could not open Text.\nboom", L.T("テキスト を開けませんでした。\nboom"));   // 目印がなければ、これまでどおり中身も訳す
+            Assert.Equal("Unsupported file format: 説明", L.Display($"対応していないファイル形式です: {L.Name("説明")}"));
+            Assert.Equal("説明", L.Display(L.Name("説明")));
+
+            // 画面に出るときは目印を取り除き、名前はそのまま
+            var tb = new TextBlock { Text = $"{L.Name("テキスト.vbproj")} を開けませんでした。\nboom" };
+            Assert.Equal("Could not open テキスト.vbproj.\nboom", tb.Text);
+            Assert.DoesNotContain(L.NameStart, tb.Text!);
+            var message = MediaImport.AddFile("/tmp/説明.xyz", 0, 0);
+            var shown = new TextBlock { Text = message };
+            Assert.Equal("Unsupported file format: 説明.xyz", shown.Text);
+
+            // ウィンドウのタイトル (プロジェクトのファイル名)
+            var path = Path.Combine(Path.GetTempPath(), $"vb-title-{Guid.NewGuid():N}", "テキスト.vbproj");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            try
+            {
+                Svc.Session.Save(path);
+                Pump();
+                Assert.StartsWith("テキスト.vbproj", w.Title);
+                Assert.DoesNotContain(L.NameStart, w.Title!);
+            }
+            finally { try { Directory.Delete(Path.GetDirectoryName(path)!, true); } catch { } }
+
+            // 日本語のときも、目印は取り除く
+            L.Initialize(Language.Japanese);
+            var ja = new TextBlock { Text = $"{L.Name("a.vbproj")} を開けませんでした。" };
+            Assert.Equal("a.vbproj を開けませんでした。", ja.Text);
+        }
+        finally { L.Initialize(wasEnglish ? Language.English : Language.Japanese); }
+    }
+
+    [AvaloniaFact]
     public void Style_is_saved_and_applied_to_the_selection()
     {
         Open();
