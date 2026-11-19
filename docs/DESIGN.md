@@ -1089,9 +1089,9 @@ video-builder/
 | 項目 | 状況 |
 |---|---|
 | プラグインの入力・出力 | API が未定義 (映像・音声のエフェクト、メディアオブジェクト、移動方法は追加できる) |
-| Flatpak | 未着手 |
+| Flatpak | マニフェストと作成スクリプトあり (`packaging/flatpak/`)。仮想ディスプレイで起動を確認 ([22.20.11](#222011-配布-flatpakwindows--macos-向けのビルド))。Flathub への登録は未着手 |
 | AppImage | AppDir を作って起動するところまで確認。`appimagetool` による AppImage 化は未確認 |
-| Windows / macOS | 動作未確認。GPU 描画は Linux のみ |
+| Windows / macOS | 発行 (`dotnet publish`) が通り、必要なネイティブライブラリが入ることを確認。実機での動作は未確認。GPU 描画は Linux のみ |
 
 ### 22.4 確認できていないこと
 
@@ -1785,6 +1785,19 @@ SVG にも Lottie にも「名前の付いた色の欄」がないので、フ�
 
 - Flatpak のマニフェスト (`packaging/flatpak/`) を用意する。ランタイムは Freedesktop、.NET はアプリと一緒に入れる (self-contained で発行したものを入れる)。FFmpeg は Freedesktop ランタイムの ffmpeg-full 拡張を使う。
 - Windows (`win-x64`)・macOS (`osx-arm64`, `osx-x64`) 向けに `dotnet publish` が通ることを確かめるスクリプトを置く (`packaging/publish-all.sh`)。実機での動作確認はできていない (22.4)。
+
+確認したこと (2026-11-19):
+
+| 対象 | 結果 |
+|---|---|
+| `packaging/publish-all.sh` | linux-x64・linux-arm64・win-x64・osx-x64・osx-arm64 のすべてで発行が通り、実行ファイルと libSkiaSharp・libHarfBuzzSharp が入る (1 つ 120MB 前後) |
+| `packaging/flatpak/build.sh --bundle` | 組み立て・インストール・1 ファイルのバンドル (約 40MB) まで通る。サンドボックスの中に `/app/lib/ffmpeg/libavcodec.so.60` (ffmpeg-full 拡張) と `libopenal.so.1` がある |
+| Flatpak の起動 | 仮想ディスプレイ (Xvfb) の上で、サンドボックスの中のアプリが起動して画面を描く。音の出力・素材の読み込みは確かめていない |
+
+- ランタイムは 23.08 (サポート終了) にしている。24.08 以降の FFmpeg は 7.x (libavcodec.so.61) で、今の FFmpeg 6.1 用のバインディングでは読み込めないため。FFmpeg 7 に移るときに、ランタイムも上げる。
+- OpenAL はランタイムにないので、openal-soft 1.23.1 を一緒に作る (openal-soft.org から取得)。
+- FFmpeg を探す場所に `/app/lib/ffmpeg` (Flatpak の拡張の置き場所) を足した。
+- Wayland では XWayland で動く (`--socket=x11`)。
 
 ---
 

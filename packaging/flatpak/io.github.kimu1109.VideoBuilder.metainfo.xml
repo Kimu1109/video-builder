@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.kimu1109.VideoBuilder</id>
+  <name>video-builder</name>
+  <summary>AviUtl-like video editor</summary>
+  <summary xml:lang="ja">AviUtl ライクな動画編集アプリ</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <description>
+    <p>A layer-based video editor with keyframes, effects, templates, Lua scripting and plugins.</p>
+    <p xml:lang="ja">レイヤーとキーフレームで編集する動画編集アプリ。エフェクト・テンプレート・Lua スクリプト・プラグインに対応。</p>
+  </description>
+  <launchable type="desktop-id">io.github.kimu1109.VideoBuilder.desktop</launchable>
+  <url type="homepage">https://github.com/Kimu1109/video-builder</url>
+  <content_rating type="oars-1.1"/>
+</component>

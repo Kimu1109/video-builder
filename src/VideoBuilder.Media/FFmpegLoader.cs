@@ -25,7 +25,8 @@ public static unsafe class FFmpegLoader
             candidates.Add(Path.Combine(AppContext.BaseDirectory, "ffmpeg"));
             candidates.Add(AppContext.BaseDirectory);
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-                candidates.AddRange(new[] { "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/lib64", "/usr/lib", "/usr/local/lib" });
+                // /app/lib/ffmpeg は Flatpak の ffmpeg-full 拡張の置き場所
+                candidates.AddRange(new[] { "/app/lib/ffmpeg", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/lib64", "/usr/lib", "/usr/local/lib" });
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
                 candidates.AddRange(new[] { "/opt/homebrew/lib", "/usr/local/lib" });
 

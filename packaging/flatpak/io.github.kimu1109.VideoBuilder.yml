@@ -1,0 +1,72 @@
+# video-builder の Flatpak マニフェスト。packaging/flatpak/build.sh から使う (先に linux-x64 向けに発行しておく)。
+#
+# ランタイムを 23.08 にしているのは、FFmpeg のバージョンを合わせるため。
+# video-builder は FFmpeg 6.1 (libavcodec.so.60) 用のバインディング (FFmpeg.AutoGen 6.1) を使っている。
+# 24.08 以降のランタイムの FFmpeg は 7.x (libavcodec.so.61) なので読み込めない。
+# 23.08 はサポートが終わっているので、FFmpeg 7 に移るときにランタイムも上げる (設計書 21 章の 9)。
+app-id: io.github.kimu1109.VideoBuilder
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+command: video-builder
+rename-desktop-file: video-builder.desktop
+rename-icon: video-builder
+
+finish-args:
+  - --share=ipc
+  - --socket=x11            # Avalonia は X11 で描く (Wayland では XWayland を使う)
+  - --socket=pulseaudio     # OpenAL の音の出力
+  - --device=dri            # GPU 描画・ハードウェアデコード
+  - --filesystem=home       # 素材とプロジェクトを開く
+  - --filesystem=xdg-videos
+  - --filesystem=xdg-music
+  - --filesystem=xdg-pictures
+
+# 多くの形式 (H.264 など) を読み書きできる FFmpeg を、/app/lib/ffmpeg に入れてもらう
+add-extensions:
+  org.freedesktop.Platform.ffmpeg-full:
+    directory: lib/ffmpeg
+    version: '23.08'
+    add-ld-path: .
+    no-autodownload: false
+    autodelete: false
+
+cleanup-commands:
+  - mkdir -p /app/lib/ffmpeg
+
+modules:
+  # 音の再生に使う OpenAL (ランタイムに入っていないので作る)
+  - name: openal-soft
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DALSOFT_EXAMPLES=OFF
+      - -DALSOFT_UTILS=OFF
+      - -DALSOFT_INSTALL_CONFIG=OFF
+      - -DALSOFT_INSTALL_HRTF_DATA=OFF
+      - -DALSOFT_INSTALL_AMBDEC_PRESETS=OFF
+    sources:
+      - type: archive
+        url: https://openal-soft.org/openal-releases/openal-soft-1.23.1.tar.bz2
+        sha256: 796f4b89134c4e57270b7f0d755f0fa3435b90da437b745160a49bd41c845b21
+
+  # 発行済み (self-contained) の video-builder をそのまま入れる。.NET はアプリと一緒に入っている
+  - name: video-builder
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib/video-builder /app/bin
+      - cp -a publish/. /app/lib/video-builder/
+      - ln -sf /app/lib/video-builder/video-builder /app/bin/video-builder
+      - install -Dm644 video-builder.desktop /app/share/applications/video-builder.desktop
+      - install -Dm644 video-builder.svg /app/share/icons/hicolor/scalable/apps/video-builder.svg
+      - install -Dm644 io.github.kimu1109.VideoBuilder.metainfo.xml /app/share/metainfo/io.github.kimu1109.VideoBuilder.metainfo.xml
+    sources:
+      - type: dir
+        path: ../../artifacts/publish/linux-x64
+        dest: publish
+      - type: file
+        path: ../video-builder.desktop
+      - type: file
+        path: ../video-builder.svg
+      - type: file
+        path: io.github.kimu1109.VideoBuilder.metainfo.xml
