@@ -14,6 +14,9 @@ Avalonia UI / C# 製の、AviUtl ライクな動画編集アプリ (Linux 優先
 
 FFmpeg を標準以外の場所に置いている場合は、環境変数 `VIDEO_BUILDER_FFMPEG` にライブラリのあるフォルダを指定する。
 
+CPU 内蔵の GPU と外付けの GPU (NVIDIA など) の両方がある場合は、環境設定の「使う GPU」で描画に使う GPU を選べる
+(既定は自動で、外付けを優先する。動画のデコードも同じ GPU に合わせる。設計書 22.23)。環境変数 `VIDEO_BUILDER_GPU` (GPU の名前の一部) でも指定できる。
+
 ## ビルドと実行
 
 ```sh

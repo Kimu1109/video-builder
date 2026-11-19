@@ -32,6 +32,14 @@ public static class Svc
         };
         Styles = new StyleStore(AppPaths.StyleDir);
         VideoBuilder.Media.HardwareDecoding.Mode = Settings.HardwareDecode;
+        ApplyGpuAdapter();
+        // 動画のデコードも、描画に使う GPU に合わせる (CPU 内蔵の GPU を選べば VAAPI を、NVIDIA なら NVDEC を先に試す)
+        VideoBuilder.Media.HardwareDecoding.DeviceHint = () =>
+        {
+            var a = VideoBuilder.Rendering.GpuContext.SelectedAdapter();
+            if (a == null || a.IsSoftware) return null;
+            return a.IsNvidia ? ("cuda", "") : ("vaapi", a.RenderNode);
+        };
         VideoBuilder.Media.ProxyStore.Directory = Path.Combine(AppPaths.CacheDir, "proxy");
         VideoBuilder.Media.ProxyStore.Enabled = Settings.UseProxies;
         VideoBuilder.Media.ProxyStore.Divisor = Settings.ProxyDivisor is 4 ? 4 : 2;
@@ -45,6 +53,13 @@ public static class Svc
         Performance = new PerformanceMonitor(Preview, Settings);
         // プロキシができたら、プレビューを描き直す (開いている動画は次の描画でプロキシに切り替わる)
         VideoBuilder.Media.ProxyStore.Changed += () => Avalonia.Threading.Dispatcher.UIThread.Post(() => Preview.Request());
+    }
+
+    /// <summary>設定の「使う GPU」を描画に伝える (環境変数 VIDEO_BUILDER_GPU があれば、そちらを優先)。</summary>
+    public static void ApplyGpuAdapter()
+    {
+        var env = Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU");
+        VideoBuilder.Rendering.GpuContext.PreferredAdapter = !string.IsNullOrEmpty(env) ? env : Settings.GpuAdapter.Length > 0 ? Settings.GpuAdapter : null;
     }
 
     private static bool _fontsRegistered, _pluginsLoaded;

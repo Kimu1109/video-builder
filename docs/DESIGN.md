@@ -1896,6 +1896,27 @@ AviUtl 風の詳細編集とは別に、動画・写真を並べるだけで作�
 - 集めるのはモードがオンのときだけ (`PerformanceMonitor`)。プレビューの描画のスレッド・音声のスレッドからは、
   時間を測って直近の値を覚える (`RollingStats`) だけにして、画面の更新は 1 秒に 4 回にまとめる。
 
+
+### 22.23 使う GPU の選択 (CPU 内蔵 + 外付け)
+
+ノート PC などで CPU 内蔵の GPU と外付けの GPU (NVIDIA など) の両方があると、これまでは EGL の既定のディスプレイ
+(デスクトップの表示に使っている GPU。多くは CPU 内蔵) で描いていたため、遅い GPU が使われていた。
+
+- GPU の一覧: EGL のデバイス列挙 (`EGL_EXT_device_enumeration` + `EGL_EXT_platform_device`) で GPU を 1 つずつ開き、
+  `GL_RENDERER` の名前・DRM のデバイスファイル (`EGL_EXT_device_drm`)・レンダーノードを調べる (`GpuContext.Adapters`)。結果は覚えておく。
+  ソフトウェアのもの (llvmpipe・`EGL_MESA_device_software`) も一覧に入るが、自動では選ばない。
+- 環境設定の「使う GPU」: 自動 (外付けの GPU を優先) か、一覧の GPU を選ぶ。設定には `名前|デバイスファイル` を覚え、
+  デバイスファイルの番号が変わっても同じ名前の GPU を選ぶ。見つからなければ自動。環境変数 `VIDEO_BUILDER_GPU` (名前の一部でもよい) が優先。
+- 自動の優先度 (`GpuAdapter.Score`): NVIDIA (プロプライエタリ) > AMD Radeon RX / Pro・Intel Arc > そのほか > nouveau の NVIDIA は少し下 >
+  CPU 内蔵 (Intel の UHD / Iris・AMD Radeon Graphics) > ソフトウェア。
+- 開き方: 選んだ GPU のデバイスのディスプレイで、pbuffer → サーフェスなし (`EGL_KHR_surfaceless_context`) の順に試す。
+  開けなければ、これまでどおりデスクトップのディスプレイ → 画面なしの Mesa。デバイス列挙がない環境・ソフトウェアしかない環境もこれまでどおり。
+- プレビュー・出力・ベンチマークは、どれも `GpuContext.TryCreate` を通るので、同じ GPU を使う。
+- 動画のデコードも合わせる (`HardwareDecoding.DeviceHint`): NVIDIA を選んだら NVDEC (CUDA) を先に、Intel / AMD を選んだら
+  VAAPI を先に、その GPU のレンダーノードで開く (指定しないと VAAPI は既定のデバイス = 多くは CPU 内蔵になる)。
+  選び直したら、デコードのデバイスを作り直す (`HardwareDecoding.ResetDevices`)。
+- 実機 (内蔵 + NVIDIA) では確かめていない。この環境では Mesa のソフトウェアの GPU で、列挙と、ID を指定して開けることを確かめた。
+
 ---
 
 ---

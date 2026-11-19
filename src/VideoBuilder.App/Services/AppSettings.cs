@@ -26,6 +26,11 @@ public sealed class AppSettings
     public string CustomAccent { get; set; } = "#2F80ED";
     public WindowMode WindowMode { get; set; } = WindowMode.Auto;
     public RenderBackend RenderBackend { get; set; } = RenderBackend.Auto;
+    /// <summary>
+    /// 使う GPU (GpuAdapter.Id)。空なら自動 (外付けの GPU を優先)。CPU 内蔵と外付けの GPU があるときに選ぶ。
+    /// 描画・出力のほか、動画のデコード (VAAPI のデバイス・NVDEC を先に試すか) もこれに合わせる。
+    /// </summary>
+    public string GpuAdapter { get; set; } = "";
     /// <summary>動画のデコードに GPU を使うか (Auto: 使えれば使う)。</summary>
     public VideoBuilder.Media.HardwareDecodeMode HardwareDecode { get; set; } = VideoBuilder.Media.HardwareDecodeMode.Auto;
     /// <summary>プレビューでプロキシを使う。</summary>

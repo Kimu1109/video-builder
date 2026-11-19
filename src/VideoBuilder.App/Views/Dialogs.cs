@@ -139,6 +139,62 @@ public sealed class ProjectSettingsDialog : DialogBase
 
 public sealed class PreferencesDialog : DialogBase
 {
+    private Action? _showDecode;
+    private void ShowDecodeLater() => _showDecode?.Invoke();
+
+    /// <summary>「使う GPU」の一覧を作る。一覧は描画と同じ方法 (EGL のデバイス列挙) で調べる。</summary>
+    private static async Task FillGpuListAsync(ComboBox combo, TextBlock note, Action changed)
+    {
+        var s = Svc.Settings;
+        IReadOnlyList<VideoBuilder.Rendering.GpuAdapter> adapters;
+        string? error;
+        try
+        {
+            (adapters, error) = await Task.Run(() => (VideoBuilder.Rendering.GpuContext.Adapters(), VideoBuilder.Rendering.GpuContext.AdaptersError));
+        }
+        catch (Exception ex) { adapters = Array.Empty<VideoBuilder.Rendering.GpuAdapter>(); error = ex.Message; }
+
+        var auto = VideoBuilder.Rendering.GpuContext.ChooseAdapter(adapters, null);
+        var ids = new List<string> { "" };
+        // GPU の名前はドライバが返すものなので訳さない (「自動」などアプリの言葉だけ訳す)
+        var labels = new List<string> { auto != null && !auto.IsSoftware ? L.Format("自動 (外付けの GPU を優先: {0})", auto.Name) : L.T("自動 (外付けの GPU を優先)") };
+        foreach (var a in adapters)
+        {
+            ids.Add(a.Id);
+            labels.Add(a.Label + (a.IsSoftware ? " " + L.T("(ソフトウェア)") : ""));
+        }
+        if (s.GpuAdapter.Length > 0 && !ids.Contains(s.GpuAdapter))
+        {
+            // 前に選んだ GPU が今は見つからない (取り外した・ドライバが変わった)。自動で動いていることを示す
+            ids.Add(s.GpuAdapter);
+            labels.Add(L.Format("{0} (見つかりません。自動で選んでいます)", s.GpuAdapter.Split('|')[0]));
+        }
+        combo.ItemTemplate = Menus.VerbatimItems();
+        combo.ItemsSource = labels;
+        combo.SelectedIndex = Math.Max(0, ids.IndexOf(s.GpuAdapter));
+        combo.IsEnabled = adapters.Count > 0;
+        note.Text = adapters.Count == 0
+            ? L.T("GPU を選べません (この環境では、デスクトップの GPU で描きます)。") + (error != null ? "\n" + error : "")
+            : L.T("CPU 内蔵の GPU と外付けの GPU があるときに選びます。描画・出力・動画のデコードに使います。");
+        note.SetValue(L.VerbatimProperty, true);
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU")))
+        {
+            combo.IsEnabled = false;
+            note.Text += "\n" + L.T("環境変数 VIDEO_BUILDER_GPU で指定されているため、ここでは変えられません。");
+        }
+        combo.SelectionChanged += (_, _) =>
+        {
+            if (combo.SelectedIndex < 0 || ids[combo.SelectedIndex] == s.GpuAdapter) return;
+            s.GpuAdapter = ids[combo.SelectedIndex];
+            s.Save();
+            Svc.ApplyGpuAdapter();
+            // 描画のエンジンと、動画のデコードのデバイスを作り直す
+            VideoBuilder.Media.HardwareDecoding.ResetDevices();
+            Svc.Preview.ReloadBackend();
+            changed();
+        };
+    }
+
     public PreferencesDialog() : base("環境設定", 440)
     {
         var s = Svc.Settings;
@@ -197,6 +253,14 @@ public sealed class PreferencesDialog : DialogBase
         })));
         ShowBackend();
         Body.Children.Add(backend);
+
+        // 使う GPU: CPU 内蔵と外付けの GPU があるとき、どちらで描くか (調べるのに少し時間がかかるので、裏で一覧を作る)
+        var gpu = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch, IsEnabled = false, PlaceholderText = L.T("GPU を調べています...") };
+        var gpuNote = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        gpuNote.Classes.Add("secondary");
+        Body.Children.Add(Row("使う GPU", gpu));
+        Body.Children.Add(gpuNote);
+        _ = FillGpuListAsync(gpu, gpuNote, ShowDecodeLater);
         var decodeInfo = new TextBlock { TextWrapping = TextWrapping.Wrap, Text = "確認中..." };
         decodeInfo.Classes.Add("secondary");
         async void ShowDecode()
@@ -214,6 +278,7 @@ public sealed class PreferencesDialog : DialogBase
         })));
         Body.Children.Add(decodeInfo);
         ShowDecode();
+        _showDecode = ShowDecode;
 
         Body.Children.Add(Heading("プロキシ"));
         var useProxy = new CheckBox { Content = "プレビューでプロキシを使う (出力には使わない)", IsChecked = s.UseProxies };

@@ -26,6 +26,13 @@ public static unsafe class HardwareDecoding
     /// </summary>
     public static string? PreferredDevice { get; set; } = Environment.GetEnvironmentVariable("VIDEO_BUILDER_HWDEC") is { Length: > 0 } v && v != "off" ? v : null;
 
+    /// <summary>
+    /// 描画に使う GPU に合わせるための問い合わせ (アプリが設定する)。("cuda" または "vaapi", VAAPI で開くデバイスファイル) を返す。
+    /// null を返せば、これまでどおり (NVIDIA → VAAPI の既定のデバイス)。
+    /// 例: CPU 内蔵の GPU を選んだら ("vaapi", "/dev/dri/renderD128")、NVIDIA を選んだら ("cuda", "")。
+    /// </summary>
+    public static Func<(string Kind, string Device)?>? DeviceHint { get; set; }
+
     internal static bool DisabledByEnvironment => Environment.GetEnvironmentVariable("VIDEO_BUILDER_HWDEC") == "off";
 
     /// <summary>OS ごとに試す順番。</summary>
@@ -40,7 +47,9 @@ public static unsafe class HardwareDecoding
             return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 };
         if (OperatingSystem.IsMacOS())
             return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_VIDEOTOOLBOX };
-        // Linux: NVIDIA (CUDA) → Intel / AMD (VAAPI)
+        // Linux: NVIDIA (CUDA) → Intel / AMD (VAAPI)。描画に Intel / AMD の GPU を選んでいれば、VAAPI を先に試す
+        if (Hint() is { Kind: "vaapi" })
+            return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI, AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA };
         return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI };
     }
 
@@ -55,6 +64,30 @@ public static unsafe class HardwareDecoding
         AVHWDeviceType.AV_HWDEVICE_TYPE_VDPAU => "VDPAU",
         _ => ffmpeg.av_hwdevice_get_type_name(type) ?? type.ToString(),
     };
+
+    private static (string Kind, string Device)? Hint()
+    {
+        try { return DeviceHint?.Invoke(); }
+        catch { return null; }   // GPU の一覧を作れなくても、デコードは既定のやり方で続ける
+    }
+
+    /// <summary>
+    /// 開いてあるデバイスを手放して、次に開くときに作り直す (使う GPU を変えたとき)。
+    /// すでに開いている動画は、自分の参照を持っているので影響しない。
+    /// </summary>
+    public static void ResetDevices()
+    {
+        lock (Gate)
+        {
+            foreach (var d in Devices.Values)
+            {
+                var p = (AVBufferRef*)d;
+                ffmpeg.av_buffer_unref(&p);
+            }
+            Devices.Clear();
+            Failures.Clear();
+        }
+    }
 
     private static readonly object Gate = new();
     private static readonly Dictionary<AVHWDeviceType, IntPtr> Devices = new();
@@ -77,7 +110,9 @@ public static unsafe class HardwareDecoding
             try
             {
                 AVBufferRef* device = null;
-                int ret = ffmpeg.av_hwdevice_ctx_create(&device, type, null, null, 0);
+                // VAAPI は、描画に選んだ GPU と同じデバイスファイルで開く (何も指定しないと、多くは CPU 内蔵の GPU になる)
+                string? path = type == AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI && Hint() is { Kind: "vaapi", Device.Length: > 0 } h ? h.Device : null;
+                int ret = ffmpeg.av_hwdevice_ctx_create(&device, type, path, null, 0);
                 if (ret < 0 || device == null)
                 {
                     error = $"{NameOf(type)} のデバイスを開けません: {FFmpegLoader.ErrorText(ret)}";
@@ -140,7 +175,8 @@ public static unsafe class HardwareDecoding
         foreach (var type in DeviceOrder())
         {
             bool ok = SharedDevice(type, out var error) != null;
-            lines.Add(ok ? $"{NameOf(type)}: 使用可能" : error ?? $"{NameOf(type)}: 使用不可");
+            string where = type == AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI && Hint() is { Kind: "vaapi", Device.Length: > 0 } h ? $" ({h.Device})" : "";
+            lines.Add(ok ? $"{NameOf(type)}{where}: 使用可能" : error ?? $"{NameOf(type)}: 使用不可");
         }
         return lines.Count == 0 ? "使えるデバイスがありません" : string.Join("\n", lines);
     }
