@@ -303,7 +303,7 @@ public sealed unsafe class VideoReader : IDisposable
         if (w <= 0 || h <= 0) return;
         var (ow, oh) = OutputSizeFor(_divisor);
         _sws = ffmpeg.sws_getCachedContext(_sws, w, h, (AVPixelFormat)source->format, ow, oh,
-            AVPixelFormat.AV_PIX_FMT_BGRA, ffmpeg.SWS_BILINEAR, null, null, null);
+            AVPixelFormat.AV_PIX_FMT_BGRA, (int)SwsFlags.SWS_BILINEAR, null, null, null);
         if (_sws == null) return;
         // 置き場は元の大きさで確保する (縮める大きさが変わっても確保し直さない)
         int capacity = Width * Height * 4;

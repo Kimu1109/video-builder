@@ -1,9 +1,9 @@
 # video-builder の Flatpak マニフェスト。packaging/flatpak/build.sh から使う (先に linux-x64 向けに発行しておく)。
 #
-# ランタイムを 23.08 にしているのは、FFmpeg のバージョンを合わせるため。
-# video-builder は FFmpeg 6.1 (libavcodec.so.60) 用のバインディング (FFmpeg.AutoGen 6.1) を使っている。
-# 24.08 以降のランタイムの FFmpeg は 7.x (libavcodec.so.61) なので読み込めない。
-# 23.08 はサポートが終わっているので、FFmpeg 7 に移るときにランタイムも上げる (設計書 21 章の 9)。
+# 【未対応】video-builder は FFmpeg 9 (libavcodec.so.63) 用のバインディング (FFmpeg.AutoGen 9.0) に移った (設計書 22.31)。
+# このマニフェストはまだ 23.08 ランタイムの ffmpeg-full 拡張 (FFmpeg 6.1) を使っているので、
+# このままでは FFmpeg を読み込めない。ランタイムを 25.08 に上げ、FFmpeg 9 をモジュールとしてソースから作るように直す。
+# (25.08 では ffmpeg-full 拡張がなくなり、codecs-extra 拡張に置き換わっている)
 app-id: io.github.kimu1109.VideoBuilder
 runtime: org.freedesktop.Platform
 runtime-version: '23.08'

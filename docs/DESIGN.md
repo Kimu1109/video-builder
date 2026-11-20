@@ -109,7 +109,7 @@ AviUtl ユーザーが迷わず使えることを目指しつつ、操作を Lin
 | DI | Microsoft.Extensions.DependencyInjection | 標準的で軽量 |
 | 2D 描画 | SkiaSharp (Avalonia が内部で使うものと共通) | GPU (OpenGL / Vulkan) 対応。テキスト描画も強い |
 | GPU エフェクト | SkiaSharp `SKRuntimeEffect` (SkSL シェーダ) | 追加依存なしでフィルタを GPU 実行できる |
-| 動画デコード / エンコード | FFmpeg + `FFmpeg.AutoGen` (現在は 6.1。[22.2](#222-設計書との差分)) | 対応コーデックが最も多い。ハードウェアデコードも使える |
+| 動画デコード / エンコード | FFmpeg + `FFmpeg.AutoGen` (現在は 9.0。[22.31](#2231-ffmpeg-9-への移行)) | 対応コーデックが最も多い。ハードウェアデコードも使える |
 | 音声出力 | Silk.NET.OpenAL (OpenAL Soft) | Linux (PulseAudio / PipeWire / ALSA) を一通りカバーできる |
 | アイコン | Material Symbols **Sharp** (SVG → `StreamGeometry`) | 角ばったデザインに合う。Apache 2.0 |
 | シリアライズ | System.Text.Json (Source Generator) | AOT 対応・高速 |
@@ -1051,7 +1051,7 @@ video-builder/
 | 6 | アプリ名 | **video-builder** | リポジトリ名と同じ。C# の名前空間は `VideoBuilder` |
 | 7 | テーマ | **ライト / ダーク切替。既定はシステムに従う** | アクセントカラーもシステムに従う ([7.3](#73-テーマ切替とシステムカラー)) |
 | 8 | ランタイム | **.NET 10 (LTS)** | サポート期間が長いため |
-| 9 | FFmpeg | **当面 6.1 のまま** | 7.x への移行と同梱は、配布方法を決めるときに再検討する |
+| 9 | FFmpeg | **9.0 に移行した** ([22.31](#2231-ffmpeg-9-への移行)) | アニメーション WebP の読み込みなど。OS の FFmpeg (Ubuntu 24.04 は 6.1) は使えなくなるので、配布物への同梱が要る |
 | 10 | フォント | **Noto Sans JP を同梱** | 画面の日本語表示と、テキストオブジェクトの既定フォントに使う |
 
 ## 22. 実装状況
@@ -1081,7 +1081,7 @@ video-builder/
 
 | 項目 | 設計 | 現在の実装 | 理由 |
 |---|---|---|---|
-| FFmpeg のバージョン | 7.x | **6.1** (`FFmpeg.AutoGen 6.1.0.1`) | Ubuntu 24.04 LTS 標準の FFmpeg が 6.1 のため。`FFmpeg.AutoGen` はライブラリのメジャーバージョンと一致している必要がある。7.x への移行は同梱方針とあわせて決める |
+| FFmpeg のバージョン | 7.x | **9.0** (`FFmpeg.AutoGen 9.0.1.1`) | 以前は Ubuntu 24.04 LTS 標準に合わせて 6.1 だった。`FFmpeg.AutoGen` はライブラリのメジャーバージョンと一致している必要がある。[22.31](#2231-ffmpeg-9-への移行) |
 | 描画バックエンド | Skia GL | **GPU (EGL + OpenGL ES) と CPU の切替**。既定は自動 | 下の [22.5](#225-gpu-描画) を参照 |
 | クロマキー | SkSL シェーダ | C# のピクセル処理 (GPU 描画中も、この効果だけ CPU) | SkiaSharp 2.88 の `SKRuntimeEffect` は描画時にネイティブ側でクラッシュするため |
 | MVVM / DI / ログ | CommunityToolkit.Mvvm / MS.DI / Serilog | 未使用 (コードビハインド + 静的な `Svc`) | 画面数が少ない間は依存を増やさない。画面が増えたら導入する |
@@ -2071,6 +2071,27 @@ AviUtl 風の詳細編集とは別に、動画・写真を並べるだけで作�
 | デコードの速さの計測 (19 本) | 同時に 3 秒、1 本あたり 124〜290 fps と測れた | 1 本ずつ (約 0.25 秒 × 本数)、正しく 549 fps 前後 |
 
 プロキシを作っている間 (CPU を多く使う) に測ると、まだ遅めに測れることがある。
+
+
+### 22.31 FFmpeg 9 への移行
+
+`FFmpeg.AutoGen` を 6.1.0.1 から **9.0.1.1** に上げ、FFmpeg 9 (libavcodec.so.63) を読み込むようにした。主な目的はアニメーション WebP の読み込み (FFmpeg 9.0 で追加)。ほかに、7.0〜9.0 で入った不具合・脆弱性の修正、VVC / MV-HEVC / APV / ProRes RAW の読み込み、D3D12VA・Vulkan・AMF まわりの改善が使えるようになる。
+
+| 変更 | 内容 |
+|---|---|
+| エンコーダの対応形式 | `AVCodec.pix_fmts` / `sample_fmts` は 7.1 で非推奨、8.0 で削除された。代わりの `avcodec_get_supported_config` を使う (`CodecSupport`) |
+| 拡大縮小の方式 | `ffmpeg.SWS_BILINEAR` などの定数が `SwsFlags` の列挙に移った。引数は int のままなので、キャストして渡す |
+| 読み込むライブラリ | 探すファイル名をバインディングの `LibraryVersionMap` から決める (`libavcodec.so.63` / `avcodec-63.dll` / `libavcodec.63.dylib`)。見つからないときの文言も FFmpeg 9 にした |
+| 音声のチャンネル | すでに新しい `AVChannelLayout` (`ch_layout`) を使っていたので、変更なし |
+
+確かめたこと (FFmpeg 9.0.2 を ffmpeg.org のソースから共有ライブラリでビルドして使った):
+- テストはすべて通る (VideoBuilder.Tests 194、VideoBuilder.App.Tests 45)。1 回目だけ `PreviewSpeedTests.A_clip_starting_soon_is_opened_ahead_and_the_cut_shows_the_same_frames` が落ちたが、単独で 5 回・全体でさらに 2 回流して再現しなかった。負荷が高いときに先読みが間に合わない、時間に依存するテスト。
+- アニメーション WebP は `MediaInfo.Probe` で映像 (`webp_anim`、10 fps) として読める。
+
+まだのこと:
+- **アニメーション WebP を動画として扱う**: 拡張子 `webp` は画像オブジェクトになる (`EffectRegistry.ImageExtensions`)。また、アニメーション WebP は入れ物に長さが入っていない (`duration=N/A`) ため、`VideoReader` の長さが 0 になり、フレームを返さない。アニメーションかどうかを調べて動画オブジェクトにし、長さはフレームを数えて求める必要がある。GIF も同じ。
+- **配布**: Ubuntu 24.04 の標準の FFmpeg は 6.1 なので使えない。AppImage・Windows・macOS には FFmpeg 9 (LGPL ビルド) を同梱する。Flatpak のマニフェストはまだ 23.08 の ffmpeg-full 拡張 (6.1) を使っていて、このままでは FFmpeg を読み込めない。25.08 に上げ、FFmpeg 9 をモジュールとしてソースから作る。
+- ライセンスの表示 (「ヘルプ > ライセンス」、[11.3](#113-ffmpeg-の同梱))。
 
 ---
 

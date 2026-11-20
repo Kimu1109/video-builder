@@ -794,7 +794,7 @@ public static class ProxyGenerator
             {
                 if (_enc == null) return;
                 _sws = ffmpeg.sws_getCachedContext(_sws, f->width, f->height, (AVPixelFormat)f->format, job._w, job._h,
-                    _enc->pix_fmt, ffmpeg.SWS_BILINEAR, null, null, null);
+                    _enc->pix_fmt, (int)SwsFlags.SWS_BILINEAR, null, null, null);
                 if (_sws == null) throw new InvalidOperationException("縮小の準備に失敗");
                 FFmpegLoader.Check(ffmpeg.av_frame_make_writable(_scaled), "フレームを書き込めません");
                 ffmpeg.sws_scale(_sws, f->data, f->linesize, 0, f->height, _scaled->data, _scaled->linesize);

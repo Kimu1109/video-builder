@@ -178,15 +178,15 @@ internal static unsafe class VideoEncoderSetup
 
     private static AVPixelFormat PickPixelFormat(AVCodec* codec, bool hardware)
     {
-        if (codec->pix_fmts == null) return AVPixelFormat.AV_PIX_FMT_YUV420P;
+        var formats = CodecSupport.PixelFormats(codec);
+        if (formats.Count == 0) return AVPixelFormat.AV_PIX_FMT_YUV420P;
         // ソフトウェアは YUV420P、ハードウェアは NV12 (GPU が直接扱える並び) を優先する
         var preferred = hardware
             ? new[] { AVPixelFormat.AV_PIX_FMT_NV12, AVPixelFormat.AV_PIX_FMT_YUV420P }
             : new[] { AVPixelFormat.AV_PIX_FMT_YUV420P };
         foreach (var want in preferred)
-            for (var p = codec->pix_fmts; *p != AVPixelFormat.AV_PIX_FMT_NONE; p++)
-                if (*p == want) return want;
-        return codec->pix_fmts[0];
+            if (formats.Contains(want)) return want;
+        return formats[0];
     }
 
     /// <summary>品質の値 (小さいほど高画質) から、ビットレート指定しかできないエンコーダ用の目安を出す。</summary>

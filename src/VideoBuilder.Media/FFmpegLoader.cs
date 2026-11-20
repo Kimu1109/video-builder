@@ -13,6 +13,12 @@ public static unsafe class FFmpegLoader
     public static string? Error { get; private set; }
     public static string Version { get; private set; } = "";
 
+    /// <summary>バインディング (FFmpeg.AutoGen) が対応する FFmpeg のメジャーバージョン。</summary>
+    public const int RequiredMajor = 9;
+
+    /// <summary>バインディングが読み込む libavcodec のメジャーバージョン (FFmpeg 9 なら 63)。</summary>
+    private static int AvcodecMajor => ffmpeg.LibraryVersionMap["avcodec"];
+
     public static bool EnsureLoaded()
     {
         lock (Gate)
@@ -44,14 +50,15 @@ public static unsafe class FFmpegLoader
                 }
                 catch (Exception ex) { Error = ex.Message; }
             }
-            Error ??= "FFmpeg 6.1 の共有ライブラリ (libavcodec.so.60 など) が見つかりません";
+            Error ??= $"FFmpeg {RequiredMajor} の共有ライブラリ (libavcodec.so.{AvcodecMajor} など) が見つかりません";
             return false;
         }
     }
 
     private static bool HasLibrary(string dir)
     {
-        try { return Directory.EnumerateFiles(dir, "*avcodec*60*").Any(); }
+        // libavcodec.so.63 (Linux) / avcodec-63.dll (Windows) / libavcodec.63.dylib (macOS)
+        try { return Directory.EnumerateFiles(dir, $"*avcodec*{AvcodecMajor}*").Any(); }
         catch { return false; }
     }
 

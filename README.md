@@ -8,7 +8,8 @@ Avalonia UI / C# 製の、AviUtl ライクな動画編集アプリ (Linux 優先
 ## 必要なもの
 
 - .NET 10 SDK
-- FFmpeg 6.1 の共有ライブラリ (`libavcodec.so.60` など)。Ubuntu 24.04 なら `sudo apt install ffmpeg`
+- FFmpeg 9 の共有ライブラリ (`libavcodec.so.63` など)。Ubuntu 24.04 の標準の FFmpeg は 6.1 なので使えない。
+  [ffmpeg.org](https://ffmpeg.org/download.html) のソースから `--enable-shared` でビルドするか、共有ライブラリ版のビルド済みのものを入れる
 - OpenAL Soft (`libopenal1`)。音声の再生に使う
 - (任意) EGL / OpenGL ES (`libegl1`)。GPU 描画に使う。なければ CPU で描画する
 
