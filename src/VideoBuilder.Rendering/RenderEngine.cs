@@ -445,7 +445,10 @@ public sealed class RenderEngine : IDisposable
             else
             {
                 paint.BlendMode = BlendModeOf(blend);
-                if (!DrawSpriteParallel(canvas, target, sprite, paint))
+                // 出力 (CPU) の高品質な拡大は、Skia ではなく自前の並列のバイキュービックで行う (Skia は 4K で 90 ms ほどかかる)
+                bool enlarged = target != null && paint.FilterQuality == SKFilterQuality.High
+                    && PixelResample.DrawEnlarged(canvas, target, sprite.Image, -sprite.Cx, -sprite.Cy, paint);
+                if (!enlarged && !DrawSpriteParallel(canvas, target, sprite, paint))
                     canvas.DrawImage(sprite.Image, -sprite.Cx, -sprite.Cy, paint);
             }
         }

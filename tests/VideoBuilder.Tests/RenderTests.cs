@@ -1230,5 +1230,57 @@ public class OptimizationTests
         }
     }
 
+
+    [Fact]
+    public void Export_enlargement_on_the_cpu_matches_skia_bicubic()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-big-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            // 半透明を含む模様。3 倍 (1200x900) にすると、自前の拡大を使う大きさになる
+            var file = Path.Combine(dir, "pattern.png");
+            using (var bmp = new SKBitmap(new SKImageInfo(400, 300, SKColorType.Bgra8888, SKAlphaType.Premul)))
+            {
+                var rnd = new Random(9);
+                for (int y = 0; y < 300; y++)
+                    for (int x = 0; x < 400; x++)
+                        bmp.SetPixel(x, y, (x / 8 + y / 8) % 2 == 0 ? new SKColor((byte)rnd.Next(256), (byte)rnd.Next(256), (byte)rnd.Next(256), (byte)(x < 200 ? 255 : 120)) : SKColors.Transparent);
+                using var data = bmp.Encode(SKEncodedImageFormat.Png, 100);
+                File.WriteAllBytes(file, data.ToArray());
+            }
+            var p = new Project();
+            p.Settings.Width = 1600; p.Settings.Height = 1000;
+            var o = ObjectFactory.Create(EffectRegistry.Image, 0, 0, 10);
+            o.Main.Values["file"] = file;
+            o.Draw!.Tracks["scale"] = new AnimatedValue(300);
+            o.Draw.Tracks["x"] = new AnimatedValue(10.3);      // ピクセルの途中から始まる (端は一部だけかかる)
+            o.Draw.Tracks["alpha"] = new AnimatedValue(20);    // 不透明度 80%
+            p.Root.Objects.Add(o);
+            using var e = new RenderEngine();
+            using var mine = new SKBitmap(new SKImageInfo(1600, 1000, SKColorType.Bgra8888, SKAlphaType.Premul));
+            e.RenderToBitmap(p, p.Root, 0, mine);
+
+            using var skia = new SKBitmap(mine.Info);
+            using (var c = new SKCanvas(skia))
+            using (var image = SKImage.FromEncodedData(file))
+            using (var paint = new SKPaint { FilterQuality = SKFilterQuality.High, IsAntialias = true, Color = SKColors.White.WithAlpha(204) })
+            {
+                c.Clear(SKColors.Black);
+                c.Translate(800 + 10.3f, 500);
+                c.Scale(3);
+                c.DrawImage(image, -200, -150, paint);
+            }
+            var (mean, max) = Diff(mine, skia);
+            // 拡大した絵 (8 ビット) を不透明度 80% で重ねるので、1〜2 の丸めの差は出る。全体が明るく・暗くずれていないことも確かめる
+            var a = mine.Bytes; var b = skia.Bytes;
+            long signedSum = 0;
+            for (int i = 0; i < a.Length; i++) signedSum += a[i] - b[i];
+            double bias = (double)signedSum / a.Length;
+            Assert.True(mean < 0.3 && max <= 3 && Math.Abs(bias) < 0.05, $"mean={mean:0.000} max={max} bias={bias:0.000}");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
 }
 
