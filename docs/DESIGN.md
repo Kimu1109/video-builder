@@ -1096,7 +1096,7 @@ video-builder/
 | プラグインの入力・出力 | API が未定義 (映像・音声のエフェクト、メディアオブジェクト、移動方法は追加できる) |
 | Flatpak | マニフェストと作成スクリプトあり (`packaging/flatpak/`)。仮想ディスプレイで起動を確認 ([22.20.11](#222011-配布-flatpakwindows--macos-向けのビルド))。Flathub への登録は未着手 |
 | AppImage | AppDir を作って起動するところまで確認。`appimagetool` による AppImage 化は未確認 |
-| Windows / macOS | 発行 (`dotnet publish`) が通り、必要なネイティブライブラリが入ることを確認。実機での動作は未確認。GPU 描画は Linux と Windows (Windows は [22.35](#2235-windows-の-gpu-描画-angle)。macOS は CPU 描画) |
+| Windows / macOS | 発行 (`dotnet publish`) が通り、必要なネイティブライブラリが入ることを確認。Windows は実機で GPU 描画・ハードウェアエンコードまで確認した ([22.35](#2235-windows-の-gpu-描画-angle))。macOS は実機での動作が未確認で、CPU 描画 |
 
 ### 22.4 確認できていないこと
 
@@ -2180,8 +2180,17 @@ Windows でも GPU で描画する。Linux と同じ「OpenGL ES + Skia」の作
 | 動画のデコード | `DeviceHint` は Windows では (`cuda` か `d3d11va`, DXGI の番号)。Intel / AMD を選べば D3D11VA を先に試し、D3D11VA はその番号の GPU で開く (FFmpeg の D3D11VA のデバイス名は DXGI の列挙の番号)。NVIDIA を選んだときも、NVDEC が使えなければ同じ GPU で D3D11VA を使う |
 | 確かめ方 | CI (`ci.yml` の `windows-gpu`): GPU のない `windows-latest` で、WARP を使って GPU のテスト (CPU と GPU の絵の比較・GPU の選択・繰り返しの描画) を流す。`VB_REQUIRE_GPU=1` で、GPU を作れないことを失敗にする |
 
-画面との共有 (22.28) は、この段階ではまだ Linux だけ。Windows では、GPU で描いた絵を読み戻して表示する。
-実機 (Intel の内蔵 GPU + NVIDIA GeForce RTX 4070 Laptop GPU) での確認はこれから。
+画面との共有 (22.28) は、まだ Linux だけ。Windows では、GPU で描いた絵を読み戻して表示する。
+Windows の Avalonia (ANGLE) は GL のコンテキストの共有に対応していない (`UsesSharedContext => false`。コンテキストごとに別の Direct3D 11 のデバイス) ため、
+Linux と同じ方法は使えない。やるなら Direct3D 11 の共有テクスチャ (keyed mutex) を作って Avalonia に渡し、画面の描画の GPU も
+`Win32PlatformOptions.GraphicsAdapterSelectionCallback` で描画の GPU にそろえる必要がある。実機で読み戻しのままでも 2K 60fps で動いたので、後回しにした。
+
+**実機での確認 (2026-11-20)**: 内蔵 GPU (既定) と NVIDIA GeForce RTX 4070 Laptop GPU があるノート PC で確認した。
+
+- 描画方式の説明に ANGLE の GPU の名前が出て、GPU で描画できた。
+- 「使う GPU」に内蔵 GPU と RTX 4070 の両方が出て、どちらでも描画できた。
+- 2K の映像のプレビューが、どちらの GPU でも 60fps で安定した。CPU 描画との差はあまりなかった (プロキシが効いているため)。
+- ハードウェアエンコード (NVENC) での出力ができ、速かった。
 
 ---
 
