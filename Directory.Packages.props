@@ -8,6 +8,8 @@
     <PackageVersion Include="Avalonia.Controls.ColorPicker" Version="11.3.23" />
     <PackageVersion Include="Avalonia.Headless.XUnit" Version="11.3.23" />
     <PackageVersion Include="Avalonia.Skia" Version="11.3.23" />
+    <!-- Windows の GPU 描画 (ANGLE)。Avalonia.Win32 と同じ版にする -->
+    <PackageVersion Include="Avalonia.Angle.Windows.Natives" Version="2.1.25547.20250602" />
     <PackageVersion Include="SkiaSharp" Version="2.88.9" />
     <PackageVersion Include="SkiaSharp.NativeAssets.Linux" Version="2.88.9" />
     <PackageVersion Include="SkiaSharp.Skottie" Version="2.88.9" />

@@ -148,7 +148,7 @@ public sealed class PreviewService : IDisposable
         // GPU 描画は Linux でだけ確かめている (Windows の ANGLE などでは、まだ使わない)
         if (!OperatingSystem.IsLinux()) { reason = "この OS ではまだ使わない"; return false; }
         bool force = env == "1";
-        bool software = new[] { "llvmpipe", "softpipe", "swiftshader", "software" }.Any(k => shared.Renderer.Contains(k, StringComparison.OrdinalIgnoreCase));
+        bool software = GpuContext.IsSoftwareRenderer(shared.Renderer);
         if (software && mode == RenderBackend.Auto && !force) { reason = "画面の描画がソフトウェアの GPU"; return false; }
         if (!force && SafeSelectedAdapter() is { IsSoftware: false } adapter && !SameGpu(adapter.Name, shared.Renderer))
         {
@@ -164,12 +164,7 @@ public sealed class PreviewService : IDisposable
     }
 
     /// <summary>GL の GPU の名前 (GL_RENDERER) が同じ GPU を指しているか。後ろの "/PCIe/SSE2" などは比べない。</summary>
-    internal static bool SameGpu(string a, string b)
-    {
-        static string Core(string s) => (s.Split('/')[0]).Trim();
-        string x = Core(a), y = Core(b);
-        return x.Length > 0 && y.Length > 0 && (x.Contains(y, StringComparison.OrdinalIgnoreCase) || y.Contains(x, StringComparison.OrdinalIgnoreCase));
-    }
+    internal static bool SameGpu(string a, string b) => GpuContext.SameGpu(a, b);
 
     /// <summary>共有のテクスチャに描く SKSurface を作る (描画のスレッドで)。</summary>
     private static SKSurface? CreateTextureSurface(GRContext gr, SharedPreviewTarget.Texture texture)

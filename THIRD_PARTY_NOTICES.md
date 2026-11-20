@@ -40,6 +40,7 @@ video-builder 本体のソースは LGPL-3.0-or-later のままで、GPL-3.0 と
 | zlib | zlib ライセンス | https://zlib.net/ | Windows に同梱する |
 | OpenAL Soft | LGPL-2.0-or-later | https://openal-soft.org/ | 音声の再生。Flatpak には同梱する (1.24.3) |
 | Avalonia UI | MIT | https://avaloniaui.net/ | |
+| ANGLE | BSD-3-Clause | https://chromium.googlesource.com/angle/angle | Windows の画面の描画と GPU 描画 (Avalonia.Angle.Windows.Natives の `av_libglesv2.dll`) |
 | SkiaSharp / HarfBuzzSharp | MIT | https://github.com/mono/SkiaSharp | |
 | Svg.Skia | MIT | https://github.com/wieslawsoltes/Svg.Skia | |
 | FFmpeg.AutoGen | MIT | https://github.com/Ruslan-B/FFmpeg.AutoGen | |

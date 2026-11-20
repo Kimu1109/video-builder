@@ -27,9 +27,10 @@ public static unsafe class HardwareDecoding
     public static string? PreferredDevice { get; set; } = Environment.GetEnvironmentVariable("VIDEO_BUILDER_HWDEC") is { Length: > 0 } v && v != "off" ? v : null;
 
     /// <summary>
-    /// 描画に使う GPU に合わせるための問い合わせ (アプリが設定する)。("cuda" または "vaapi", VAAPI で開くデバイスファイル) を返す。
-    /// null を返せば、これまでどおり (NVIDIA → VAAPI の既定のデバイス)。
-    /// 例: CPU 内蔵の GPU を選んだら ("vaapi", "/dev/dri/renderD128")、NVIDIA を選んだら ("cuda", "")。
+    /// 描画に使う GPU に合わせるための問い合わせ (アプリが設定する)。(種類, デバイス) を返す。
+    /// Linux: ("cuda" または "vaapi", VAAPI で開くデバイスファイル)。Windows: ("cuda" または "d3d11va", D3D11VA で開く DXGI のアダプタの番号)。
+    /// null を返せば、これまでどおり (OS ごとの既定の順と、既定のデバイス)。
+    /// 例: CPU 内蔵の GPU を選んだら ("vaapi", "/dev/dri/renderD128") や ("d3d11va", "0")、NVIDIA を選んだら ("cuda", "") や ("cuda", "1")。
     /// </summary>
     public static Func<(string Kind, string Device)?>? DeviceHint { get; set; }
 
@@ -43,8 +44,11 @@ public static unsafe class HardwareDecoding
             var t = ffmpeg.av_hwdevice_find_type_by_name(PreferredDevice);
             return t == AVHWDeviceType.AV_HWDEVICE_TYPE_NONE ? Array.Empty<AVHWDeviceType>() : new[] { t };
         }
+        // Windows: NVIDIA (CUDA) → D3D11VA → DXVA2。描画に Intel / AMD の GPU を選んでいれば、D3D11VA を先に試す
         if (OperatingSystem.IsWindows())
-            return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 };
+            return Hint() is { Kind: "d3d11va" }
+                ? new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 }
+                : new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 };
         if (OperatingSystem.IsMacOS())
             return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_VIDEOTOOLBOX };
         // Linux: NVIDIA (CUDA) → Intel / AMD (VAAPI)。描画に Intel / AMD の GPU を選んでいれば、VAAPI を先に試す
@@ -64,6 +68,19 @@ public static unsafe class HardwareDecoding
         AVHWDeviceType.AV_HWDEVICE_TYPE_VDPAU => "VDPAU",
         _ => ffmpeg.av_hwdevice_get_type_name(type) ?? type.ToString(),
     };
+
+    /// <summary>
+    /// デバイスを開くときに FFmpeg に渡す文字列 (null なら既定のデバイス)。
+    /// VAAPI はデバイスファイル、D3D11VA は DXGI のアダプタの番号 (NVIDIA を選んだときも、NVDEC が使えなければ同じ GPU で D3D11VA を使う)。
+    /// </summary>
+    internal static string? DevicePath(AVHWDeviceType type)
+    {
+        var h = Hint();
+        if (h is not { Device.Length: > 0 } hint) return null;
+        if (type == AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI && hint.Kind == "vaapi") return hint.Device;
+        if (type == AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA && OperatingSystem.IsWindows() && hint.Device.All(char.IsAsciiDigit)) return hint.Device;
+        return null;
+    }
 
     private static (string Kind, string Device)? Hint()
     {
@@ -110,8 +127,8 @@ public static unsafe class HardwareDecoding
             try
             {
                 AVBufferRef* device = null;
-                // VAAPI は、描画に選んだ GPU と同じデバイスファイルで開く (何も指定しないと、多くは CPU 内蔵の GPU になる)
-                string? path = type == AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI && Hint() is { Kind: "vaapi", Device.Length: > 0 } h ? h.Device : null;
+                // VAAPI・D3D11VA は、描画に選んだ GPU と同じデバイスで開く (何も指定しないと、多くは CPU 内蔵の GPU になる)
+                string? path = DevicePath(type);
                 int ret = ffmpeg.av_hwdevice_ctx_create(&device, type, path, null, 0);
                 if (ret < 0 || device == null)
                 {
@@ -223,7 +240,7 @@ public static unsafe class HardwareDecoding
         foreach (var type in DeviceOrder())
         {
             bool ok = SharedDevice(type, out var error) != null;
-            string where = type == AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI && Hint() is { Kind: "vaapi", Device.Length: > 0 } h ? $" ({h.Device})" : "";
+            string where = DevicePath(type) is { } path ? type == AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA ? $" (GPU {path})" : $" ({path})" : "";
             lines.Add(ok ? $"{NameOf(type)}{where}: 使用可能" : error ?? $"{NameOf(type)}: 使用不可");
         }
         return lines.Count == 0 ? "使えるデバイスがありません" : string.Join("\n", lines);

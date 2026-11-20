@@ -398,7 +398,12 @@ public class GpuRenderTests
     public void Gpu_output_matches_cpu_output()
     {
         using var gpu = GpuContext.TryCreate(out var error);
-        if (gpu == null) { Console.WriteLine("BENCH gpu unavailable: " + error); return; }
+        if (gpu == null)
+        {
+            Assert.False(GpuSelectionTests.GpuRequired, "GPU を作れません: " + error);
+            Console.WriteLine("BENCH gpu unavailable: " + error);
+            return;
+        }
         Console.WriteLine($"BENCH gpu renderer={gpu.Renderer} vendor={gpu.Vendor} software={gpu.IsSoftware}");
         var p = RichProject();
         using var cpuEngine = new RenderEngine();

@@ -1082,7 +1082,7 @@ video-builder/
 | 項目 | 設計 | 現在の実装 | 理由 |
 |---|---|---|---|
 | FFmpeg のバージョン | 7.x | **9.0** (`FFmpeg.AutoGen 9.0.1.1`) | 以前は Ubuntu 24.04 LTS 標準に合わせて 6.1 だった。`FFmpeg.AutoGen` はライブラリのメジャーバージョンと一致している必要がある。[22.31](#2231-ffmpeg-9-への移行) |
-| 描画バックエンド | Skia GL | **GPU (EGL + OpenGL ES) と CPU の切替**。既定は自動 | 下の [22.5](#225-gpu-描画) を参照 |
+| 描画バックエンド | Skia GL | **GPU (EGL + OpenGL ES。Windows は ANGLE) と CPU の切替**。既定は自動 | 下の [22.5](#225-gpu-描画) と [22.35](#2235-windows-の-gpu-描画-angle) を参照 |
 | クロマキー | SkSL シェーダ | C# のピクセル処理 (GPU 描画中も、この効果だけ CPU) | SkiaSharp 2.88 の `SKRuntimeEffect` は描画時にネイティブ側でクラッシュするため |
 | MVVM / DI / ログ | CommunityToolkit.Mvvm / MS.DI / Serilog | 未使用 (コードビハインド + 静的な `Svc`) | 画面数が少ない間は依存を増やさない。画面が増えたら導入する |
 | フォント同梱 | Noto Sans JP などを同梱 | Inter と Noto Sans JP (Regular / Bold) を同梱。等幅フォントはシステムのものを使用 | – |
@@ -1096,7 +1096,7 @@ video-builder/
 | プラグインの入力・出力 | API が未定義 (映像・音声のエフェクト、メディアオブジェクト、移動方法は追加できる) |
 | Flatpak | マニフェストと作成スクリプトあり (`packaging/flatpak/`)。仮想ディスプレイで起動を確認 ([22.20.11](#222011-配布-flatpakwindows--macos-向けのビルド))。Flathub への登録は未着手 |
 | AppImage | AppDir を作って起動するところまで確認。`appimagetool` による AppImage 化は未確認 |
-| Windows / macOS | 発行 (`dotnet publish`) が通り、必要なネイティブライブラリが入ることを確認。実機での動作は未確認。GPU 描画は Linux のみ |
+| Windows / macOS | 発行 (`dotnet publish`) が通り、必要なネイティブライブラリが入ることを確認。実機での動作は未確認。GPU 描画は Linux と Windows (Windows は [22.35](#2235-windows-の-gpu-描画-angle)。macOS は CPU 描画) |
 
 ### 22.4 確認できていないこと
 
@@ -1118,7 +1118,7 @@ video-builder/
 | 設定 | 環境設定 > 描画方式: **自動** / GPU / CPU。自動では、本物の GPU があれば GPU、なければ CPU を使う (ソフトウェア実装の OpenGL は CPU 描画より遅いため選ばない) |
 | フォールバック | GPU コンテキストを作れない場合や読み戻しに失敗した場合は、自動的に CPU 描画になる |
 | 出力 | プレビューと同じ方式で描く。出力用スレッドが自分の GPU コンテキストを作る |
-| 対応 OS | Linux (`libEGL.so.1`)。Windows / macOS は未対応で、CPU 描画になる |
+| 対応 OS | Linux (`libEGL.so.1`)・Windows (Avalonia が同梱する ANGLE の `av_libglesv2.dll`。[22.35](#2235-windows-の-gpu-描画-angle))。macOS は未対応で、CPU 描画になる |
 | 確認方法 | 同じシーンを CPU と GPU で描いて比較するテスト (平均の差 0.27 / 255) |
 
 ---
@@ -1296,7 +1296,7 @@ Intel / AMD (VAAPI)・Apple (VideoToolbox) などほかのエンコーダは未�
 | OS | 試す順番 |
 |---|---|
 | Linux | NVDEC (CUDA) → VAAPI (Intel / AMD) |
-| Windows | NVDEC (CUDA) → D3D11VA → DXVA2 |
+| Windows | NVDEC (CUDA) → D3D11VA → DXVA2 (描画に Intel / AMD の GPU を選んでいれば D3D11VA を先に。D3D11VA はその GPU で開く) |
 | macOS | VideoToolbox |
 
 - **仕組み**: FFmpeg の hwaccel を使う。デコーダに GPU のデバイスを渡し、出力形式を GPU 上の形式にする。
@@ -2160,6 +2160,25 @@ NVENC のヘッダは、Linux (Ubuntu の `libffmpeg-nvenc-dev`)・Flatpak・Win
 - macOS の署名は ad-hoc だけ。配布するには、Developer ID での署名と公証 (notarization) が要る (Gatekeeper)。
 - Windows・macOS で、アプリ全体の動作はまだ確かめていない (22.4)。確かめたのは、同梱した FFmpeg だけでの読み込み・アニメーション WebP のデコードと描画・エンコーダがあること (package.yml で 13 件のテストが通る) まで。
 - Windows の arm64 は作っていない。
+
+### 22.35 Windows の GPU 描画 (ANGLE)
+
+Windows でも GPU で描画する。Linux と同じ「OpenGL ES + Skia」の作りのまま、OpenGL ES を ANGLE (Direct3D 11 の上で OpenGL ES を動かすライブラリ) で動かす。
+
+| 項目 | 内容 |
+|---|---|
+| ライブラリ | Avalonia が画面の描画に使う ANGLE (`Avalonia.Angle.Windows.Natives` の `av_libglesv2.dll`)。描画のライブラリ (`VideoBuilder.Rendering`) も同じパッケージを参照する (テストでも読めるように) |
+| EGL の呼び出し | `EglApi` が OS ごとにライブラリを読み、関数を取り出す (Linux は `libEGL.so.1` の `eglInitialize` など、ANGLE は `EGL_Initialize` のような名前か `eglGetProcAddress`)。それまでの `DllImport("libEGL.so.1")` をやめた |
+| GPU の一覧 | DXGI (`CreateDXGIFactory1` → `EnumAdapters1` → `GetDesc1`) で、名前・ベンダー・PCI の ID・LUID・ソフトウェアかどうかを調べる。Linux と違ってコンテキストを開かないので速い。ソフトウェアの GPU (Microsoft Basic Render Driver = WARP) も一覧に入るが、自動では選ばない |
+| 設定に覚える ID | `名前|ベンダー:デバイス:サブシステム` (例: `NVIDIA GeForce RTX 4070 Laptop GPU|10DE:2860:3FC817AA`)。LUID は起動のたびに変わるので覚えない |
+| 開き方 | `eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE)` に Direct3D 11 と、選んだ GPU の LUID (`EGL_ANGLE_platform_angle_d3d_luid`) を渡す。WARP は LUID ではなく WARP の指定 (`EGL_PLATFORM_ANGLE_DEVICE_TYPE_D3D_WARP_ANGLE`) で開く。開けなければ、Windows が選ぶ GPU の ANGLE で開く。その上は Linux と同じ (pbuffer → サーフェスなし、OpenGL ES 3 → 2) |
+| ソフトウェアの判定 | `GL_RENDERER` に llvmpipe・SwiftShader・"Basic Render Driver" などが入っていれば、ソフトウェアとして自動では使わない (`GpuContext.IsSoftwareRenderer`) |
+| 名前の照合 | ANGLE の `GL_RENDERER` は `ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Laptop GPU (0x00002860) Direct3D11 vs_5_0 ps_5_0, D3D11)` のような形なので、アダプタの名前が含まれていれば同じ GPU とみなす (`GpuContext.SameGpu`) |
+| 動画のデコード | `DeviceHint` は Windows では (`cuda` か `d3d11va`, DXGI の番号)。Intel / AMD を選べば D3D11VA を先に試し、D3D11VA はその番号の GPU で開く (FFmpeg の D3D11VA のデバイス名は DXGI の列挙の番号)。NVIDIA を選んだときも、NVDEC が使えなければ同じ GPU で D3D11VA を使う |
+| 確かめ方 | CI (`ci.yml` の `windows-gpu`): GPU のない `windows-latest` で、WARP を使って GPU のテスト (CPU と GPU の絵の比較・GPU の選択・繰り返しの描画) を流す。`VB_REQUIRE_GPU=1` で、GPU を作れないことを失敗にする |
+
+画面との共有 (22.28) は、この段階ではまだ Linux だけ。Windows では、GPU で描いた絵を読み戻して表示する。
+実機 (Intel の内蔵 GPU + NVIDIA GeForce RTX 4070 Laptop GPU) での確認はこれから。
 
 ---
 

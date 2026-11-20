@@ -33,11 +33,13 @@ public static class Svc
         Styles = new StyleStore(AppPaths.StyleDir);
         VideoBuilder.Media.HardwareDecoding.Mode = Settings.HardwareDecode;
         ApplyGpuAdapter();
-        // 動画のデコードも、描画に使う GPU に合わせる (CPU 内蔵の GPU を選べば VAAPI を、NVIDIA なら NVDEC を先に試す)
+        // 動画のデコードも、描画に使う GPU に合わせる (CPU 内蔵の GPU を選べば VAAPI / D3D11VA を、NVIDIA なら NVDEC を先に試す)
         VideoBuilder.Media.HardwareDecoding.DeviceHint = () =>
         {
             var a = VideoBuilder.Rendering.GpuContext.SelectedAdapter();
             if (a == null || a.IsSoftware) return null;
+            // Windows: D3D11VA は DXGI の列挙の番号で GPU を選ぶ (NVIDIA でも、NVDEC が使えないときの D3D11VA を同じ GPU にする)
+            if (OperatingSystem.IsWindows()) return (a.IsNvidia ? "cuda" : "d3d11va", a.Index.ToString(System.Globalization.CultureInfo.InvariantCulture));
             return a.IsNvidia ? ("cuda", "") : ("vaapi", a.RenderNode);
         };
         VideoBuilder.Media.ProxyStore.Directory = Path.Combine(AppPaths.CacheDir, "proxy");

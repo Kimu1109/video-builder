@@ -57,11 +57,90 @@ public class GpuSelectionTests
         finally { HardwareDecoding.DeviceHint = null; HardwareDecoding.ResetDevices(); }
     }
 
+    // Windows (DXGI) のアダプタ: 名前は DXGI のもの、ID は PCI の ID
+    private static readonly GpuAdapter WinIntel = new(0, "Intel(R) UHD Graphics", "Intel", "", "", false, 0x0000_0000_0001_2345, "8086:A788:3FC817AA");
+    private static readonly GpuAdapter WinNvidia = new(1, "NVIDIA GeForce RTX 4070 Laptop GPU", "NVIDIA", "", "", false, 0x0000_0000_0001_6789, "10DE:2860:3FC817AA");
+    private static readonly GpuAdapter Warp = new(2, "Microsoft Basic Render Driver", "Microsoft", "", "", true, 0x0000_0000_0000_9ABC, "1414:008C:00000000");
+
+    [Fact]
+    public void Windows_adapters_prefer_the_dedicated_gpu_and_are_found_again_after_a_reboot()
+    {
+        var list = new[] { WinIntel, WinNvidia, Warp };
+        Assert.Equal(WinNvidia, GpuContext.ChooseAdapter(list, null));
+        Assert.Equal("Intel(R) UHD Graphics|8086:A788:3FC817AA", WinIntel.Id);
+        Assert.Equal(WinIntel, GpuContext.ChooseAdapter(list, WinIntel.Id));
+        // LUID は起動するたびに変わるが、ID には入れていないので、同じ GPU が選ばれる
+        var afterReboot = new[] { WinIntel with { Luid = 0x7777 }, WinNvidia with { Luid = 0x8888 }, Warp };
+        Assert.Equal(afterReboot[0], GpuContext.ChooseAdapter(afterReboot, WinIntel.Id));
+        Assert.Equal(Warp, GpuContext.ChooseAdapter(new[] { Warp }, null));
+        Assert.Equal("Intel(R) UHD Graphics", WinIntel.Label);
+    }
+
+    [Fact]
+    public void Angle_renderer_names_are_matched_to_the_adapter_and_warp_counts_as_software()
+    {
+        const string angleNvidia = "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Laptop GPU (0x00002860) Direct3D11 vs_5_0 ps_5_0, D3D11)";
+        const string angleIntel = "ANGLE (Intel, Intel(R) UHD Graphics (0x0000A788) Direct3D11 vs_5_0 ps_5_0, D3D11)";
+        const string angleWarp = "ANGLE (Microsoft, Microsoft Basic Render Driver (0x0000008C) Direct3D11 vs_5_0 ps_5_0, D3D11)";
+        Assert.True(WinNvidia.Matches(angleNvidia));
+        Assert.True(WinIntel.Matches(angleIntel));
+        Assert.False(WinIntel.Matches(angleNvidia));
+        Assert.False(WinNvidia.Matches(angleIntel));
+        Assert.True(GpuContext.IsSoftwareRenderer(angleWarp));
+        Assert.True(GpuContext.IsSoftwareRenderer("llvmpipe (LLVM 20.1.2, 256 bits)"));
+        Assert.False(GpuContext.IsSoftwareRenderer(angleNvidia));
+    }
+
+    [Fact]
+    public void Hardware_decoding_on_windows_uses_d3d11va_on_the_chosen_gpu()
+    {
+        if (!OperatingSystem.IsWindows() || !FFmpegLoader.EnsureLoaded()) return;
+        try
+        {
+            HardwareDecoding.DeviceHint = () => ("d3d11va", "0");
+            Assert.Equal(FFmpeg.AutoGen.AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, HardwareDecoding.DeviceOrder()[0]);
+            Assert.Equal("0", HardwareDecoding.DevicePath(FFmpeg.AutoGen.AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA));
+            // NVIDIA を選んだら NVDEC が先。D3D11VA に戻るときも同じ GPU (番号) を使う
+            HardwareDecoding.DeviceHint = () => ("cuda", "1");
+            Assert.Equal(FFmpeg.AutoGen.AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, HardwareDecoding.DeviceOrder()[0]);
+            Assert.Equal("1", HardwareDecoding.DevicePath(FFmpeg.AutoGen.AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA));
+            Assert.Null(HardwareDecoding.DevicePath(FFmpeg.AutoGen.AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA));
+        }
+        finally { HardwareDecoding.DeviceHint = null; HardwareDecoding.ResetDevices(); }
+    }
+
+    /// <summary>CI (Windows) では、GPU を作れないことを失敗にする (VB_REQUIRE_GPU=1)。</summary>
+    internal static bool GpuRequired => Environment.GetEnvironmentVariable("VB_REQUIRE_GPU") == "1";
+
+    [Fact]
+    public void Windows_lists_gpus_with_dxgi_and_opens_them_with_angle()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var adapters = GpuContext.Adapters();
+        Assert.True(adapters.Count > 0, GpuContext.AdaptersError);
+        // ソフトウェアの GPU (WARP) は、GPU のない CI でも必ずある
+        var warp = adapters.FirstOrDefault(a => a.IsSoftware);
+        Assert.NotNull(warp);
+        Assert.Equal(1, adapters.Count(a => a.Id == warp!.Id));
+        var old = GpuContext.PreferredAdapter;
+        try
+        {
+            GpuContext.PreferredAdapter = warp!.Id;
+            using var ctx = GpuContext.TryCreate(out var error);
+            Assert.True(ctx != null, error);
+            Assert.Equal(warp, ctx!.Adapter);
+            Assert.StartsWith("ANGLE", ctx.Renderer);
+            Assert.True(ctx.IsSoftware, ctx.Renderer);
+        }
+        finally { GpuContext.PreferredAdapter = old; }
+    }
+
     [Fact]
     public void Enumerated_gpu_can_be_opened_by_its_id()
     {
-        // EGL のデバイス列挙ができる環境 (Mesa があれば、少なくともソフトウェアの GPU が出る) でだけ確かめる
+        // GPU を列挙できる環境 (Linux は Mesa があれば、Windows は WARP で、少なくともソフトウェアの GPU が出る) でだけ確かめる
         var adapters = GpuContext.Adapters();
+        if (GpuRequired) Assert.True(adapters.Count > 0, GpuContext.AdaptersError);
         if (adapters.Count == 0) return;
         var target = adapters[^1];
         var old = GpuContext.PreferredAdapter;
@@ -71,7 +150,7 @@ public class GpuSelectionTests
             using var ctx = GpuContext.TryCreate(out var error);
             Assert.True(ctx != null, error);
             Assert.Equal(target, ctx!.Adapter);
-            Assert.Equal(target.Name, ctx.Renderer);
+            Assert.True(target.Matches(ctx.Renderer), $"{target.Name} / {ctx.Renderer}");
         }
         finally { GpuContext.PreferredAdapter = old; }
     }

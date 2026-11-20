@@ -4,6 +4,8 @@
     <ProjectReference Include="../VideoBuilder.Media/VideoBuilder.Media.csproj" />
     <ProjectReference Include="../VideoBuilder.Plugin.Abstractions/VideoBuilder.Plugin.Abstractions.csproj" />
     <PackageReference Include="MoonSharp" />
+    <!-- Windows の GPU 描画に使う ANGLE (av_libglesv2.dll)。画面の描画 (Avalonia) と同じもの -->
+    <PackageReference Include="Avalonia.Angle.Windows.Natives" />
     <PackageReference Include="SkiaSharp" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
     <PackageReference Include="SkiaSharp.Skottie" />

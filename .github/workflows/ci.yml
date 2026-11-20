@@ -38,3 +38,16 @@ jobs:
         run: xvfb-run -a dotnet test --no-build
         env:
           VB_REQUIRE_FFMPEG: "1"
+
+  # Windows の GPU 描画 (ANGLE) を確かめる (設計書 22.35)。ランナーに GPU はないので、ソフトウェアの Direct3D 11 (WARP) で動かす
+  windows-gpu:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Test GPU rendering
+        env:
+          VB_REQUIRE_GPU: "1"
+        run: dotnet test tests/VideoBuilder.Tests --filter "FullyQualifiedName~Gpu" --logger "console;verbosity=normal"

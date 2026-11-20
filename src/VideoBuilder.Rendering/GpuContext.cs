@@ -1,22 +1,28 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Text;
 using SkiaSharp;
 
 namespace VideoBuilder.Rendering;
 
-/// <summary>このマシンの GPU 1 つ (EGL のデバイス)。</summary>
-/// <param name="Name">GL_RENDERER (例: "NVIDIA GeForce RTX 3060/PCIe/SSE2", "Mesa Intel(R) UHD Graphics 630 (CFL GT2)")。</param>
+/// <summary>このマシンの GPU 1 つ (Linux は EGL のデバイス、Windows は DXGI のアダプタ)。</summary>
+/// <param name="Index">一覧での位置。Windows では DXGI の列挙の番号でもある (動画のデコード (D3D11VA) で同じ GPU を使うのに使う)。</param>
+/// <param name="Name">Linux は GL_RENDERER (例: "NVIDIA GeForce RTX 3060/PCIe/SSE2", "Mesa Intel(R) UHD Graphics 630 (CFL GT2)")、
+/// Windows はアダプタの名前 (例: "NVIDIA GeForce RTX 4070 Laptop GPU", "Intel(R) UHD Graphics")。</param>
 /// <param name="DrmDevice">DRM のデバイスファイル (例: /dev/dri/card1)。分からなければ空。</param>
 /// <param name="RenderNode">DRM のレンダーノード (例: /dev/dri/renderD129)。動画のデコード (VAAPI) で同じ GPU を使うのに使う。</param>
-public sealed record GpuAdapter(int Index, string Name, string Vendor, string DrmDevice, string RenderNode, bool IsSoftware)
+/// <param name="Luid">Windows: アダプタの LUID (ANGLE にこの GPU を使わせるのに使う)。起動するたびに変わるので、設定には覚えない。</param>
+/// <param name="PciId">Windows: "ベンダー:デバイス:サブシステム" の ID (例: "10DE:2860:3FC817AA")。設定に覚える ID に使う。</param>
+public sealed record GpuAdapter(int Index, string Name, string Vendor, string DrmDevice, string RenderNode, bool IsSoftware, long Luid = 0, string PciId = "")
 {
-    /// <summary>設定に覚える ID。同じ型番の GPU が 2 つあっても区別できるよう、分かればデバイスファイルを付ける。</summary>
-    public string Id => DrmDevice.Length > 0 ? $"{Name}|{DrmDevice}" : Name;
+    /// <summary>設定に覚える ID。同じ型番の GPU が 2 つあっても区別できるよう、分かればデバイスファイル (Windows は PCI の ID) を付ける。</summary>
+    public string Id => DrmDevice.Length > 0 ? $"{Name}|{DrmDevice}" : PciId.Length > 0 ? $"{Name}|{PciId}" : Name;
 
     public bool IsNvidia => Has("NVIDIA") || Has("nouveau") || Vendor.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase) || Vendor.Contains("nouveau", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// 自動で選ぶときの優先度 (大きいほど優先)。外付けの GPU を、CPU 内蔵の GPU より優先する。
-    /// ソフトウェア (llvmpipe など) は負。
+    /// ソフトウェア (llvmpipe・WARP など) は負。
     /// </summary>
     public int Score
     {
@@ -36,49 +42,213 @@ public sealed record GpuAdapter(int Index, string Name, string Vendor, string Dr
 
     /// <summary>画面に出す名前 (デバイスファイルが分かれば添える)。</summary>
     public string Label => DrmDevice.Length > 0 ? $"{Name} ({DrmDevice})" : Name;
+
+    /// <summary>GL の GPU の名前 (GL_RENDERER) が、この GPU を指しているか。</summary>
+    public bool Matches(string renderer) => GpuContext.SameGpu(Name, renderer);
+}
+
+/// <summary>
+/// EGL の関数。Linux は libEGL.so.1、Windows は Avalonia が同梱する ANGLE (av_libglesv2.dll。OpenGL ES を Direct3D 11 の上で動かす) から取り出す。
+/// ANGLE の DLL は EGL の関数を "EGL_Initialize" のような名前で出しているので、その名前か eglGetProcAddress で探す。
+/// </summary>
+internal static unsafe class EglApi
+{
+    public static readonly string? LoadError;
+    /// <summary>ANGLE (Windows) の EGL。</summary>
+    public static readonly bool IsAngle;
+
+    public static readonly delegate* unmanaged<IntPtr, IntPtr> GetDisplay;
+    /// <summary>EGL 1.5 の eglGetPlatformDisplay (属性は intptr)。古い EGL にはないので null のことがある。</summary>
+    public static readonly delegate* unmanaged<int, IntPtr, IntPtr*, IntPtr> GetPlatformDisplay;
+    public static readonly delegate* unmanaged<IntPtr, int*, int*, int> Initialize;
+    public static readonly delegate* unmanaged<int, int> BindApi;
+    public static readonly delegate* unmanaged<IntPtr, int*, IntPtr*, int, int*, int> ChooseConfig;
+    public static readonly delegate* unmanaged<IntPtr, IntPtr, int*, IntPtr> CreatePbufferSurface;
+    public static readonly delegate* unmanaged<IntPtr, IntPtr, IntPtr, int*, IntPtr> CreateContext;
+    public static readonly delegate* unmanaged<IntPtr, IntPtr, IntPtr, IntPtr, int> MakeCurrent;
+    public static readonly delegate* unmanaged<IntPtr, IntPtr, int> DestroyContext;
+    public static readonly delegate* unmanaged<IntPtr, IntPtr, int> DestroySurface;
+    public static readonly delegate* unmanaged<IntPtr, int, IntPtr> QueryString;
+    public static readonly delegate* unmanaged<int> GetError;
+    private static readonly delegate* unmanaged<byte*, IntPtr> GetProcAddressPtr;
+
+    public static bool Available => LoadError == null;
+
+    static EglApi()
+    {
+        try
+        {
+            IntPtr lib;
+            if (OperatingSystem.IsWindows())
+            {
+                // アプリ・テストの出力フォルダ (runtimes/win-x64/native など) から探す
+                if (!NativeLibrary.TryLoad("av_libglesv2.dll", typeof(EglApi).Assembly, null, out lib)
+                    && !NativeLibrary.TryLoad("av_libglesv2", typeof(EglApi).Assembly, null, out lib))
+                {
+                    LoadError = "ANGLE (av_libglesv2.dll) が見つかりません";
+                    return;
+                }
+                IsAngle = true;
+            }
+            else if (OperatingSystem.IsLinux())
+            {
+                if (!NativeLibrary.TryLoad("libEGL.so.1", out lib) && !NativeLibrary.TryLoad("libEGL.so", out lib))
+                {
+                    LoadError = "EGL (libEGL.so.1) が見つかりません";
+                    return;
+                }
+            }
+            else
+            {
+                LoadError = "この OS では GPU 描画にまだ対応していません";
+                return;
+            }
+
+            GetProcAddressPtr = (delegate* unmanaged<byte*, IntPtr>)Export(lib, "eglGetProcAddress", null);
+            if (GetProcAddressPtr == null) { LoadError = "eglGetProcAddress がありません"; return; }
+
+            var missing = new List<string>();
+            IntPtr Need(string name)
+            {
+                var p = Export(lib, name, GetProcAddressPtr);
+                if (p == IntPtr.Zero) missing.Add(name);
+                return p;
+            }
+            GetDisplay = (delegate* unmanaged<IntPtr, IntPtr>)Need("eglGetDisplay");
+            Initialize = (delegate* unmanaged<IntPtr, int*, int*, int>)Need("eglInitialize");
+            BindApi = (delegate* unmanaged<int, int>)Need("eglBindAPI");
+            ChooseConfig = (delegate* unmanaged<IntPtr, int*, IntPtr*, int, int*, int>)Need("eglChooseConfig");
+            CreatePbufferSurface = (delegate* unmanaged<IntPtr, IntPtr, int*, IntPtr>)Need("eglCreatePbufferSurface");
+            CreateContext = (delegate* unmanaged<IntPtr, IntPtr, IntPtr, int*, IntPtr>)Need("eglCreateContext");
+            MakeCurrent = (delegate* unmanaged<IntPtr, IntPtr, IntPtr, IntPtr, int>)Need("eglMakeCurrent");
+            DestroyContext = (delegate* unmanaged<IntPtr, IntPtr, int>)Need("eglDestroyContext");
+            DestroySurface = (delegate* unmanaged<IntPtr, IntPtr, int>)Need("eglDestroySurface");
+            QueryString = (delegate* unmanaged<IntPtr, int, IntPtr>)Need("eglQueryString");
+            GetError = (delegate* unmanaged<int>)Need("eglGetError");
+            GetPlatformDisplay = (delegate* unmanaged<int, IntPtr, IntPtr*, IntPtr>)Export(lib, "eglGetPlatformDisplay", GetProcAddressPtr);
+            if (missing.Count > 0) LoadError = "EGL の関数がありません: " + string.Join(", ", missing);
+        }
+        catch (Exception ex)
+        {
+            LoadError = ex.Message;
+        }
+    }
+
+    /// <summary>ライブラリが出している関数を探す。なければ (拡張機能の関数など) eglGetProcAddress で探す。</summary>
+    private static IntPtr Export(IntPtr lib, string name, delegate* unmanaged<byte*, IntPtr> getProc)
+    {
+        if (NativeLibrary.TryGetExport(lib, name, out var p)) return p;
+        // ANGLE: eglInitialize → EGL_Initialize
+        if (name.StartsWith("egl", StringComparison.Ordinal) && NativeLibrary.TryGetExport(lib, "EGL_" + name[3..], out p)) return p;
+        return getProc == null ? IntPtr.Zero : Call(getProc, name);
+    }
+
+    private static IntPtr Call(delegate* unmanaged<byte*, IntPtr> getProc, string name)
+    {
+        var bytes = Encoding.ASCII.GetBytes(name + "\0");
+        fixed (byte* b = bytes) return getProc(b);
+    }
+
+    /// <summary>EGL・OpenGL ES の関数 (拡張機能のものも) を名前で探す。</summary>
+    public static IntPtr Proc(string name) => GetProcAddressPtr == null ? IntPtr.Zero : Call(GetProcAddressPtr, name);
+
+    public static string String(IntPtr display, int name)
+    {
+        var p = QueryString(display, name);
+        return p == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(p) ?? "";
+    }
+}
+
+/// <summary>Windows の GPU (DXGI のアダプタ) の一覧。</summary>
+[SupportedOSPlatform("windows")]
+internal static unsafe class DxgiAdapters
+{
+    [DllImport("dxgi.dll")] private static extern int CreateDXGIFactory1(Guid* riid, IntPtr* factory);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct AdapterDesc1
+    {
+        public fixed char Description[128];
+        public uint VendorId, DeviceId, SubSysId, Revision;
+        public nuint DedicatedVideoMemory, DedicatedSystemMemory, SharedSystemMemory;
+        public uint LuidLow;
+        public int LuidHigh;
+        public uint Flags;
+    }
+
+    private const int DXGI_ERROR_NOT_FOUND = unchecked((int)0x887A0002);
+    private const uint DXGI_ADAPTER_FLAG_SOFTWARE = 2;
+    private static readonly Guid IID_IDXGIFactory1 = new("770aae78-f26f-4dba-a829-253c83d1b387");
+
+    public static string VendorName(uint id) => id switch
+    {
+        0x10DE => "NVIDIA",
+        0x1002 or 0x1022 => "AMD",
+        0x8086 => "Intel",
+        0x1414 => "Microsoft",
+        0x5143 => "Qualcomm",
+        _ => $"0x{id:X4}",
+    };
+
+    /// <summary>DXGI の列挙の順に返す (番号は FFmpeg の D3D11VA のデバイス番号と同じ)。</summary>
+    public static List<GpuAdapter> Enumerate()
+    {
+        var list = new List<GpuAdapter>();
+        IntPtr factory;
+        var iid = IID_IDXGIFactory1;
+        int hr = CreateDXGIFactory1(&iid, &factory);
+        if (hr < 0 || factory == IntPtr.Zero) throw new InvalidOperationException($"DXGI を使えません (0x{hr:X8})");
+        try
+        {
+            var enumAdapters1 = (delegate* unmanaged[Stdcall]<IntPtr, uint, IntPtr*, int>)(*(IntPtr**)factory)[12];
+            for (uint i = 0; i < 32; i++)
+            {
+                IntPtr adapter;
+                hr = enumAdapters1(factory, i, &adapter);
+                if (hr == DXGI_ERROR_NOT_FOUND || hr < 0 || adapter == IntPtr.Zero) break;
+                try
+                {
+                    var getDesc1 = (delegate* unmanaged[Stdcall]<IntPtr, AdapterDesc1*, int>)(*(IntPtr**)adapter)[10];
+                    AdapterDesc1 d;
+                    if (getDesc1(adapter, &d) < 0) continue;
+                    string name = new string(d.Description).TrimEnd('\0').Trim();
+                    bool software = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 || d.VendorId == 0x1414 && d.DeviceId == 0x8C;
+                    long luid = ((long)d.LuidHigh << 32) | d.LuidLow;
+                    list.Add(new GpuAdapter((int)i, name, VendorName(d.VendorId), "", "", software, luid, $"{d.VendorId:X4}:{d.DeviceId:X4}:{d.SubSysId:X8}"));
+                }
+                finally { Release(adapter); }
+            }
+        }
+        finally { Release(factory); }
+        return list;
+    }
+
+    private static void Release(IntPtr unknown) => ((delegate* unmanaged[Stdcall]<IntPtr, uint>)(*(IntPtr**)unknown)[2])(unknown);
 }
 
 /// <summary>
 /// 画面に出さない (オフスクリーンの) OpenGL ES コンテキストと、その上の Skia GPU コンテキスト。
-/// 作ったスレッドでだけ使う。現在は EGL が使える環境 (Linux) に対応。
+/// 作ったスレッドでだけ使う。Linux は EGL、Windows は ANGLE (Direct3D 11 の上の OpenGL ES) で作る。
 /// <para>
-/// GPU が複数ある (CPU 内蔵 + 外付けなど) ときは、EGL のデバイス列挙 (EGL_EXT_device_enumeration / EGL_EXT_platform_device) で
-/// 1 つずつ開けるので、<see cref="PreferredAdapter"/> で選んだもの、なければ外付けを優先して使う。
+/// GPU が複数ある (CPU 内蔵 + 外付けなど) ときは、<see cref="PreferredAdapter"/> で選んだもの、なければ外付けを優先して使う。
 /// 何もしないと、デスクトップの表示に使っている GPU (多くは CPU 内蔵) になってしまう。
+/// Linux は EGL のデバイス列挙 (EGL_EXT_device_enumeration / EGL_EXT_platform_device) で、
+/// Windows は DXGI で列挙したアダプタの LUID を ANGLE に渡して (EGL_ANGLE_platform_angle_d3d_luid)、1 つずつ開く。
 /// </para>
 /// </summary>
 public sealed unsafe class GpuContext : IDisposable
 {
-    private const string Egl = "libEGL.so.1";
-
-    [DllImport(Egl)] private static extern IntPtr eglGetDisplay(IntPtr nativeDisplay);
-    [DllImport(Egl)] private static extern IntPtr eglGetPlatformDisplay(int platform, IntPtr nativeDisplay, IntPtr* attribs);
-    [DllImport(Egl)] private static extern int eglInitialize(IntPtr display, out int major, out int minor);
-    [DllImport(Egl)] private static extern int eglTerminate(IntPtr display);
-    [DllImport(Egl)] private static extern int eglBindAPI(int api);
-    [DllImport(Egl)] private static extern int eglChooseConfig(IntPtr display, int[] attribs, IntPtr* configs, int size, out int count);
-    [DllImport(Egl)] private static extern IntPtr eglCreatePbufferSurface(IntPtr display, IntPtr config, int[] attribs);
-    [DllImport(Egl)] private static extern IntPtr eglCreateContext(IntPtr display, IntPtr config, IntPtr share, int[] attribs);
-    [DllImport(Egl)] private static extern int eglMakeCurrent(IntPtr display, IntPtr draw, IntPtr read, IntPtr context);
-    [DllImport(Egl)] private static extern int eglDestroyContext(IntPtr display, IntPtr context);
-    [DllImport(Egl)] private static extern int eglDestroySurface(IntPtr display, IntPtr surface);
-    [DllImport(Egl, CharSet = CharSet.Ansi)] private static extern IntPtr eglGetProcAddress(string name);
-    [DllImport(Egl)] private static extern IntPtr eglQueryString(IntPtr display, int name);
-
-    // 拡張機能の関数 (eglGetProcAddress で取り出す)
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int EglQueryDevices(int max, IntPtr* devices, out int count);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr EglQueryDeviceString(IntPtr device, int name);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr EglGetPlatformDisplayExt(int platform, IntPtr nativeDisplay, int* attribs);
-
     private const int EGL_NONE = 0x3038, EGL_SURFACE_TYPE = 0x3033, EGL_PBUFFER_BIT = 1, EGL_RENDERABLE_TYPE = 0x3040;
     private const int EGL_OPENGL_ES2_BIT = 4, EGL_OPENGL_ES3_BIT = 0x40, EGL_OPENGL_ES_API = 0x30A0;
     private const int EGL_RED_SIZE = 0x3024, EGL_GREEN_SIZE = 0x3023, EGL_BLUE_SIZE = 0x3022, EGL_ALPHA_SIZE = 0x3021;
     private const int EGL_WIDTH = 0x3057, EGL_HEIGHT = 0x3056, EGL_CONTEXT_CLIENT_VERSION = 0x3098;
     private const int EGL_PLATFORM_SURFACELESS_MESA = 0x31DD, EGL_PLATFORM_DEVICE_EXT = 0x313F, EGL_EXTENSIONS = 0x3055;
     private const int EGL_DRM_DEVICE_FILE_EXT = 0x3233, EGL_DRM_RENDER_NODE_FILE_EXT = 0x3377;
+    // ANGLE (EGL_ANGLE_platform_angle・EGL_ANGLE_platform_angle_d3d・EGL_ANGLE_platform_angle_d3d_luid)
+    private const int EGL_PLATFORM_ANGLE_ANGLE = 0x3202, EGL_PLATFORM_ANGLE_TYPE_ANGLE = 0x3203, EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE = 0x3208;
+    private const int EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE = 0x3209, EGL_PLATFORM_ANGLE_DEVICE_TYPE_D3D_WARP_ANGLE = 0x320B;
+    private const int EGL_PLATFORM_ANGLE_D3D_LUID_HIGH_ANGLE = 0x34A0, EGL_PLATFORM_ANGLE_D3D_LUID_LOW_ANGLE = 0x34A1;
     private const int GL_VENDOR = 0x1F00, GL_RENDERER = 0x1F01;
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr GlGetString(int name);
 
     private IntPtr _display, _surface, _context;
     private GRGlInterface? _interface;
@@ -86,7 +256,7 @@ public sealed unsafe class GpuContext : IDisposable
     public GRContext Context { get; private set; } = null!;
     public string Renderer { get; private set; } = "";
     public string Vendor { get; private set; } = "";
-    /// <summary>CPU でエミュレートしている (llvmpipe など)。この場合は CPU 描画の方が速い。</summary>
+    /// <summary>CPU でエミュレートしている (llvmpipe・WARP など)。この場合は CPU 描画の方が速い。</summary>
     public bool IsSoftware { get; private set; }
 
     private GpuContext() { }
@@ -97,15 +267,31 @@ public sealed unsafe class GpuContext : IDisposable
     /// </summary>
     public static string? PreferredAdapter { get; set; } = Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU") is { Length: > 0 } v ? v : null;
 
-    /// <summary>このコンテキストの GPU (デバイス列挙で開いたときだけ。デスクトップの GPU で開いたときは null)。</summary>
+    /// <summary>このコンテキストの GPU (列挙した GPU を選んで開いたときだけ。デスクトップの GPU で開いたときは null)。</summary>
     public GpuAdapter? Adapter { get; private set; }
+
+    /// <summary>GL_RENDERER が CPU でエミュレートしている GPU (llvmpipe・WARP など) のものか。</summary>
+    public static bool IsSoftwareRenderer(string renderer) =>
+        new[] { "llvmpipe", "softpipe", "swiftshader", "software", "Basic Render Driver" }.Any(k => renderer.Contains(k, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// 2 つの GPU の名前 (GL_RENDERER やアダプタの名前) が同じ GPU を指しているか。後ろの "/PCIe/SSE2" などは比べない。
+    /// ANGLE の GL_RENDERER ("ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Laptop GPU (0x00002860) Direct3D11 vs_5_0 ps_5_0, D3D11)") にも、
+    /// アダプタの名前が含まれていれば同じとみなす。
+    /// </summary>
+    public static bool SameGpu(string a, string b)
+    {
+        static string Core(string s) => (s.Split('/')[0]).Trim();
+        string x = Core(a), y = Core(b);
+        return x.Length > 0 && y.Length > 0 && (x.Contains(y, StringComparison.OrdinalIgnoreCase) || y.Contains(x, StringComparison.OrdinalIgnoreCase));
+    }
 
     private static readonly object EnumerateGate = new();
     private static List<(GpuAdapter Adapter, IntPtr Device)>? _adapters;
     private static string? _enumerateError;
 
     /// <summary>
-    /// このマシンの GPU の一覧 (EGL のデバイス列挙)。1 つずつ開いて名前を調べるので少し時間がかかる。結果は覚えておく。
+    /// このマシンの GPU の一覧。Linux では 1 つずつ開いて名前を調べるので少し時間がかかる。結果は覚えておく。
     /// GL のコンテキストを一時的に作るので、画面の描画に使っているスレッドからは呼ばないこと (Task.Run などで呼ぶ)。
     /// </summary>
     public static IReadOnlyList<GpuAdapter> Adapters() => EnumerateDevices().Select(x => x.Adapter).ToList();
@@ -119,39 +305,14 @@ public sealed unsafe class GpuContext : IDisposable
         {
             if (_adapters != null) return _adapters;
             _adapters = new List<(GpuAdapter, IntPtr)>();
-            if (!OperatingSystem.IsLinux()) { _enumerateError = "この OS では GPU 描画にまだ対応していません"; return _adapters; }
             try
             {
-                var ext = Marshal.PtrToStringAnsi(eglQueryString(IntPtr.Zero, EGL_EXTENSIONS)) ?? "";
-                if (!ext.Contains("EGL_EXT_device_enumeration") && !ext.Contains("EGL_EXT_device_base") || !ext.Contains("EGL_EXT_platform_device"))
-                {
-                    _enumerateError = "GPU を 1 つずつ選ぶ機能 (EGL_EXT_platform_device) がありません";
-                    return _adapters;
-                }
-                var queryDevices = Proc<EglQueryDevices>("eglQueryDevicesEXT");
-                var queryString = Proc<EglQueryDeviceString>("eglQueryDeviceStringEXT");
-                var getDisplay = Proc<EglGetPlatformDisplayExt>("eglGetPlatformDisplayEXT");
-                if (queryDevices == null || queryString == null || getDisplay == null) { _enumerateError = "EGL の関数がありません"; return _adapters; }
-                var devices = new IntPtr[16];
-                int count;
-                fixed (IntPtr* d = devices) if (queryDevices(devices.Length, d, out count) == 0) { _enumerateError = "GPU を列挙できません"; return _adapters; }
-                for (int i = 0; i < count; i++)
-                {
-                    var device = devices[i];
-                    string devExt = Marshal.PtrToStringAnsi(queryString(device, EGL_EXTENSIONS)) ?? "";
-                    string drm = devExt.Contains("EGL_EXT_device_drm") ? Marshal.PtrToStringAnsi(queryString(device, EGL_DRM_DEVICE_FILE_EXT)) ?? "" : "";
-                    string render = devExt.Contains("EGL_EXT_device_drm_render_node") ? Marshal.PtrToStringAnsi(queryString(device, EGL_DRM_RENDER_NODE_FILE_EXT)) ?? "" : "";
-                    if (render.Length == 0 && drm.StartsWith("/dev/dri/card") && int.TryParse(drm["/dev/dri/card".Length..], out int card))
-                        render = $"/dev/dri/renderD{128 + card}";   // 古いドライバ: 番号の対応から推測する (多くの環境で card N ↔ renderD(128+N))
-                    // 名前 (GL_RENDERER) は、実際にコンテキストを作って調べる
-                    using var ctx = OpenDevice(getDisplay, device, out _);
-                    if (ctx == null) continue;
-                    bool software = ctx.IsSoftware || devExt.Contains("EGL_MESA_device_software");
-                    _adapters.Add((new GpuAdapter(_adapters.Count, ctx.Renderer, ctx.Vendor, drm, File.Exists(render) ? render : "", software), device));
-                }
-                if (_adapters.Count == 0) _enumerateError = "開ける GPU がありません";
+                if (OperatingSystem.IsWindows()) EnumerateWindows(_adapters);
+                else if (OperatingSystem.IsLinux()) EnumerateLinux(_adapters);
+                else _enumerateError = "この OS では GPU 描画にまだ対応していません";
+                if (_enumerateError == null && _adapters.Count == 0) _enumerateError = "開ける GPU がありません";
             }
-            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or InvalidOperationException)
             {
                 _enumerateError = ex.Message;
             }
@@ -159,22 +320,88 @@ public sealed unsafe class GpuContext : IDisposable
         }
     }
 
-    private static T? Proc<T>(string name) where T : Delegate
+    [SupportedOSPlatform("windows")]
+    private static void EnumerateWindows(List<(GpuAdapter Adapter, IntPtr Device)> result)
     {
-        var p = eglGetProcAddress(name);
-        return p == IntPtr.Zero ? null : Marshal.GetDelegateForFunctionPointer<T>(p);
+        // DXGI の名前で十分なので、ここでは開かない (開くのは使うときだけ)
+        foreach (var a in DxgiAdapters.Enumerate()) result.Add((a, IntPtr.Zero));
     }
 
-    private static GpuContext? OpenDevice(EglGetPlatformDisplayExt getDisplay, IntPtr device, out string reason)
+    private static void EnumerateLinux(List<(GpuAdapter Adapter, IntPtr Device)> result)
+    {
+        if (!EglApi.Available) { _enumerateError = EglApi.LoadError; return; }
+        var ext = EglApi.String(IntPtr.Zero, EGL_EXTENSIONS);
+        if (!ext.Contains("EGL_EXT_device_enumeration") && !ext.Contains("EGL_EXT_device_base") || !ext.Contains("EGL_EXT_platform_device"))
+        {
+            _enumerateError = "GPU を 1 つずつ選ぶ機能 (EGL_EXT_platform_device) がありません";
+            return;
+        }
+        var queryDevices = (delegate* unmanaged<int, IntPtr*, int*, int>)EglApi.Proc("eglQueryDevicesEXT");
+        var queryString = (delegate* unmanaged<IntPtr, int, IntPtr>)EglApi.Proc("eglQueryDeviceStringEXT");
+        if (queryDevices == null || queryString == null || EglApi.Proc("eglGetPlatformDisplayEXT") == IntPtr.Zero) { _enumerateError = "EGL の関数がありません"; return; }
+        string Str(IntPtr device, int name) { var p = queryString(device, name); return p == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(p) ?? ""; }
+        var devices = new IntPtr[16];
+        int count;
+        fixed (IntPtr* d = devices) if (queryDevices(devices.Length, d, &count) == 0) { _enumerateError = "GPU を列挙できません"; return; }
+        for (int i = 0; i < count; i++)
+        {
+            var device = devices[i];
+            string devExt = Str(device, EGL_EXTENSIONS);
+            string drm = devExt.Contains("EGL_EXT_device_drm") ? Str(device, EGL_DRM_DEVICE_FILE_EXT) : "";
+            string render = devExt.Contains("EGL_EXT_device_drm_render_node") ? Str(device, EGL_DRM_RENDER_NODE_FILE_EXT) : "";
+            if (render.Length == 0 && drm.StartsWith("/dev/dri/card") && int.TryParse(drm["/dev/dri/card".Length..], out int card))
+                render = $"/dev/dri/renderD{128 + card}";   // 古いドライバ: 番号の対応から推測する (多くの環境で card N ↔ renderD(128+N))
+            // 名前 (GL_RENDERER) は、実際にコンテキストを作って調べる
+            using var ctx = OpenDisplay(PlatformDisplayExt(EGL_PLATFORM_DEVICE_EXT, device, null), out _);
+            if (ctx == null) continue;
+            bool software = ctx.IsSoftware || devExt.Contains("EGL_MESA_device_software");
+            result.Add((new GpuAdapter(result.Count, ctx.Renderer, ctx.Vendor, drm, File.Exists(render) ? render : "", software), device));
+        }
+    }
+
+    /// <summary>eglGetPlatformDisplayEXT (属性は int)。</summary>
+    private static IntPtr PlatformDisplayExt(int platform, IntPtr native, int[]? attribs)
+    {
+        var f = (delegate* unmanaged<int, IntPtr, int*, IntPtr>)EglApi.Proc("eglGetPlatformDisplayEXT");
+        if (f == null) return IntPtr.Zero;
+        fixed (int* a = attribs) return f(platform, native, a);
+    }
+
+    /// <summary>EGL のディスプレイを初期化して、その上にコンテキストを作る。</summary>
+    private static GpuContext? OpenDisplay(IntPtr display, out string reason)
     {
         reason = "";
-        var display = getDisplay(EGL_PLATFORM_DEVICE_EXT, device, null);
         if (display == IntPtr.Zero) { reason = "ディスプレイなし"; return null; }
-        if (eglInitialize(display, out _, out _) == 0) { reason = "初期化に失敗"; return null; }
+        int major, minor;
+        if (EglApi.Initialize(display, &major, &minor) == 0) { reason = $"初期化に失敗 (0x{EglApi.GetError():X4})"; return null; }
         var ctx = new GpuContext { _display = display };
         if (ctx.Setup(out reason)) return ctx;
         ctx.Dispose();
         return null;
+    }
+
+    /// <summary>
+    /// Windows: ANGLE (Direct3D 11) で開く。adapter を渡せば、その GPU (LUID で指定) を使う。null なら Windows が選ぶ GPU。
+    /// ソフトウェアの GPU (WARP) は LUID ではなく、WARP を使う指定で開く。
+    /// </summary>
+    private static GpuContext? OpenAngle(GpuAdapter? adapter, out string reason)
+    {
+        var attribs = new List<int> { EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE };
+        if (adapter is { IsSoftware: true })
+            attribs.AddRange(new[] { EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_D3D_WARP_ANGLE });
+        else if (adapter != null)
+        {
+            if (!EglApi.String(IntPtr.Zero, EGL_EXTENSIONS).Contains("EGL_ANGLE_platform_angle_d3d_luid"))
+            {
+                reason = "GPU を選ぶ機能 (EGL_ANGLE_platform_angle_d3d_luid) がありません";
+                return null;
+            }
+            attribs.AddRange(new[] { EGL_PLATFORM_ANGLE_D3D_LUID_HIGH_ANGLE, (int)(adapter.Luid >> 32), EGL_PLATFORM_ANGLE_D3D_LUID_LOW_ANGLE, (int)(uint)adapter.Luid });
+        }
+        attribs.Add(EGL_NONE);
+        var ctx = OpenDisplay(PlatformDisplayExt(EGL_PLATFORM_ANGLE_ANGLE, IntPtr.Zero, attribs.ToArray()), out reason);
+        if (ctx != null) ctx.Adapter = adapter;
+        return ctx;
     }
 
     /// <summary>設定 (<see cref="PreferredAdapter"/>) と一覧から、使う GPU を決める。一覧がなければ null。</summary>
@@ -198,39 +425,51 @@ public sealed unsafe class GpuContext : IDisposable
     public static GpuContext? TryCreate(out string? error)
     {
         error = null;
-        if (!OperatingSystem.IsLinux()) { error = "この OS では GPU 描画にまだ対応していません"; return null; }
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsWindows()) { error = "この OS では GPU 描画にまだ対応していません"; return null; }
+        if (!EglApi.Available) { error = EglApi.LoadError; return null; }
         var errors = new List<string>();
 
-        // 1. 選んだ GPU (自動なら外付けを優先) をデバイス列挙で開く
+        // 1. 選んだ GPU (自動なら外付けを優先) を開く
         var devices = EnumerateDevices();
         var chosen = ChooseAdapter(devices.Select(x => x.Adapter).ToList(), PreferredAdapter);
         // ソフトウェアしか見つからず、選んでもいなければ、これまでどおりデスクトップの GPU から試す
         if (chosen is { IsSoftware: true } && string.IsNullOrEmpty(PreferredAdapter)) chosen = null;
         if (chosen != null)
         {
-            var getDisplay = Proc<EglGetPlatformDisplayExt>("eglGetPlatformDisplayEXT");
-            if (getDisplay != null)
+            try
             {
-                var ctx = OpenDevice(getDisplay, devices[chosen.Index].Device, out var reason);
-                if (ctx != null) { ctx.Adapter = chosen; return ctx; }
+                string reason;
+                GpuContext? ctx;
+                if (EglApi.IsAngle) ctx = OpenAngle(chosen, out reason);
+                else
+                {
+                    var device = devices.First(x => x.Adapter == chosen).Device;
+                    ctx = OpenDisplay(PlatformDisplayExt(EGL_PLATFORM_DEVICE_EXT, device, null), out reason);
+                    if (ctx != null) ctx.Adapter = chosen;
+                }
+                if (ctx != null) return ctx;
                 errors.Add($"{chosen.Name}: {reason}");
+            }
+            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+            {
+                errors.Add($"{chosen.Name}: {ex.Message}");
             }
         }
         else if (_enumerateError != null) errors.Add(_enumerateError);
 
-        // 2. 今のデスクトップ (X11 / Wayland) の GPU  3. 画面なしの Mesa
-        foreach (var source in new[] { "default", "surfaceless" })
+        // 2. 今のデスクトップの GPU (Windows は Windows が選ぶ GPU、Linux は X11 / Wayland)  3. 画面なしの Mesa (Linux)
+        foreach (var source in EglApi.IsAngle ? new[] { "default" } : new[] { "default", "surfaceless" })
         {
-            IntPtr display = IntPtr.Zero;
             try
             {
-                display = source == "default" ? eglGetDisplay(IntPtr.Zero) : eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, IntPtr.Zero, null);
-                if (display == IntPtr.Zero) { errors.Add($"{source}: ディスプレイなし"); continue; }
-                if (eglInitialize(display, out _, out _) == 0) { errors.Add($"{source}: 初期化に失敗"); continue; }
-                var ctx = new GpuContext { _display = display };
-                if (ctx.Setup(out var reason)) return ctx;
+                string reason;
+                GpuContext? ctx;
+                if (EglApi.IsAngle) ctx = OpenAngle(null, out reason);
+                else if (source == "default") ctx = OpenDisplay(EglApi.GetDisplay(IntPtr.Zero), out reason);
+                else if (EglApi.GetPlatformDisplay != null) ctx = OpenDisplay(EglApi.GetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, IntPtr.Zero, null), out reason);
+                else { ctx = null; reason = "eglGetPlatformDisplay がありません"; }
+                if (ctx != null) return ctx;
                 errors.Add($"{source}: {reason}");
-                ctx.Dispose();
             }
             catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
             {
@@ -244,7 +483,7 @@ public sealed unsafe class GpuContext : IDisposable
     private bool Setup(out string reason)
     {
         reason = "";
-        eglBindAPI(EGL_OPENGL_ES_API);
+        EglApi.BindApi(EGL_OPENGL_ES_API);
         // pbuffer が使えない GPU (デバイス列挙で開いたものなど) もあるので、画面なしの設定も試す
         foreach (var (bit, version, pbuffer) in new[] { (EGL_OPENGL_ES3_BIT, 3, true), (EGL_OPENGL_ES3_BIT, 3, false), (EGL_OPENGL_ES2_BIT, 2, true), (EGL_OPENGL_ES2_BIT, 2, false) })
         {
@@ -252,30 +491,33 @@ public sealed unsafe class GpuContext : IDisposable
             if (pbuffer) attribs.InsertRange(0, new[] { EGL_SURFACE_TYPE, EGL_PBUFFER_BIT });
             attribs.Add(EGL_NONE);
             IntPtr config;
-            if (eglChooseConfig(_display, attribs.ToArray(), &config, 1, out int count) == 0 || count == 0) { reason = "使える設定がありません"; continue; }
-            _context = eglCreateContext(_display, config, IntPtr.Zero, new[] { EGL_CONTEXT_CLIENT_VERSION, version, EGL_NONE });
+            int count;
+            fixed (int* a = attribs.ToArray())
+                if (EglApi.ChooseConfig(_display, a, &config, 1, &count) == 0 || count == 0) { reason = "使える設定がありません"; continue; }
+            int* contextAttribs = stackalloc[] { EGL_CONTEXT_CLIENT_VERSION, version, EGL_NONE };
+            _context = EglApi.CreateContext(_display, config, IntPtr.Zero, contextAttribs);
             if (_context == IntPtr.Zero) { reason = $"OpenGL ES {version} のコンテキストを作れません"; continue; }
-            _surface = pbuffer ? eglCreatePbufferSurface(_display, config, new[] { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE }) : IntPtr.Zero;
-            if (_surface == IntPtr.Zero || eglMakeCurrent(_display, _surface, _surface, _context) == 0)
+            int* surfaceAttribs = stackalloc[] { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+            _surface = pbuffer ? EglApi.CreatePbufferSurface(_display, config, surfaceAttribs) : IntPtr.Zero;
+            if (_surface == IntPtr.Zero || EglApi.MakeCurrent(_display, _surface, _surface, _context) == 0)
             {
                 // 描くのは Skia が作るオフスクリーンの絵なので、サーフェスなしで有効にできればよい (EGL_KHR_surfaceless_context)
-                if (_surface != IntPtr.Zero) { eglDestroySurface(_display, _surface); _surface = IntPtr.Zero; }
-                if (eglMakeCurrent(_display, IntPtr.Zero, IntPtr.Zero, _context) == 0)
+                if (_surface != IntPtr.Zero) { EglApi.DestroySurface(_display, _surface); _surface = IntPtr.Zero; }
+                if (EglApi.MakeCurrent(_display, IntPtr.Zero, IntPtr.Zero, _context) == 0)
                 {
                     reason = "コンテキストを有効にできません";
-                    eglDestroyContext(_display, _context); _context = IntPtr.Zero;
+                    EglApi.DestroyContext(_display, _context); _context = IntPtr.Zero;
                     continue;
                 }
             }
-            var getString = eglGetProcAddress("glGetString");
-            if (getString != IntPtr.Zero)
+            var getString = (delegate* unmanaged<int, IntPtr>)EglApi.Proc("glGetString");
+            if (getString != null)
             {
-                var gl = Marshal.GetDelegateForFunctionPointer<GlGetString>(getString);
-                Renderer = Marshal.PtrToStringAnsi(gl(GL_RENDERER)) ?? "";
-                Vendor = Marshal.PtrToStringAnsi(gl(GL_VENDOR)) ?? "";
+                Renderer = Marshal.PtrToStringAnsi(getString(GL_RENDERER)) ?? "";
+                Vendor = Marshal.PtrToStringAnsi(getString(GL_VENDOR)) ?? "";
             }
-            IsSoftware = new[] { "llvmpipe", "softpipe", "swiftshader", "software" }.Any(k => Renderer.Contains(k, StringComparison.OrdinalIgnoreCase));
-            _interface = GRGlInterface.CreateGles(name => eglGetProcAddress(name));
+            IsSoftware = IsSoftwareRenderer(Renderer);
+            _interface = GRGlInterface.CreateGles(name => EglApi.Proc(name));
             var gr = _interface == null ? null : GRContext.CreateGl(_interface);
             if (gr == null) { reason = "Skia の GPU コンテキストを作れません"; return false; }
             gr.SetResourceCacheLimit(384L * 1024 * 1024);
@@ -289,7 +531,7 @@ public sealed unsafe class GpuContext : IDisposable
     public void MakeCurrent()
     {
         if (_externalMakeCurrent != null) { _externalMakeCurrent(); return; }
-        eglMakeCurrent(_display, _surface, _surface, _context);
+        EglApi.MakeCurrent(_display, _surface, _surface, _context);
     }
 
     // 外から渡された GL コンテキスト (画面の描画と共有するもの) を使うとき
@@ -316,7 +558,7 @@ public sealed unsafe class GpuContext : IDisposable
         return new GpuContext
         {
             Context = gr, _interface = gi, Renderer = renderer, Vendor = vendor,
-            IsSoftware = new[] { "llvmpipe", "softpipe", "swiftshader", "software" }.Any(k => renderer.Contains(k, StringComparison.OrdinalIgnoreCase)),
+            IsSoftware = IsSoftwareRenderer(renderer),
             _externalMakeCurrent = makeCurrent, _externalRelease = release,
         };
     }
@@ -338,13 +580,13 @@ public sealed unsafe class GpuContext : IDisposable
         if (_display == IntPtr.Zero) return;
         if (_context != IntPtr.Zero)
         {
-            eglMakeCurrent(_display, _surface, _surface, _context);
+            EglApi.MakeCurrent(_display, _surface, _surface, _context);
             Context?.Dispose();
             _interface?.Dispose();
-            eglMakeCurrent(_display, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-            eglDestroyContext(_display, _context);
+            EglApi.MakeCurrent(_display, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            EglApi.DestroyContext(_display, _context);
         }
-        if (_surface != IntPtr.Zero) eglDestroySurface(_display, _surface);
+        if (_surface != IntPtr.Zero) EglApi.DestroySurface(_display, _surface);
         // eglTerminate は呼ばない: 同じディスプレイを Avalonia や別スレッドのコンテキストが使っていることがある
         _display = _context = _surface = IntPtr.Zero;
     }
