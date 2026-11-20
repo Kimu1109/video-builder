@@ -248,4 +248,159 @@ public static unsafe class PixelBlur
             output[i] = (byte)(acc >> 8);
         }
     }
+
+    // ---------------- 1 チャンネル (アルファ) の処理: 縁取りの形を作る ----------------
+
+    /// <summary>
+    /// アルファの面 (1 ピクセル 1 バイト) を、縦横 radius ピクセルの正方形の範囲の最大値にする (太らせる)。
+    /// 絵の外は 0 として扱う。src と dst は同じ大きさ。横 → 縦の 2 回に分け、32/16 バイトずつ SIMD で計算する。
+    /// </summary>
+    public static void DilateAlpha(byte* src, int width, int height, int stride, byte* dst, int dstStride, int radius)
+    {
+        if (radius <= 0)
+        {
+            for (int y = 0; y < height; y++) Buffer.MemoryCopy(src + (long)y * stride, dst + (long)y * dstStride, width, width);
+            return;
+        }
+        long tmpBytes = (long)width * height;
+        var tmp = (byte*)PixelPool.Rent(tmpBytes);
+        try
+        {
+            int r = radius;
+            // 横: 左右に 0 の余白を付けた行で、ずらした位置の最大値をとる
+            PixelOps.ForBands(width, height, (y0, y1) =>
+            {
+                int lineBytes = width + r * 2;
+                var line = (byte*)NativeMemory.Alloc((nuint)lineBytes + 32);
+                try
+                {
+                    new Span<byte>(line, r).Clear();
+                    new Span<byte>(line + r + width, r + 32).Clear();
+                    for (int y = y0; y < y1; y++)
+                    {
+                        Buffer.MemoryCopy(src + (long)y * stride, line + r, width, width);
+                        MaxShifted(line, 1, r * 2 + 1, tmp + (long)y * width, width);
+                    }
+                }
+                finally { NativeMemory.Free(line); }
+            });
+            // 縦: 上下 radius 行の同じ位置の最大値 (範囲の外の行は 0 なので、足さなくてよい)
+            PixelOps.ForBands(width, height, (y0, y1) =>
+            {
+                for (int y = y0; y < y1; y++)
+                {
+                    int from = Math.Max(0, y - r), to = Math.Min(height - 1, y + r);
+                    MaxRows(tmp, width, from, to, dst + (long)y * dstStride, width);
+                }
+            });
+        }
+        finally { PixelPool.Return((IntPtr)tmp, tmpBytes); }
+    }
+
+    /// <summary>out[i] = max(line[i + t * step]) (t = 0 〜 taps - 1)。</summary>
+    private static void MaxShifted(byte* line, int step, int taps, byte* output, int count)
+    {
+        int i = 0;
+        if (Vector256.IsHardwareAccelerated)
+            for (; i + 32 <= count; i += 32)
+            {
+                var m = Vector256.Load(line + i);
+                for (int t = 1; t < taps; t++) m = Vector256.Max(m, Vector256.Load(line + i + t * step));
+                m.Store(output + i);
+            }
+        if (Vector128.IsHardwareAccelerated)
+            for (; i + 16 <= count; i += 16)
+            {
+                var m = Vector128.Load(line + i);
+                for (int t = 1; t < taps; t++) m = Vector128.Max(m, Vector128.Load(line + i + t * step));
+                m.Store(output + i);
+            }
+        for (; i < count; i++)
+        {
+            byte m = line[i];
+            for (int t = 1; t < taps; t++) m = Math.Max(m, line[i + t * step]);
+            output[i] = m;
+        }
+    }
+
+    private static void MaxRows(byte* plane, int width, int from, int to, byte* output, int count)
+    {
+        int i = 0;
+        if (Vector256.IsHardwareAccelerated)
+            for (; i + 32 <= count; i += 32)
+            {
+                var m = Vector256.Load(plane + (long)from * width + i);
+                for (int y = from + 1; y <= to; y++) m = Vector256.Max(m, Vector256.Load(plane + (long)y * width + i));
+                m.Store(output + i);
+            }
+        if (Vector128.IsHardwareAccelerated)
+            for (; i + 16 <= count; i += 16)
+            {
+                var m = Vector128.Load(plane + (long)from * width + i);
+                for (int y = from + 1; y <= to; y++) m = Vector128.Max(m, Vector128.Load(plane + (long)y * width + i));
+                m.Store(output + i);
+            }
+        for (; i < count; i++)
+        {
+            byte m = plane[(long)from * width + i];
+            for (int y = from + 1; y <= to; y++) m = Math.Max(m, plane[(long)y * width + i]);
+            output[i] = m;
+        }
+    }
+
+    /// <summary>アルファの面 (1 ピクセル 1 バイト) をガウスぼかしする。絵の外は 0。src と dst は同じ大きさで、同じでもよい。</summary>
+    public static void GaussianAlpha(byte* src, int width, int height, int stride, byte* dst, int dstStride, float sigma)
+    {
+        if (sigma < 0.2f)
+        {
+            if (src != dst) for (int y = 0; y < height; y++) Buffer.MemoryCopy(src + (long)y * stride, dst + (long)y * dstStride, width, width);
+            return;
+        }
+        var kernel = Kernel(sigma, out int r);
+        long tmpBytes = (long)width * height;
+        var tmp = (byte*)PixelPool.Rent(tmpBytes);
+        try
+        {
+            fixed (ushort* k = kernel)
+            {
+                ushort* kp = k;
+                PixelOps.ForBands(width, height, (y0, y1) =>
+                {
+                    int lineBytes = width + r * 2;
+                    var line = (byte*)NativeMemory.Alloc((nuint)lineBytes + 32);
+                    try
+                    {
+                        new Span<byte>(line, r).Clear();
+                        new Span<byte>(line + r + width, r + 32).Clear();
+                        for (int y = y0; y < y1; y++)
+                        {
+                            Buffer.MemoryCopy(src + (long)y * stride, line + r, width, width);
+                            Convolve(line, 1, tmp + (long)y * width, width, kp, r);
+                        }
+                    }
+                    finally { NativeMemory.Free(line); }
+                });
+                PixelOps.ForBands(width, height, (y0, y1) =>
+                {
+                    var rows = stackalloc byte*[r * 2 + 1];
+                    var weights = stackalloc ushort[r * 2 + 1];
+                    for (int y = y0; y < y1; y++)
+                    {
+                        int n = 0;
+                        for (int t = -r; t <= r; t++)
+                        {
+                            int sy = y + t;
+                            if (sy < 0 || sy >= height) continue;
+                            rows[n] = tmp + (long)sy * width;
+                            weights[n] = kp[t + r];
+                            n++;
+                        }
+                        SumRows(rows, weights, n, dst + (long)y * dstStride, width);
+                    }
+                });
+            }
+        }
+        finally { PixelPool.Return((IntPtr)tmp, tmpBytes); }
+    }
+
 }

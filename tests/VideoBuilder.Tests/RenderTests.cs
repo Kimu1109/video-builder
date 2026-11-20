@@ -1207,5 +1207,28 @@ public class OptimizationTests
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
+
+    [Fact]
+    public void Cpu_border_matches_the_skia_image_filters()
+    {
+        using var text = Generators.RenderText("縁取り Border", "", 60, new SKColor(255, 255, 255, 230), true, false, 0, 0, 0)!;
+        foreach (var (size, blur, color) in new[] { (4, 0f, SKColors.Black), (10, 6f, new SKColor(255, 0, 0, 200)), (2, 3f, SKColors.Blue) })
+        {
+            int pad = size + (int)MathF.Ceiling(blur * 1.5f);
+            using var dilate = SKImageFilter.CreateDilate(size, size);
+            using var cf = SKColorFilter.CreateBlendMode(color, SKBlendMode.SrcIn);
+            using var colored = SKImageFilter.CreateColorFilter(cf, dilate);
+            using var final = blur > 0 ? SKImageFilter.CreateBlur(blur / 2, blur / 2, colored) : null;
+            using var paint = new SKPaint { ImageFilter = final ?? colored };
+            using var skia = new SKBitmap(new SKImageInfo(text.Width + pad * 2, text.Height + pad * 2, SKColorType.Bgra8888, SKAlphaType.Premul));
+            using (var c = new SKCanvas(skia)) { c.Clear(SKColors.Transparent); c.DrawImage(text, pad, pad, paint); c.DrawImage(text, pad, pad); }
+            using var ownImage = Effects.BorderOnCpu(text, size, blur / 2, pad, color)!;
+            using var own = SKBitmap.FromImage(ownImage);
+            var (mean, max) = Diff(own, skia);
+            if (blur == 0) Assert.True(max <= 1, $"size={size}: max={max}");   // ぼかしなし: 同じ絵
+            else Assert.True(mean < 1 && max < 40, $"size={size} blur={blur}: mean={mean:0.000} max={max}");
+        }
+    }
+
 }
 
