@@ -278,7 +278,7 @@ public static class Effects
                     }
                     using var smallOwner = smallCpu;
                     sw = smallCpu.Width; sh = smallCpu.Height;
-                    using var blurredCpu = PixelOps.DrawParallel(sw, sh, c => c.DrawImage(smallCpu, 0, 0, bp));
+                    using var blurredCpu = BlurOnCpu(smallCpu, ss, 0, a.IsFrameBuffer) ?? PixelOps.DrawParallel(sw, sh, c => c.DrawImage(smallCpu, 0, 0, bp));
                     using var upCpu = new SKPaint { FilterQuality = SKFilterQuality.Low, BlendMode = SKBlendMode.Src };
                     return Redraw(s, a, pad, pad, pad, pad, (c, _, _) => c.DrawImage(blurredCpu, SKRect.Create(sw, sh), SKRect.Create(0, 0, sw * k, sh * k), upCpu));
                 }
@@ -299,11 +299,46 @@ public static class Effects
                     return Redraw(s, a, pad, pad, pad, pad, (c, _, _) => c.DrawImage(blurredImage, SKRect.Create(sw, sh), SKRect.Create(0, 0, sw * k, sh * k), up));
                 }
             }
+            if (a.Context.Gpu == null && BlurOnCpu(s.Image, sigma, pad, a.IsFrameBuffer) is { } own)
+                return new Sprite(a.Context.Own(own), s.Cx + pad, s.Cy + pad);
             using var f = a.IsFrameBuffer
                 ? SKImageFilter.CreateBlur(sigma, sigma, SKShaderTileMode.Clamp)
                 : SKImageFilter.CreateBlur(sigma, sigma);
             using var paint = new SKPaint { ImageFilter = f };
             return WithPaint(s, a, paint, pad);
+        }
+    }
+
+    /// <summary>
+    /// CPU でぼかした絵を作る (PixelBlur、複数スレッド)。pad だけ周りを広げる。clamp なら絵の外を端のピクセルとみなす。
+    /// ピクセルを読めない絵 (GPU 上の絵など) なら null (呼び出し側は Skia でぼかす)。
+    /// </summary>
+    public static SKImage? BlurOnCpu(SKImage image, float sigma, int pad, bool clamp)
+    {
+        if (clamp) pad = 0;
+        int w = image.Width, h = image.Height, ow = w + pad * 2, oh = h + pad * 2;
+        if (ow > 16384 || oh > 16384) return null;
+        using var pixmap = image.PeekPixels();
+        bool direct = pixmap != null && pixmap.ColorType == SKColorType.Bgra8888 && pixmap.AlphaType is SKAlphaType.Premul or SKAlphaType.Opaque;
+        (IntPtr Buffer, int RowBytes)? copy = null;
+        if (!direct)
+        {
+            copy = CopyPixels(new Sprite(image, 0, 0));
+            if (copy == null) return null;
+        }
+        try
+        {
+            var src = direct ? pixmap!.GetPixels() : copy!.Value.Buffer;
+            int srcRow = direct ? pixmap!.RowBytes : copy!.Value.RowBytes;
+            var info = Info(ow, oh);
+            int rowBytes = ow * 4;
+            var dst = PixelPool.Rent((long)rowBytes * oh);
+            PixelBlur.Gaussian(src, w, h, srcRow, dst, rowBytes, sigma, pad, clamp);
+            return PixelPool.ToImage(dst, info, rowBytes);
+        }
+        finally
+        {
+            if (copy is { } c) PixelPool.Return(c.Buffer, (long)c.RowBytes * h);
         }
     }
 

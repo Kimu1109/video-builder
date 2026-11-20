@@ -750,11 +750,9 @@ public class OptimizationTests
             Assert.Equal((src.Width + pad * 2, src.Height + pad * 2), (result.Width, result.Height));
             Assert.Equal((src.Width / 2f + pad, src.Height / 2f + pad), (result.Cx, result.Cy));
             using var fast = SKBitmap.FromImage(result.Image);
-            using var exact = new SKBitmap(new SKImageInfo(result.Width, result.Height, SKColorType.Bgra8888, SKAlphaType.Premul));
-            using (var c = new SKCanvas(exact))
-            using (var f = SKImageFilter.CreateBlur(radius / 2, radius / 2))
-            using (var paint = new SKPaint { ImageFilter = f })
-            { c.Clear(SKColors.Transparent); c.DrawImage(image, pad, pad, paint); }
+            // 比べる相手: 縮小せずに、元の大きさのままガウスぼかしをかけたもの
+            using var exactImage = Effects.BlurOnCpu(image, radius / 2, pad, clamp: false)!;
+            using var exact = SKBitmap.FromImage(exactImage);
             var (mean, max) = Diff(fast, exact);
             ctx.DisposeTemporaries();
             Assert.True(mean < 1.5 && max < 40, $"余白あり radius={radius}: mean={mean:0.00} max={max}");
@@ -766,11 +764,8 @@ public class OptimizationTests
             var ctx = new RenderContext { Project = p, Frame = 0 };
             var result = Effects.Find("filter.blur")!.Apply(Sprite.Centered(image), new EffectArgs { Effect = fx, Object = o, Bounds = o.Bounds, Context = ctx });
             using var fast = SKBitmap.FromImage(result.Image);
-            using var exact = new SKBitmap(src.Info);
-            using (var c = new SKCanvas(exact))
-            using (var f = SKImageFilter.CreateBlur(radius / 2, radius / 2))
-            using (var paint = new SKPaint { ImageFilter = f })
-            { c.Clear(SKColors.Transparent); c.DrawImage(image, 0, 0, paint); }
+            using var exactImage = Effects.BlurOnCpu(image, radius / 2, 0, clamp: false)!;
+            using var exact = SKBitmap.FromImage(exactImage);
             var (mean, max) = Diff(fast, exact);
             ctx.DisposeTemporaries();
             Assert.True(mean < 1.5 && max < 40, $"radius={radius}: mean={mean:0.00} max={max}");
@@ -1115,6 +1110,49 @@ public class OptimizationTests
             Assert.Equal(still, bmp.Bytes);
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+
+    [Fact]
+    public void Cpu_blur_keeps_brightness_and_edges_and_never_breaks_premultiplied_alpha()
+    {
+        SKImage Solid(int w, int h, SKColor c)
+        {
+            using var bmp = new SKBitmap(new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Premul));
+            bmp.Erase(c);
+            return SKImage.FromBitmap(bmp);
+        }
+        foreach (var sigma in new[] { 0.5f, 1.5f, 2.9f, 4.5f })
+        {
+            int r = (int)Math.Ceiling(sigma * 3);
+            // 一様な絵: 画面全体のぼかし (端を延ばす) では、どこも同じ色のまま (明るさが変わらない)
+            using var gray = Solid(97, 61, new SKColor(120, 200, 40));
+            using var clamped = Effects.BlurOnCpu(gray, sigma, 0, clamp: true)!;
+            using var cb = SKBitmap.FromImage(clamped);
+            foreach (var (x, y) in new[] { (0, 0), (96, 60), (48, 30), (0, 30) })
+                Assert.Equal(new SKColor(120, 200, 40), cb.GetPixel(x, y));
+            // 透明として扱うとき: 余白の外側ほど薄くなり、元の中心はそのまま
+            using var padded = Effects.BlurOnCpu(gray, sigma, r, clamp: false)!;
+            using var pb = SKBitmap.FromImage(padded);
+            Assert.Equal((97 + r * 2, 61 + r * 2), (pb.Width, pb.Height));
+            Assert.Equal(new SKColor(120, 200, 40), pb.GetPixel(pb.Width / 2, pb.Height / 2));
+            Assert.True(pb.GetPixel(0, 0).Alpha < 20);
+            // 元の絵の端より外は、外へ行くほど薄くなる。元の絵の端は半分より濃く、まだ元の濃さには届かない
+            int mid = pb.Height / 2;
+            for (int x = 0; x < r; x++) Assert.True(pb.GetPixel(x, mid).Alpha <= pb.GetPixel(x + 1, mid).Alpha, $"sigma={sigma} x={x}");
+            Assert.True(pb.GetPixel(r, mid).Alpha is > 127 and < 255, $"sigma={sigma}: {pb.GetPixel(r, mid).Alpha}");
+        }
+        // 半透明の模様: 乗算済みの色がアルファを超えない
+        using var src = new SKBitmap(new SKImageInfo(64, 64, SKColorType.Bgra8888, SKAlphaType.Premul));
+        var rnd = new Random(3);
+        for (int y = 0; y < 64; y++)
+            for (int x = 0; x < 64; x++) { byte a = (byte)rnd.Next(256); src.SetPixel(x, y, new SKColor((byte)rnd.Next(256), (byte)rnd.Next(256), (byte)rnd.Next(256), a)); }
+        using var srcImage = SKImage.FromBitmap(src);
+        using var blurred = Effects.BlurOnCpu(srcImage, 2.5f, 8, clamp: false)!;
+        using var pixmap = blurred.PeekPixels();
+        var bytes = pixmap.GetPixelSpan();
+        for (int i = 0; i < bytes.Length; i += 4)
+            Assert.True(bytes[i] <= bytes[i + 3] && bytes[i + 1] <= bytes[i + 3] && bytes[i + 2] <= bytes[i + 3], $"pixel {i / 4}");
     }
 
 }
