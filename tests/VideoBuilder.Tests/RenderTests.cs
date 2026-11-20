@@ -470,6 +470,33 @@ public class GpuRenderTests
             gpuEngine.RenderToBitmap(p, p.Root, 10, b);
             var one = Compare(a, b);
             Console.WriteLine($"BENCH diff object layer={objects[i].Layer} effects={string.Join(",", objects[i].Effects.Select(f => f.DefinitionId))} blend={objects[i].Draw?.Values.GetValueOrDefault("blend")} mean={one.Mean:0.000} far={one.Far} box={one.Box}");
+            if (one.Far == 0) continue;
+            // 違うオブジェクトは、色の付いた画素の数 (縁が太い・細い) と、違う画素の例も出す
+            var bg = a.GetPixel(0, 0);
+            int Covered(SKBitmap x) { int n = 0; for (int yy = 0; yy < x.Height; yy++) for (int xx = 0; xx < x.Width; xx++) if (x.GetPixel(xx, yy) != bg) n++; return n; }
+            Console.WriteLine($"BENCH diff   covered cpu={Covered(a)} gpu={Covered(b)}");
+            int shown = 0;
+            for (int yy = one.Box.Top; yy < one.Box.Bottom && shown < 6; yy++)
+                for (int xx = one.Box.Left; xx < one.Box.Right && shown < 6; xx++)
+                {
+                    SKColor c = a.GetPixel(xx, yy), g = b.GetPixel(xx, yy);
+                    if (Math.Abs(c.Red - g.Red) + Math.Abs(c.Green - g.Green) + Math.Abs(c.Blue - g.Blue) <= 72) continue;
+                    Console.WriteLine($"BENCH diff   ({xx},{yy}) cpu={c} gpu={g}");
+                    shown++; xx += 7;
+                }
+            // エフェクトを 1 つずつ外して比べる (どのエフェクトで違うか)
+            var effects = objects[i].Effects.ToList();
+            for (int e = 1; e < effects.Count; e++)
+            {
+                if (effects[e].Definition.Category == EffectCategory.Draw) continue;
+                objects[i].Effects.RemoveAt(e);
+                cpuEngine.RenderToBitmap(p, p.Root, 10, a);
+                gpuEngine.RenderToBitmap(p, p.Root, 10, b);
+                var without = Compare(a, b);
+                Console.WriteLine($"BENCH diff   without {effects[e].DefinitionId}: mean={without.Mean:0.000} far={without.Far}");
+                objects[i].Effects.Clear();
+                objects[i].Effects.AddRange(effects);
+            }
         }
         p.Root.Objects.Clear();
         p.Root.Objects.AddRange(objects);
