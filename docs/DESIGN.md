@@ -2171,7 +2171,9 @@ Windows でも GPU で描画する。Linux と同じ「OpenGL ES + Skia」の作
 | EGL の呼び出し | `EglApi` が OS ごとにライブラリを読み、関数を取り出す (Linux は `libEGL.so.1` の `eglInitialize` など、ANGLE は `EGL_Initialize` のような名前か `eglGetProcAddress`)。それまでの `DllImport("libEGL.so.1")` をやめた |
 | GPU の一覧 | DXGI (`CreateDXGIFactory1` → `EnumAdapters1` → `GetDesc1`) で、名前・ベンダー・PCI の ID・LUID・ソフトウェアかどうかを調べる。Linux と違ってコンテキストを開かないので速い。ソフトウェアの GPU (Microsoft Basic Render Driver = WARP) も一覧に入るが、自動では選ばない |
 | 設定に覚える ID | `名前|ベンダー:デバイス:サブシステム` (例: `NVIDIA GeForce RTX 4070 Laptop GPU|10DE:2860:3FC817AA`)。LUID は起動のたびに変わるので覚えない |
-| 開き方 | `eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE)` に Direct3D 11 と、選んだ GPU の LUID (`EGL_ANGLE_platform_angle_d3d_luid`) を渡す。WARP は LUID ではなく WARP の指定 (`EGL_PLATFORM_ANGLE_DEVICE_TYPE_D3D_WARP_ANGLE`) で開く。開けなければ、Windows が選ぶ GPU の ANGLE で開く。その上は Linux と同じ (pbuffer → サーフェスなし、OpenGL ES 3 → 2) |
+| 開き方 | コンテキストごとに、選んだ GPU (DXGI のアダプタを LUID で探す) で Direct3D 11 のデバイスを作り (`D3D11CreateDevice`。機能レベル 11_1〜10_0)、ANGLE に渡して (`eglCreateDeviceANGLE`)、そのデバイスのディスプレイ (`EGL_PLATFORM_DEVICE_EXT`) で開く。Avalonia の画面の描画と同じやり方。開けなければ、Windows が選ぶ GPU (なければ WARP) で同じように開く。その上は Linux と同じ (pbuffer → サーフェスなし、OpenGL ES 3 → 2)。Dispose でディスプレイ・ANGLE のデバイス・Direct3D 11 のデバイスを手放す |
+| デバイスを分ける理由 | 最初は ANGLE の既定のディスプレイ (`EGL_PLATFORM_ANGLE_ANGLE`) で開いていたが、ANGLE は同じ設定のディスプレイを使い回し、Direct3D 11 のデバイスも 1 つになる。プレビューと出力のように別々のスレッドで同時に描くと壊れた (CI で、並列に流れるテストが Skia の flush の中で落ち、モザイクの絵も崩れた) |
+| 同じ ID の GPU | 同じ名前・PCI の ID の GPU が 2 つあれば、2 つ目からは ID に `#2` などを付ける。WARP は画面のない環境で 2 つ出ることがあるので 1 つにする |
 | ソフトウェアの判定 | `GL_RENDERER` に llvmpipe・SwiftShader・"Basic Render Driver" などが入っていれば、ソフトウェアとして自動では使わない (`GpuContext.IsSoftwareRenderer`) |
 | 名前の照合 | ANGLE の `GL_RENDERER` は `ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Laptop GPU (0x00002860) Direct3D11 vs_5_0 ps_5_0, D3D11)` のような形なので、アダプタの名前が含まれていれば同じ GPU とみなす (`GpuContext.SameGpu`) |
 | 動画のデコード | `DeviceHint` は Windows では (`cuda` か `d3d11va`, DXGI の番号)。Intel / AMD を選べば D3D11VA を先に試し、D3D11VA はその番号の GPU で開く (FFmpeg の D3D11VA のデバイス名は DXGI の列挙の番号)。NVIDIA を選んだときも、NVDEC が使えなければ同じ GPU で D3D11VA を使う |

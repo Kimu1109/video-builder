@@ -11,7 +11,7 @@ namespace VideoBuilder.Rendering;
 /// Windows はアダプタの名前 (例: "NVIDIA GeForce RTX 4070 Laptop GPU", "Intel(R) UHD Graphics")。</param>
 /// <param name="DrmDevice">DRM のデバイスファイル (例: /dev/dri/card1)。分からなければ空。</param>
 /// <param name="RenderNode">DRM のレンダーノード (例: /dev/dri/renderD129)。動画のデコード (VAAPI) で同じ GPU を使うのに使う。</param>
-/// <param name="Luid">Windows: アダプタの LUID (ANGLE にこの GPU を使わせるのに使う)。起動するたびに変わるので、設定には覚えない。</param>
+/// <param name="Luid">Windows: アダプタの LUID (開くときに DXGI のアダプタを探すのに使う)。起動するたびに変わるので、設定には覚えない。</param>
 /// <param name="PciId">Windows: "ベンダー:デバイス:サブシステム" の ID (例: "10DE:2860:3FC817AA")。設定に覚える ID に使う。</param>
 public sealed record GpuAdapter(int Index, string Name, string Vendor, string DrmDevice, string RenderNode, bool IsSoftware, long Luid = 0, string PciId = "")
 {
@@ -69,6 +69,7 @@ internal static unsafe class EglApi
     public static readonly delegate* unmanaged<IntPtr, IntPtr, int> DestroyContext;
     public static readonly delegate* unmanaged<IntPtr, IntPtr, int> DestroySurface;
     public static readonly delegate* unmanaged<IntPtr, int, IntPtr> QueryString;
+    public static readonly delegate* unmanaged<IntPtr, int> Terminate;
     public static readonly delegate* unmanaged<int> GetError;
     private static readonly delegate* unmanaged<byte*, IntPtr> GetProcAddressPtr;
 
@@ -125,6 +126,7 @@ internal static unsafe class EglApi
             DestroySurface = (delegate* unmanaged<IntPtr, IntPtr, int>)Need("eglDestroySurface");
             QueryString = (delegate* unmanaged<IntPtr, int, IntPtr>)Need("eglQueryString");
             GetError = (delegate* unmanaged<int>)Need("eglGetError");
+            Terminate = (delegate* unmanaged<IntPtr, int>)Need("eglTerminate");
             GetPlatformDisplay = (delegate* unmanaged<int, IntPtr, IntPtr*, IntPtr>)Export(lib, "eglGetPlatformDisplay", GetProcAddressPtr);
             if (missing.Count > 0) LoadError = "EGL の関数がありません: " + string.Join(", ", missing);
         }
@@ -190,10 +192,56 @@ internal static unsafe class DxgiAdapters
         _ => $"0x{id:X4}",
     };
 
-    /// <summary>DXGI の列挙の順に返す (番号は FFmpeg の D3D11VA のデバイス番号と同じ)。</summary>
+    /// <summary>
+    /// DXGI の列挙の順に返す (番号は FFmpeg の D3D11VA のデバイス番号と同じ)。
+    /// 同じ ID のものが 2 つあれば、2 つ目からは ID に "#2" などを付けて区別する。
+    /// ソフトウェアの GPU (WARP) は、画面のない環境 (CI など) で 2 つ出ることがあるので、1 つだけにする。
+    /// </summary>
     public static List<GpuAdapter> Enumerate()
     {
         var list = new List<GpuAdapter>();
+        foreach (var a in EnumerateRaw())
+        {
+            int same = list.Count(x => x.Name == a.Name && x.PciId.Split('#')[0] == a.PciId);
+            if (same == 0) list.Add(a);
+            else if (!a.IsSoftware) list.Add(a with { PciId = $"{a.PciId}#{same + 1}" });
+        }
+        return list;
+    }
+
+    /// <summary>LUID の GPU (IDXGIAdapter1) を返す (使い終えたら <see cref="Release"/>)。見つからなければ IntPtr.Zero。</summary>
+    public static IntPtr Open(long luid)
+    {
+        IntPtr found = IntPtr.Zero;
+        Walk((adapter, d) =>
+        {
+            if ((((long)d.LuidHigh << 32) | d.LuidLow) != luid) return false;
+            ((delegate* unmanaged[Stdcall]<IntPtr, uint>)(*(IntPtr**)adapter)[1])(adapter);   // AddRef
+            found = adapter;
+            return true;
+        });
+        return found;
+    }
+
+    private static List<GpuAdapter> EnumerateRaw()
+    {
+        var list = new List<GpuAdapter>();
+        Walk((_, d) =>
+        {
+            string name = new string(d.Description).TrimEnd('\0').Trim();
+            bool software = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 || d.VendorId == 0x1414 && d.DeviceId == 0x8C;
+            long luid = ((long)d.LuidHigh << 32) | d.LuidLow;
+            list.Add(new GpuAdapter(list.Count, name, VendorName(d.VendorId), "", "", software, luid, $"{d.VendorId:X4}:{d.DeviceId:X4}:{d.SubSysId:X8}"));
+            return false;
+        });
+        return list;
+    }
+
+    private delegate bool Visitor(IntPtr adapter, AdapterDesc1 desc);
+
+    /// <summary>アダプタを順に visit に渡す。true を返したら終わる。</summary>
+    private static void Walk(Visitor visit)
+    {
         IntPtr factory;
         var iid = IID_IDXGIFactory1;
         int hr = CreateDXGIFactory1(&iid, &factory);
@@ -206,24 +254,52 @@ internal static unsafe class DxgiAdapters
                 IntPtr adapter;
                 hr = enumAdapters1(factory, i, &adapter);
                 if (hr == DXGI_ERROR_NOT_FOUND || hr < 0 || adapter == IntPtr.Zero) break;
+                bool stop = false;
                 try
                 {
                     var getDesc1 = (delegate* unmanaged[Stdcall]<IntPtr, AdapterDesc1*, int>)(*(IntPtr**)adapter)[10];
                     AdapterDesc1 d;
-                    if (getDesc1(adapter, &d) < 0) continue;
-                    string name = new string(d.Description).TrimEnd('\0').Trim();
-                    bool software = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 || d.VendorId == 0x1414 && d.DeviceId == 0x8C;
-                    long luid = ((long)d.LuidHigh << 32) | d.LuidLow;
-                    list.Add(new GpuAdapter((int)i, name, VendorName(d.VendorId), "", "", software, luid, $"{d.VendorId:X4}:{d.DeviceId:X4}:{d.SubSysId:X8}"));
+                    if (getDesc1(adapter, &d) >= 0) stop = visit(adapter, d);
                 }
                 finally { Release(adapter); }
+                if (stop) break;
             }
         }
         finally { Release(factory); }
-        return list;
     }
 
-    private static void Release(IntPtr unknown) => ((delegate* unmanaged[Stdcall]<IntPtr, uint>)(*(IntPtr**)unknown)[2])(unknown);
+    public static void Release(IntPtr unknown)
+    {
+        if (unknown != IntPtr.Zero) ((delegate* unmanaged[Stdcall]<IntPtr, uint>)(*(IntPtr**)unknown)[2])(unknown);
+    }
+
+    [DllImport("d3d11.dll")]
+    private static extern int D3D11CreateDevice(IntPtr adapter, int driverType, IntPtr software, uint flags, int* featureLevels, uint levels, uint sdkVersion,
+        IntPtr* device, int* featureLevel, IntPtr* immediateContext);
+
+    private const int D3D_DRIVER_TYPE_UNKNOWN = 0, D3D_DRIVER_TYPE_HARDWARE = 1, D3D_DRIVER_TYPE_WARP = 5;
+    private const int E_INVALIDARG = unchecked((int)0x80070057);
+
+    /// <summary>
+    /// Direct3D 11 のデバイスを作る (使い終えたら <see cref="Release"/>)。adapter が IntPtr.Zero なら Windows が選ぶ GPU。
+    /// ANGLE の OpenGL ES 3 には機能レベル 10_0 以上が要る。
+    /// </summary>
+    public static IntPtr CreateDevice(IntPtr adapter, out string? error)
+    {
+        error = null;
+        int* levels = stackalloc[] { 0xB100, 0xB000, 0xA100, 0xA000 };   // 11_1, 11_0, 10_1, 10_0
+        int driver = adapter == IntPtr.Zero ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_UNKNOWN;
+        IntPtr device;
+        int got;
+        int hr = D3D11CreateDevice(adapter, driver, IntPtr.Zero, 0, levels, 4, 7, &device, &got, null);
+        // 古い Windows (D3D 11.0 のランタイム) は 11_1 を知らないので、外して試し直す
+        if (hr == E_INVALIDARG) hr = D3D11CreateDevice(adapter, driver, IntPtr.Zero, 0, levels + 1, 3, 7, &device, &got, null);
+        // GPU を指定していなくて、ハードウェアで作れなければ (GPU のない環境)、ソフトウェア (WARP) で作る
+        if ((hr < 0 || device == IntPtr.Zero) && adapter == IntPtr.Zero)
+            hr = D3D11CreateDevice(IntPtr.Zero, D3D_DRIVER_TYPE_WARP, IntPtr.Zero, 0, levels + 1, 3, 7, &device, &got, null);
+        if (hr < 0 || device == IntPtr.Zero) { error = $"Direct3D 11 のデバイスを作れません (0x{hr:X8})"; return IntPtr.Zero; }
+        return device;
+    }
 }
 
 /// <summary>
@@ -233,7 +309,7 @@ internal static unsafe class DxgiAdapters
 /// GPU が複数ある (CPU 内蔵 + 外付けなど) ときは、<see cref="PreferredAdapter"/> で選んだもの、なければ外付けを優先して使う。
 /// 何もしないと、デスクトップの表示に使っている GPU (多くは CPU 内蔵) になってしまう。
 /// Linux は EGL のデバイス列挙 (EGL_EXT_device_enumeration / EGL_EXT_platform_device) で、
-/// Windows は DXGI で列挙したアダプタの LUID を ANGLE に渡して (EGL_ANGLE_platform_angle_d3d_luid)、1 つずつ開く。
+/// Windows は DXGI で列挙したアダプタで Direct3D 11 のデバイスを作り、ANGLE に渡して (eglCreateDeviceANGLE) 開く。
 /// </para>
 /// </summary>
 public sealed unsafe class GpuContext : IDisposable
@@ -244,14 +320,15 @@ public sealed unsafe class GpuContext : IDisposable
     private const int EGL_WIDTH = 0x3057, EGL_HEIGHT = 0x3056, EGL_CONTEXT_CLIENT_VERSION = 0x3098;
     private const int EGL_PLATFORM_SURFACELESS_MESA = 0x31DD, EGL_PLATFORM_DEVICE_EXT = 0x313F, EGL_EXTENSIONS = 0x3055;
     private const int EGL_DRM_DEVICE_FILE_EXT = 0x3233, EGL_DRM_RENDER_NODE_FILE_EXT = 0x3377;
-    // ANGLE (EGL_ANGLE_platform_angle・EGL_ANGLE_platform_angle_d3d・EGL_ANGLE_platform_angle_d3d_luid)
+    // ANGLE (EGL_ANGLE_device_d3d)
     private const int EGL_PLATFORM_ANGLE_ANGLE = 0x3202, EGL_PLATFORM_ANGLE_TYPE_ANGLE = 0x3203, EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE = 0x3208;
-    private const int EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE = 0x3209, EGL_PLATFORM_ANGLE_DEVICE_TYPE_D3D_WARP_ANGLE = 0x320B;
-    private const int EGL_PLATFORM_ANGLE_D3D_LUID_HIGH_ANGLE = 0x34A0, EGL_PLATFORM_ANGLE_D3D_LUID_LOW_ANGLE = 0x34A1;
+    private const int EGL_D3D11_DEVICE_ANGLE = 0x33A1;
     private const int GL_VENDOR = 0x1F00, GL_RENDERER = 0x1F01;
 
     private IntPtr _display, _surface, _context;
     private GRGlInterface? _interface;
+    // Windows: このコンテキストだけの Direct3D 11 のデバイスと、それを包む ANGLE のデバイス (Dispose で手放す)
+    private IntPtr _d3dDevice, _angleDevice;
 
     public GRContext Context { get; private set; } = null!;
     public string Renderer { get; private set; } = "";
@@ -381,27 +458,58 @@ public sealed unsafe class GpuContext : IDisposable
     }
 
     /// <summary>
-    /// Windows: ANGLE (Direct3D 11) で開く。adapter を渡せば、その GPU (LUID で指定) を使う。null なら Windows が選ぶ GPU。
-    /// ソフトウェアの GPU (WARP) は LUID ではなく、WARP を使う指定で開く。
+    /// Windows: ANGLE (Direct3D 11) で開く。adapter を渡せば、その GPU を使う。null なら Windows が選ぶ GPU。
+    /// <para>
+    /// コンテキストごとに自分の Direct3D 11 のデバイスを作って ANGLE に渡し (eglCreateDeviceANGLE)、そのデバイスのディスプレイで開く
+    /// (Avalonia の画面の描画と同じやり方)。ANGLE の既定のディスプレイは、同じ設定なら同じ Direct3D 11 のデバイスを使い回すので、
+    /// プレビューと出力のように別々のスレッドで同時に描くと壊れる (CI で、Skia の flush の中で落ちた)。
+    /// </para>
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private static GpuContext? OpenAngle(GpuAdapter? adapter, out string reason)
     {
-        var attribs = new List<int> { EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE };
-        if (adapter is { IsSoftware: true })
-            attribs.AddRange(new[] { EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_D3D_WARP_ANGLE });
-        else if (adapter != null)
+        reason = "";
+        var createDevice = (delegate* unmanaged<int, IntPtr, IntPtr*, IntPtr>)EglApi.Proc("eglCreateDeviceANGLE");
+        if (createDevice == null) { reason = "eglCreateDeviceANGLE がありません"; return null; }
+        IntPtr dxgi = IntPtr.Zero;
+        if (adapter != null)
         {
-            if (!EglApi.String(IntPtr.Zero, EGL_EXTENSIONS).Contains("EGL_ANGLE_platform_angle_d3d_luid"))
-            {
-                reason = "GPU を選ぶ機能 (EGL_ANGLE_platform_angle_d3d_luid) がありません";
-                return null;
-            }
-            attribs.AddRange(new[] { EGL_PLATFORM_ANGLE_D3D_LUID_HIGH_ANGLE, (int)(adapter.Luid >> 32), EGL_PLATFORM_ANGLE_D3D_LUID_LOW_ANGLE, (int)(uint)adapter.Luid });
+            dxgi = DxgiAdapters.Open(adapter.Luid);
+            if (dxgi == IntPtr.Zero) { reason = "GPU が見つかりません (取り外された?)"; return null; }
         }
-        attribs.Add(EGL_NONE);
-        var ctx = OpenDisplay(PlatformDisplayExt(EGL_PLATFORM_ANGLE_ANGLE, IntPtr.Zero, attribs.ToArray()), out reason);
-        if (ctx != null) ctx.Adapter = adapter;
-        return ctx;
+        IntPtr d3d;
+        string? error;
+        try { d3d = DxgiAdapters.CreateDevice(dxgi, out error); }
+        finally { DxgiAdapters.Release(dxgi); }
+        if (d3d == IntPtr.Zero) { reason = error ?? "Direct3D 11 のデバイスを作れません"; return null; }
+        var angleDevice = createDevice(EGL_D3D11_DEVICE_ANGLE, d3d, null);
+        if (angleDevice == IntPtr.Zero)
+        {
+            DxgiAdapters.Release(d3d);
+            reason = $"eglCreateDeviceANGLE に失敗 (0x{EglApi.GetError():X4})";
+            return null;
+        }
+        var display = PlatformDisplayExt(EGL_PLATFORM_DEVICE_EXT, angleDevice, null);
+        int major, minor;
+        if (display == IntPtr.Zero || EglApi.Initialize(display, &major, &minor) == 0)
+        {
+            reason = display == IntPtr.Zero ? "ディスプレイなし" : $"初期化に失敗 (0x{EglApi.GetError():X4})";
+            ReleaseAngle(display, angleDevice, d3d);
+            return null;
+        }
+        var ctx = new GpuContext { _display = display, _d3dDevice = d3d, _angleDevice = angleDevice, Adapter = adapter };
+        if (ctx.Setup(out reason)) return ctx;
+        ctx.Dispose();
+        return null;
+    }
+
+    private static void ReleaseAngle(IntPtr display, IntPtr angleDevice, IntPtr d3d)
+    {
+        // このディスプレイはこのコンテキストだけのものなので、終わらせてよい
+        if (display != IntPtr.Zero) EglApi.Terminate(display);
+        var release = (delegate* unmanaged<IntPtr, int>)EglApi.Proc("eglReleaseDeviceANGLE");
+        if (angleDevice != IntPtr.Zero && release != null) release(angleDevice);
+        if (OperatingSystem.IsWindows()) DxgiAdapters.Release(d3d);
     }
 
     /// <summary>設定 (<see cref="PreferredAdapter"/>) と一覧から、使う GPU を決める。一覧がなければ null。</summary>
@@ -440,7 +548,7 @@ public sealed unsafe class GpuContext : IDisposable
             {
                 string reason;
                 GpuContext? ctx;
-                if (EglApi.IsAngle) ctx = OpenAngle(chosen, out reason);
+                if (EglApi.IsAngle && OperatingSystem.IsWindows()) ctx = OpenAngle(chosen, out reason);
                 else
                 {
                     var device = devices.First(x => x.Adapter == chosen).Device;
@@ -464,7 +572,7 @@ public sealed unsafe class GpuContext : IDisposable
             {
                 string reason;
                 GpuContext? ctx;
-                if (EglApi.IsAngle) ctx = OpenAngle(null, out reason);
+                if (EglApi.IsAngle && OperatingSystem.IsWindows()) ctx = OpenAngle(null, out reason);
                 else if (source == "default") ctx = OpenDisplay(EglApi.GetDisplay(IntPtr.Zero), out reason);
                 else if (EglApi.GetPlatformDisplay != null) ctx = OpenDisplay(EglApi.GetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, IntPtr.Zero, null), out reason);
                 else { ctx = null; reason = "eglGetPlatformDisplay がありません"; }
@@ -587,7 +695,9 @@ public sealed unsafe class GpuContext : IDisposable
             EglApi.DestroyContext(_display, _context);
         }
         if (_surface != IntPtr.Zero) EglApi.DestroySurface(_display, _surface);
-        // eglTerminate は呼ばない: 同じディスプレイを Avalonia や別スレッドのコンテキストが使っていることがある
-        _display = _context = _surface = IntPtr.Zero;
+        // Windows: ディスプレイも Direct3D 11 のデバイスも、このコンテキストだけのものなので手放す
+        if (_d3dDevice != IntPtr.Zero) ReleaseAngle(_display, _angleDevice, _d3dDevice);
+        // Linux では eglTerminate は呼ばない: 同じディスプレイを Avalonia や別スレッドのコンテキストが使っていることがある
+        _display = _context = _surface = _d3dDevice = _angleDevice = IntPtr.Zero;
     }
 }
