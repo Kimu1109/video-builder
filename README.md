@@ -1,37 +1,94 @@
 # video-builder
 
-Avalonia UI / C# 製の、AviUtl ライクな動画編集アプリ (Linux 優先・マルチプラットフォーム)。
-動画・写真を並べるだけのシンプル編集 (ムービーメーカー風) にも、環境設定の「編集モード」で切り替えられる。
+**AviUtl ライクな操作感の、Linux 優先・マルチプラットフォームの動画編集アプリ**
 
-- 設計書: [docs/DESIGN.md](docs/DESIGN.md) (実装状況は 22 章)
+レイヤーとキーフレームで細かく組み立てる「詳細編集」と、動画・写真を並べるだけの「シンプル編集」(ムービーメーカー風) の 2 つの編集モードを持ち、同じプロジェクトをどちらでも開けます。C# と [Avalonia UI](https://avaloniaui.net/) で作られています。
 
-## 必要なもの
+*A layer-based video editor inspired by AviUtl, with keyframes, effects, templates, Lua scripting and plugins. Linux first; Windows and macOS are also supported. The UI is available in Japanese and English.*
 
-- .NET 10 SDK
-- FFmpeg 9 の共有ライブラリ (`libavcodec.so.63` など)。Ubuntu 24.04 の標準の FFmpeg は 6.1 なので使えない。
-  配布物と同じ設定 (x264・x265 入り) のものは、次のように作れる (ffmpeg.org のソースから作る。数分かかる):
+- 対応 OS: Linux (Ubuntu 22.04+ / Fedora 39+ / Arch) ・ Windows 10+ ・ macOS 13+
+- 表示言語: 日本語 / English
+- ライセンス: [LGPL-3.0-or-later](#ライセンス)
 
-  ```sh
-  sudo apt install build-essential nasm pkg-config libx264-dev libx265-dev libvpx-dev libdav1d-dev libopus-dev libffmpeg-nvenc-dev libva-dev libdrm-dev
-  packaging/ffmpeg/build.sh --prefix ~/.local/ffmpeg9
-  export VIDEO_BUILDER_FFMPEG=~/.local/ffmpeg9/lib LD_LIBRARY_PATH=~/.local/ffmpeg9/lib
-  ```
-- OpenAL Soft (`libopenal1`)。音声の再生に使う
-- (任意) EGL / OpenGL ES (`libegl1`)。GPU 描画に使う。なければ CPU で描画する
+## 目次
 
-FFmpeg を標準以外の場所に置いている場合は、環境変数 `VIDEO_BUILDER_FFMPEG` にライブラリのあるフォルダを指定する。
+- [特長](#特長)
+- [入手方法](#入手方法)
+- [使い方](#使い方)
+- [開発者向け](#開発者向け)
+- [ライセンス](#ライセンス)
 
-CPU 内蔵の GPU と外付けの GPU (NVIDIA など) の両方がある場合は、環境設定の「使う GPU」で描画に使う GPU を選べる
-(既定は自動で、外付けを優先する。動画のデコードも同じ GPU に合わせる。設計書 22.23)。環境変数 `VIDEO_BUILDER_GPU` (GPU の名前の一部) でも指定できる。
+## 特長
 
-## ビルドと実行
+**AviUtl ユーザーが迷わず使える**
+用語・画面構成・ショートカットはできる限り AviUtl 拡張編集に合わせています。右クリック中心の操作、中間点と移動方法によるアニメーションもそのまま使えます。
+
+**2 つの編集モード**
+
+| モード | こんな人に |
+|---|---|
+| **詳細編集 (AviUtl 風)** | レイヤー・オブジェクト・キーフレームで細かく作り込みたい |
+| **シンプル編集 (ムービーメーカー風)** | 動画・写真・タイトルを並べ、切り替え効果・キャプション・音楽を付けるだけでよい |
+
+**主な機能**
+
+- レイヤー 100 層のタイムライン、キーフレームと移動方法 (直線移動・加減速・曲線移動など) によるアニメーション
+- 動画・画像・音声・テキスト・図形・シーンのオブジェクト、フィルタ効果、合成モード
+- グループ制御、カメラ制御 (3D)、Lua によるスクリプト制御
+- テンプレート・プリセット、BPM グリッド、音声波形とサムネイルの表示
+- 素材の付け替え・収集、ショートカットのカスタマイズ
+- ライト / ダークテーマ (既定は OS のテーマとアクセントカラーに従う)
+- プラグインで機能を追加できる ([docs/PLUGIN_API.md](docs/PLUGIN_API.md))
+
+**軽快に動かすための工夫**
+
+- GPU 描画 (なければ自動で CPU 描画)。内蔵 GPU と外付け GPU を選べる
+- ハードウェアデコード (NVDEC / VAAPI / VideoToolbox など。使えなければ自動でソフトウェアに戻る)
+- ハードウェアエンコード (NVENC / Quick Sync / VAAPI など。使える環境では出力ダイアログに自動で出る)
+- プロキシ編集 (4K などの重い動画は、プレビュー用の小さな動画を自動で作る)
+- パフォーマンスチェック (描画時間・FPS・メモリなどをその場で確認できる)
+
+**出力形式**: H.264 / H.265 / VP9 / AV1 / ProRes / 連番 PNG (FFmpeg 経由)
+
+## 入手方法
+
+> [!NOTE]
+> まだ正式なリリースはありません。現時点では、次のどちらかの方法で試せます。
+
+### 配布物をダウンロードする (Windows・macOS)
+
+GitHub Actions の [Package ワークフロー](https://github.com/Kimu1109/video-builder/actions/workflows/package.yml) の実行結果 (Artifacts) から、FFmpeg を同梱した Windows・macOS 向けの配布物をダウンロードできます (GitHub へのログインが必要です)。
+
+### ソースからビルドする (Linux など)
+
+必要なもの:
+
+- [.NET 10 SDK](https://dotnet.microsoft.com/download)
+- FFmpeg 9 の共有ライブラリ (作り方は[下記](#ffmpeg-9-を用意する))
+- OpenAL Soft (`libopenal1`)。音声の再生に使います
+- (任意) EGL / OpenGL ES (`libegl1`)。GPU 描画に使います。なければ CPU で描画します
 
 ```sh
-dotnet build
-dotnet run --project src/VideoBuilder.App
+git clone https://github.com/Kimu1109/video-builder.git
+cd video-builder
+dotnet run --project src/VideoBuilder.App -- --demo   # サンプルのプロジェクトを開いて起動
 ```
 
-起動オプション:
+#### FFmpeg 9 を用意する
+
+Ubuntu 24.04 の標準の FFmpeg は 6.1 なので使えません。配布物と同じ設定 (x264・x265 入り) のものを、ffmpeg.org のソースから次のように作れます (数分かかります)。
+
+```sh
+sudo apt install build-essential nasm pkg-config libx264-dev libx265-dev libvpx-dev libdav1d-dev libopus-dev libffmpeg-nvenc-dev libva-dev libdrm-dev
+packaging/ffmpeg/build.sh --prefix ~/.local/ffmpeg9
+export VIDEO_BUILDER_FFMPEG=~/.local/ffmpeg9/lib LD_LIBRARY_PATH=~/.local/ffmpeg9/lib
+```
+
+FFmpeg を標準以外の場所に置いている場合は、環境変数 `VIDEO_BUILDER_FFMPEG` にライブラリのあるフォルダを指定します。
+
+## 使い方
+
+### 起動オプション
 
 | オプション | 内容 |
 |---|---|
@@ -43,44 +100,16 @@ dotnet run --project src/VideoBuilder.App
 | `--lang ja\|en` | 表示言語を指定する (既定は OS の言語) |
 | `--screenshot <png>` | ウィンドウを画像に保存して終了する (見た目の確認用) |
 
-## テスト
+### 編集モードの切り替え
 
-```sh
-dotnet test
-```
+環境設定、または「表示」→「編集モード」で切り替えます。
 
-動画・音声のテストは `ffmpeg` コマンドで素材を作る。FFmpeg がない環境では該当テストは何も検証せずに成功するので、
-CI では `VB_REQUIRE_FFMPEG=1` を付けて、FFmpeg がない場合に失敗させる。
-
-## 編集モード
-
-環境設定 (または「表示」→「編集モード」) で切り替える。同じプロジェクトをどちらでも開ける (設計書 22.21)。
-
-- **詳細編集 (AviUtl 風)**: レイヤー・オブジェクト・キーフレームで細かく組み立てる。下の「基本操作」はこちら
-- **シンプル編集 (ムービーメーカー風)**: 動画・写真・タイトルを 1 列に並べ、切り替え効果・キャプション・音楽を付ける
-
-シンプル編集の操作:
-
-| 操作 | 内容 |
-|---|---|
-| ファイルをストーリーボードへドロップ / 「ビデオと写真」 | 動画・写真を追加 (音声ファイルは音楽として現在位置から) |
-| クリップをクリック / ドラッグ | 選択と現在位置の移動 / 並べ替え |
-| 音楽をドラッグ | 鳴らし始める位置を変える |
-| `S` / `Delete` | 現在位置で分割 / 削除 |
-| `[` / `]` | 選んでいるクリップの開始 / 終了を現在位置に |
-| 右側の欄 | 長さ・速度 (0.25〜8 倍)・キャプション・切り替え効果・動き・見た目・回転・音量 |
-
-## パフォーマンスチェック
-
-「表示」→「パフォーマンスチェック」(`Ctrl+Shift+P`、ツールバー右の (i) ボタン) でオンにすると、どちらの編集モードでも、
-プレビューの左上に描画時間・表示 FPS が出て、詳細の窓でプレビュー・再生・ベンチマーク・出力 (エンコード) の内訳・メモリを確かめられる (設計書 22.22)。
-
-## 基本操作 (詳細編集)
+### 詳細編集の基本操作
 
 | 操作 | 内容 |
 |---|---|
 | タイムラインを右クリック | オブジェクトの追加・貼り付け |
-| ファイルをタイムラインへドロップ | 動画・画像・音声を、落とした位置 (レイヤー・時刻) に配置 (Linux は X11 / XWayland。設計書 22.14) |
+| ファイルをタイムラインへドロップ | 動画・画像・音声を、落とした位置 (レイヤー・時刻) に配置 (Linux は X11 / XWayland) |
 | オブジェクトをドラッグ / 端をドラッグ | 移動 / 長さ変更 (Alt でスナップ無効) |
 | `Space` | 再生 / 停止 |
 | `←` `→` (`Shift` で 10 フレーム) | フレーム移動 |
@@ -91,42 +120,61 @@ CI では `VB_REQUIRE_FFMPEG=1` を付けて、FFmpeg がない場合に失敗�
 | プロパティのパラメータ名をクリック | 移動方法 (直線移動など) の選択 |
 | 何もない所をドラッグ | 範囲選択 (Ctrl で追加) |
 
-## 主な機能
+### シンプル編集の基本操作
 
-- レイヤー 100 層のタイムライン、キーフレームと移動方法によるアニメーション
-- 動画・画像・音声・テキスト・図形・シーン、フィルタ効果、合成モード
-- グループ制御、カメラ制御 (3D)、Lua によるスクリプト制御
-- プリセット、BPM グリッド、出力範囲、音声波形とサムネイルの表示
-- 素材の付け替え・収集、ショートカットのカスタマイズ、日本語 / 英語
-- GPU 描画 (Linux)、プラグイン (`samples/SamplePlugin` が見本。設計書 22.6)
-- ハードウェアエンコード (NVENC / Quick Sync / VAAPI など。使える環境では出力ダイアログの形式に自動で出る。設計書 22.11)
-- ハードウェアデコード (NVDEC / VAAPI / VideoToolbox など。使えなければ自動でソフトウェアに戻る。設計書 22.12)
-- プロキシ (重い動画のかわりにプレビューで使う小さな動画。4K などは自動で作る。設計書 22.13)
+| 操作 | 内容 |
+|---|---|
+| ファイルをストーリーボードへドロップ / 「ビデオと写真」 | 動画・写真を追加 (音声ファイルは音楽として現在位置から) |
+| クリップをクリック / ドラッグ | 選択と現在位置の移動 / 並べ替え |
+| 音楽をドラッグ | 鳴らし始める位置を変える |
+| `S` / `Delete` | 現在位置で分割 / 削除 |
+| `[` / `]` | 選んでいるクリップの開始 / 終了を現在位置に |
+| 右側の欄 | 長さ・速度 (0.25〜8 倍)・キャプション・切り替え効果・動き・見た目・回転・音量 |
 
-## 配布用のビルド
+### GPU の選択
+
+内蔵 GPU と外付け GPU (NVIDIA など) の両方がある場合は、環境設定の「使う GPU」で描画に使う GPU を選べます (既定は自動で、外付けを優先。動画のデコードも同じ GPU に合わせます)。環境変数 `VIDEO_BUILDER_GPU` (GPU の名前の一部) でも指定できます。
+
+### パフォーマンスチェック
+
+「表示」→「パフォーマンスチェック」(`Ctrl+Shift+P`、ツールバー右の (i) ボタン) でオンにすると、プレビューの左上に描画時間・表示 FPS が出ます。詳細の窓では、プレビュー・再生・ベンチマーク・出力 (エンコード) の内訳とメモリを確認できます。
+
+## 開発者向け
+
+- 設計書: [docs/DESIGN.md](docs/DESIGN.md) (実装状況は 22 章)
+- プラグイン API: [docs/PLUGIN_API.md](docs/PLUGIN_API.md) (見本は `samples/SamplePlugin`)
+
+### ビルドとテスト
+
+```sh
+dotnet build
+dotnet run --project src/VideoBuilder.App
+dotnet test
+```
+
+動画・音声のテストは `ffmpeg` コマンドで素材を作ります。FFmpeg がない環境では該当テストは何も検証せずに成功するので、CI では `VB_REQUIRE_FFMPEG=1` を付けて、FFmpeg がない場合に失敗させています。
+
+### 配布用のビルド
 
 ```sh
 packaging/appimage/build.sh        # artifacts/appimage/ に出力
 ```
 
-`appimagetool` が PATH にあれば AppImage まで作り、なければ展開した状態 (AppDir) で止まる。
-FFmpeg 9 (x264・x265 入りの GPL ビルド) は `packaging/ffmpeg/build.sh` で作って同梱する。OpenAL は同梱しないので、利用者の環境に必要。
-Flatpak は `packaging/flatpak/build.sh` で作る (FFmpeg もマニフェストの中で作る)。
-Windows・macOS 向けは、GitHub Actions の `Package` ワークフロー (`.github/workflows/package.yml`) が、
-それぞれの OS で FFmpeg を作って同梱したものを作る (手動で実行するか、`v*` のタグを付ける)。
+- `appimagetool` が PATH にあれば AppImage まで作り、なければ展開した状態 (AppDir) で止まります。
+- FFmpeg 9 (x264・x265 入りの GPL ビルド) は `packaging/ffmpeg/build.sh` で作って同梱します。OpenAL は同梱しないので、利用者の環境に必要です。
+- Flatpak は `packaging/flatpak/build.sh` で作ります (FFmpeg もマニフェストの中で作ります)。
+- Windows・macOS 向けは、GitHub Actions の `Package` ワークフロー (`.github/workflows/package.yml`) が、それぞれの OS で FFmpeg を作って同梱したものを作ります (手動で実行するか、`v*` のタグを付けます)。
+
+### 翻訳
+
+画面の文言は日本語でソースに書き、英語は `tools/I18n/en.txt` の対応表で置き換えています。文言を足したら対応表に行を追加し、`python3 tools/I18n/generate.py` を実行してください。
+
+### アイコン
+
+[Material Symbols](https://fonts.google.com/icons) の Sharp スタイル (Apache License 2.0) を使用しています。`tools/IconGen/icons.txt` に書いたアイコンだけを `tools/IconGen/generate.py` で `Icons.axaml` に変換しています。
 
 ## ライセンス
 
-video-builder は [LGPL-3.0-or-later](LICENSE) で配布する (条文は [COPYING.LESSER](COPYING.LESSER) と [COPYING](COPYING))。
-配布物 (AppImage・Flatpak) は x264・x265 を有効にした FFmpeg (GPL) を同梱するため、全体を GPL-3.0-or-later の条件で配る。
-使っているソフトウェアとライセンスは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照。
-
-## 翻訳
-
-画面の文言は日本語でソースに書き、英語は `tools/I18n/en.txt` の対応表で置き換えている。
-文言を足したら対応表に行を追加し、`python3 tools/I18n/generate.py` を実行する。
-
-## アイコン
-
-[Material Symbols](https://fonts.google.com/icons) の Sharp スタイル (Apache License 2.0) を使用。
-`tools/IconGen/icons.txt` に書いたアイコンだけを `tools/IconGen/generate.py` で `Icons.axaml` に変換している。
+video-builder は [LGPL-3.0-or-later](LICENSE) で配布しています (条文は [COPYING.LESSER](COPYING.LESSER) と [COPYING](COPYING))。
+配布物 (AppImage・Flatpak など) は x264・x265 を有効にした FFmpeg (GPL) を同梱するため、全体を GPL-3.0-or-later の条件で配布します。
+使っているソフトウェアとライセンスは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。
