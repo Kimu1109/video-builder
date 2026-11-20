@@ -1155,5 +1155,57 @@ public class OptimizationTests
             Assert.True(bytes[i] <= bytes[i + 3] && bytes[i + 1] <= bytes[i + 3] && bytes[i + 2] <= bytes[i + 3], $"pixel {i / 4}");
     }
 
+
+    [Fact]
+    public void Preview_enlarges_with_the_fast_filter_and_export_keeps_the_high_quality_one()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-up-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            // 細かい模様の小さな画像を 3 倍に拡大して映す
+            var file = Path.Combine(dir, "small.png");
+            using (var bmp = new SKBitmap(new SKImageInfo(40, 30, SKColorType.Bgra8888, SKAlphaType.Premul)))
+            {
+                var rnd = new Random(5);
+                for (int y = 0; y < 30; y++) for (int x = 0; x < 40; x++) bmp.SetPixel(x, y, new SKColor((byte)rnd.Next(256), (byte)rnd.Next(256), (byte)rnd.Next(256)));
+                using var data = bmp.Encode(SKEncodedImageFormat.Png, 100);
+                File.WriteAllBytes(file, data.ToArray());
+            }
+            var p = Small();
+            var o = ObjectFactory.Create(EffectRegistry.Image, 0, 0, 10);
+            o.Main.Values["file"] = file;
+            o.Draw!.Tracks["scale"] = new AnimatedValue(300);
+            p.Root.Objects.Add(o);
+            byte[] Engine(bool draft)
+            {
+                using var e = new RenderEngine { Draft = draft };
+                using var b = new SKBitmap(new SKImageInfo(640, 360, SKColorType.Bgra8888, SKAlphaType.Premul));
+                e.RenderToBitmap(p, p.Root, 0, b);
+                return b.Bytes;
+            }
+            byte[] Reference(SKFilterQuality q)
+            {
+                using var b = new SKBitmap(new SKImageInfo(640, 360, SKColorType.Bgra8888, SKAlphaType.Premul));
+                using var c = new SKCanvas(b);
+                using var image = SKImage.FromEncodedData(file);
+                c.Clear(SKColors.Black);
+                c.Translate(320, 180);
+                c.Scale(3);
+                using var paint = new SKPaint { FilterQuality = q, IsAntialias = true };
+                c.DrawImage(image, -20, -15, paint);
+                c.Flush();
+                return b.Bytes;
+            }
+            static double Mean(byte[] a, byte[] b) { long t = 0; for (int i = 0; i < a.Length; i++) t += Math.Abs(a[i] - b[i]); return (double)t / a.Length; }
+            var preview = Engine(true);
+            var export = Engine(false);
+            Assert.True(Mean(preview, Reference(SKFilterQuality.Low)) < 0.01, "プレビューはバイリニアで拡大する");
+            Assert.True(Mean(export, Reference(SKFilterQuality.High)) < 0.01, "出力は高品質 (バイキュービック) で拡大する");
+            Assert.NotEqual(preview, export);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
 }
 

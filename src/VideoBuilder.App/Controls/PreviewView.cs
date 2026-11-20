@@ -73,8 +73,11 @@ public sealed class PreviewView : Control
 
         if (Svc.Preview.HasFrame)
         {
-            // 再生中は軽い補間にして、止まっているときだけ高品質にする
-            var quality = Svc.Preview.IsPlaying ? SKFilterQuality.Low : SKFilterQuality.High;
+            // 画面に合わせて拡大するときは、いつも軽い補間 (バイリニア) にする (止まっているときも。高品質の拡大は重い)。
+            // 縮小して表示するときだけ、止まっている間はなめらかに縮める (ちらつきを抑える)
+            var (fw, fh) = Svc.Preview.LastRenderSize;
+            bool enlarging = fw <= 0 || (_dest.Width * (TopLevel.GetTopLevel(this)?.RenderScaling ?? 1) >= fw - 0.5);
+            var quality = Svc.Preview.IsPlaying || enlarging ? SKFilterQuality.Low : SKFilterQuality.Medium;
             context.Custom(new FrameDrawOperation(_dest, new Rect(Bounds.Size), quality));
         }
         else context.FillRectangle(Brushes.Black, _dest);
