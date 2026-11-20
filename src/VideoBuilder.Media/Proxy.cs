@@ -229,7 +229,20 @@ public static class ProxyStore
         return result;
     }
 
+    // 同時に測っている数と、その最大 (確認・テスト用。測るのは 1 本ずつのはず)
+    private static int _measuring;
+    internal static int MaxConcurrentMeasurements;
+
     private static DecodeCheck? Measure(string path)
+    {
+        int now = Interlocked.Increment(ref _measuring);
+        int max;
+        while (now > (max = Volatile.Read(ref MaxConcurrentMeasurements)) && Interlocked.CompareExchange(ref MaxConcurrentMeasurements, now, max) != max) { }
+        try { return MeasureCore(path); }
+        finally { Interlocked.Decrement(ref _measuring); }
+    }
+
+    private static DecodeCheck? MeasureCore(string path)
     {
         if (!FFmpegLoader.EnsureLoaded()) return null;
         double interval = KeyframeInterval(path);

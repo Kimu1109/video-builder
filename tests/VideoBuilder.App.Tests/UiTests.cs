@@ -1481,4 +1481,43 @@ public class UiTests
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
+
+    [AvaloniaFact]
+    public async Task Opening_a_project_checks_videos_for_proxies_one_at_a_time_without_blocking_the_screen()
+    {
+        if (!VideoBuilder.Media.FFmpegLoader.EnsureLoaded()) return;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-check-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var p = new Project();
+            for (int i = 0; i < 4; i++)
+            {
+                // 重くない動画 (320x180 の H.264) なので、この PC でのデコードの速さを測ってから決める
+                var clip = Path.Combine(dir, $"c{i}.mp4");
+                using (var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ffmpeg",
+                    $"-y -loglevel error -f lavfi -i testsrc2=size=320x180:rate=30:duration=3 -c:v libx264 -preset ultrafast -pix_fmt yuv420p \"{clip}\"")))
+                {
+                    proc!.WaitForExit(30000);
+                    if (proc.ExitCode != 0) return;
+                }
+                var v = ObjectFactory.Create(EffectRegistry.Video, i, 0, 60);
+                v.Main.Values["file"] = clip;
+                p.Root.Objects.Add(v);
+            }
+            VideoBuilder.Media.ProxyStore.MaxConcurrentMeasurements = 0;
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            Svc.Proxies.EnqueueProject(p, heavyOnly: true);
+            double callMs = watch.Elapsed.TotalMilliseconds;
+            Assert.True(Svc.Proxies.IsChecking);                        // 裏で調べている
+            for (int i = 0; i < 500 && Svc.Proxies.IsChecking; i++) { await Task.Delay(10); Pump(); }
+            Assert.False(Svc.Proxies.IsChecking);
+            Assert.Equal(1, VideoBuilder.Media.ProxyStore.MaxConcurrentMeasurements);   // 1 本ずつ測った
+            Assert.NotNull(Svc.Proxies.LastCheck);
+            Assert.Equal(0, Svc.Proxies.Pending);                       // 小さい動画にはプロキシを作らない
+            Assert.True(callMs < 200, $"呼び出しに {callMs:0} ms (画面を止めない)");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
 }

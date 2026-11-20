@@ -4,5 +4,6 @@
     <PackageReference Include="FFmpeg.AutoGen" />
     <PackageReference Include="Silk.NET.OpenAL" />
     <InternalsVisibleTo Include="VideoBuilder.Tests" />
+    <InternalsVisibleTo Include="VideoBuilder.App.Tests" />
   </ItemGroup>
 </Project>

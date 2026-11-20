@@ -105,29 +105,66 @@ public sealed class ProxyService
     // 自動で作るかを調べている動画 (同じものを何度も調べない)
     private readonly HashSet<string> _checking = new();
 
+    // 調べる順番待ち。1 本ずつ、裏のスレッドで調べる
+    private readonly Queue<(string Path, MediaInfo? Info)> _checkQueue = new();
+    private readonly object _checkGate = new();
+    private bool _checkerRunning;
+
     /// <summary>
-    /// プロキシが要る動画なら順番待ちに入れる (自動作成)。4K・H.265 などはすぐ入れる。そうでなければ、
-    /// この PC でのデコードの速さとキーフレームの間隔を裏で測ってから決める (ProxyStore.NeedsProxy)。UI スレッドから呼ぶ。
+    /// プロキシが要る動画なら順番待ちに入れる (自動作成)。UI スレッドから呼ぶ。すぐに戻る。
+    /// 裏のスレッドで 1 本ずつ、ファイルを調べ (info がなければ)、4K・H.265 などはそのまま入れ、そうでなければ
+    /// この PC でのデコードの速さとキーフレームの間隔を測ってから決める (ProxyStore.NeedsProxy)。
+    /// 1 本ずつにするのは、同時に測ると互いに CPU を取り合って遅く測れ、要らないプロキシまで作ってしまうため
+    /// (動画 19 本を同時に測ると、デコードの速さが 1 本だけのときの 4 分の 1 ほどに見えた)。
     /// </summary>
     public void EnqueueIfNeeded(string path, MediaInfo? info = null)
     {
         if (string.IsNullOrEmpty(path) || _queued.Contains(path) || _checking.Contains(path) || ProxyStore.Exists(path)) return;
-        info ??= MediaInfo.Probe(path);
-        if (info is not { HasVideo: true }) return;
-        if (ProxyStore.IsHeavy(info)) { Enqueue(path); return; }
+        if (info != null && !info.HasVideo) return;
         _checking.Add(path);
-        var known = info;
-        _ = Task.Run(() =>
+        lock (_checkGate)
         {
+            _checkQueue.Enqueue((path, info));
+            if (_checkerRunning) return;
+            _checkerRunning = true;
+        }
+        _ = Task.Run(CheckLoop);
+    }
+
+    private void CheckLoop()
+    {
+        while (true)
+        {
+            (string Path, MediaInfo? Info) item;
+            lock (_checkGate)
+            {
+                if (!_checkQueue.TryDequeue(out item)) { _checkerRunning = false; return; }
+            }
+            var (path, info) = item;
             DecodeCheck? check = null;
-            try { check = ProxyStore.MeasureDecode(path); } catch { check = null; }
+            bool needed = false;
+            try
+            {
+                info ??= MediaInfo.Probe(path);
+                if (info is { HasVideo: true })
+                {
+                    if (ProxyStore.IsHeavy(info)) needed = true;
+                    else
+                    {
+                        check = ProxyStore.MeasureDecode(path);
+                        needed = ProxyStore.NeedsProxy(info, check);
+                    }
+                }
+            }
+            catch { needed = false; }
             Dispatcher.UIThread.Post(() =>
             {
                 _checking.Remove(path);
-                LastCheck = check == null ? null : (path, check);
-                if (ProxyStore.NeedsProxy(known, check)) Enqueue(path);
+                if (check != null) LastCheck = (path, check);
+                if (needed) Enqueue(path);
+                Changed?.Invoke();
             });
-        });
+        }
     }
 
     /// <summary>直近に測った動画と結果 (確認・テスト用)。</summary>
