@@ -787,6 +787,8 @@ public static class ProxyGenerator
                 ffmpeg.sws_scale(_sws, f->data, f->linesize, 0, f->height, _scaled->data, _scaled->linesize);
                 // 元の動画の最初の時刻を 0 にそろえる (VideoReader も最初の時刻を引いて扱う)
                 _scaled->pts = f->best_effort_timestamp - job._startPts;
+                // 画質 (量子化の細かさ) はフレームごとに渡す。渡さないと 0 (= いちばん細かい) として扱われ、ファイルが大きくなる
+                _scaled->quality = _enc->global_quality;
                 Encode(_scaled);
                 _written++;
             }

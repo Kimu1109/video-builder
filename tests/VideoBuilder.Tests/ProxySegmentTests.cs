@@ -215,6 +215,20 @@ public class ProxySegmentTests : IDisposable
     }
 
     [Fact]
+    public void Proxy_files_are_as_small_as_ffmpeg_makes_them_at_the_same_quality()
+    {
+        if (!_ready) return;
+        ProxyGenerator.Create(_clip, Folder, 2, null, CancellationToken.None);
+        long ours = Directory.GetFiles(Folder, "*.mkv").Sum(f => new FileInfo(f).Length);
+        // 同じ画質 (量子化 4)・同じ縮小 (バイリニア) で、ffmpeg のコマンドが作る大きさ
+        var reference = Path.Combine(_dir, "reference.mkv");
+        Assert.True(MediaTests.RunFfmpeg($"-i \"{_clip}\" -an -vf scale=160:90:flags=bilinear -c:v mjpeg -q:v 4 -pix_fmt yuvj420p \"{reference}\""));
+        long theirs = new FileInfo(reference).Length;
+        // 以前はフレームごとの画質を渡しておらず、いちばん細かい量子化になって 3〜5 割大きかった
+        Assert.True(ours < theirs * 1.15, $"プロキシ {ours / 1024} KB / ffmpeg {theirs / 1024} KB");
+    }
+
+    [Fact]
     public void Decode_speed_and_keyframe_interval_are_measured_on_this_machine()
     {
         if (!_ready) return;
