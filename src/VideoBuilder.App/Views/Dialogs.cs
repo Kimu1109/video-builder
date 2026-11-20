@@ -175,7 +175,9 @@ public sealed class PreferencesDialog : DialogBase
         combo.IsEnabled = adapters.Count > 0;
         note.Text = adapters.Count == 0
             ? L.T("GPU を選べません (この環境では、デスクトップの GPU で描きます)。") + (error != null ? "\n" + error : "")
-            : L.T("CPU 内蔵の GPU と外付けの GPU があるときに選びます。描画・出力・動画のデコードに使います。");
+            : L.T("CPU 内蔵の GPU と外付けの GPU があるときに選びます。描画・出力・動画のデコードに使います。")
+              // Windows: 画面の描画の GPU は起動のときに決まる (プレビューを読み戻さずに出すには、同じ GPU である必要がある)
+              + (OperatingSystem.IsWindows() ? "\n" + L.T("画面の表示にも同じ GPU を使います。変えたときは、アプリを起動し直すと画面の表示も切り替わります。") : "");
         note.SetValue(L.VerbatimProperty, true);
         if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU")))
         {

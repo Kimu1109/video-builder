@@ -273,6 +273,30 @@ internal static unsafe class DxgiAdapters
         if (unknown != IntPtr.Zero) ((delegate* unmanaged[Stdcall]<IntPtr, uint>)(*(IntPtr**)unknown)[2])(unknown);
     }
 
+    private static readonly Guid IID_IDXGIDevice = new("54ec77fa-1377-44e6-8c32-88fd5f44c84c");
+
+    /// <summary>Direct3D 11 のデバイスがある GPU の LUID (分からなければ 0)。</summary>
+    public static long LuidOf(IntPtr d3dDevice)
+    {
+        if (d3dDevice == IntPtr.Zero) return 0;
+        IntPtr dxgiDevice, adapter;
+        var iid = IID_IDXGIDevice;
+        if (((delegate* unmanaged[Stdcall]<IntPtr, Guid*, IntPtr*, int>)(*(IntPtr**)d3dDevice)[0])(d3dDevice, &iid, &dxgiDevice) < 0) return 0;
+        try
+        {
+            // IDXGIDevice::GetAdapter (7) → IDXGIAdapter1::GetDesc1 (10)
+            if (((delegate* unmanaged[Stdcall]<IntPtr, IntPtr*, int>)(*(IntPtr**)dxgiDevice)[7])(dxgiDevice, &adapter) < 0) return 0;
+            try
+            {
+                AdapterDesc1 d;
+                if (((delegate* unmanaged[Stdcall]<IntPtr, AdapterDesc1*, int>)(*(IntPtr**)adapter)[10])(adapter, &d) < 0) return 0;
+                return ((long)d.LuidHigh << 32) | d.LuidLow;
+            }
+            finally { Release(adapter); }
+        }
+        finally { Release(dxgiDevice); }
+    }
+
     [DllImport("d3d11.dll")]
     private static extern int D3D11CreateDevice(IntPtr adapter, int driverType, IntPtr software, uint flags, int* featureLevels, uint levels, uint sdkVersion,
         IntPtr* device, int* featureLevel, IntPtr* immediateContext);
@@ -329,6 +353,30 @@ public sealed unsafe class GpuContext : IDisposable
     private GRGlInterface? _interface;
     // Windows: このコンテキストだけの Direct3D 11 のデバイスと、それを包む ANGLE のデバイス (Dispose で手放す)
     private IntPtr _d3dDevice, _angleDevice;
+    private IntPtr _config;
+
+    internal IntPtr Display => _display;
+    internal IntPtr Config => _config;
+    internal IntPtr D3DDevice => _d3dDevice;
+
+    /// <summary>
+    /// Windows: このコンテキストの Direct3D 11 のデバイスがある GPU の LUID (画面の描画と同じ GPU か比べるのに使う)。それ以外は 0。
+    /// </summary>
+    public long DeviceLuid { get; private set; }
+
+    /// <summary>
+    /// Windows: 画面の描画 (Avalonia) と共有できる Direct3D 11 のテクスチャを作り、このコンテキストで描けるようにする。
+    /// このコンテキストを有効にしたスレッドで呼ぶ。作れなければ null (error に理由)。
+    /// </summary>
+    public SharedD3DTexture? CreateSharedD3DTexture(int width, int height, out string? error)
+    {
+        error = null;
+        if (!OperatingSystem.IsWindows() || _d3dDevice == IntPtr.Zero) { error = "Direct3D 11 のデバイスがありません"; return null; }
+        var t = SharedD3DTexture.Create(this, width, height, out error);
+        // Skia の知らないところで GL の状態 (結び付けたテクスチャ) を変えたので、知らせる
+        Context.ResetContext();
+        return t;
+    }
 
     public GRContext Context { get; private set; } = null!;
     public string Renderer { get; private set; } = "";
@@ -497,7 +545,7 @@ public sealed unsafe class GpuContext : IDisposable
             ReleaseAngle(display, angleDevice, d3d);
             return null;
         }
-        var ctx = new GpuContext { _display = display, _d3dDevice = d3d, _angleDevice = angleDevice, Adapter = adapter };
+        var ctx = new GpuContext { _display = display, _d3dDevice = d3d, _angleDevice = angleDevice, Adapter = adapter, DeviceLuid = DxgiAdapters.LuidOf(d3d) };
         if (ctx.Setup(out reason)) return ctx;
         ctx.Dispose();
         return null;
@@ -604,6 +652,7 @@ public sealed unsafe class GpuContext : IDisposable
                 if (EglApi.ChooseConfig(_display, a, &config, 1, &count) == 0 || count == 0) { reason = "使える設定がありません"; continue; }
             int* contextAttribs = stackalloc[] { EGL_CONTEXT_CLIENT_VERSION, version, EGL_NONE };
             _context = EglApi.CreateContext(_display, config, IntPtr.Zero, contextAttribs);
+            _config = config;
             if (_context == IntPtr.Zero) { reason = $"OpenGL ES {version} のコンテキストを作れません"; continue; }
             int* surfaceAttribs = stackalloc[] { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
             _surface = pbuffer ? EglApi.CreatePbufferSurface(_display, config, surfaceAttribs) : IntPtr.Zero;

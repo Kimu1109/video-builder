@@ -2030,7 +2030,7 @@ AviUtl 風の詳細編集とは別に、動画・写真を並べるだけで作�
 | 仕組み | Avalonia の画面の描画 (コンポジタ) が OpenGL でテクスチャの共有に対応していれば (`IOpenGlTextureSharingRenderInterfaceContextFeature`)、それと共有する GL コンテキストを作り (`SharedPreviewTarget`)、描画のスレッドの Skia をそのコンテキストで動かす (`GpuContext.FromExternal`)。共有のテクスチャ (最大 3 枚を順に使う) に直接描き (`RenderEngine.RenderToGpuSurface`)、`CompositionDrawingSurface` に渡して、`PreviewView` の子のビジュアルとしてフレームの位置に出す。読み戻しも、メモリ上の複製も、送り直しもない |
 | 同期 | 描き終えたら GPU の処理が終わるのを待ってから (`Flush(submit, synchronous)`) 画面に渡す。画面に出ている・出す途中のテクスチャには描かない (次の絵に切り替わったら空く) |
 | 選択の枠 | 子のビジュアルはコントロール自身の描画より上に出るので、選択の枠は別の層 (`PreviewView.Selection`) に描いて上に重ねる |
-| 使う条件 | Linux・描画方式が GPU (自動を含む)・画面の GPU と描画に選んだ GPU が同じ (`GL_RENDERER` で比べる。違う GPU の間では共有できないので、これまでどおり読み戻す)・自動のときは画面の GPU がソフトウェアでない。`--screenshot` のときは使わない (ウィンドウを画像に描く方法では写らないため)。環境変数 `VIDEO_BUILDER_SHARED_PREVIEW=0` で使わない、`=1` で条件を問わず使う |
+| 使う条件 | Linux (Windows は Direct3D 11 の共有テクスチャで。[22.35](#2235-windows-の-gpu-描画-angle))・描画方式が GPU (自動を含む)・画面の GPU と描画に選んだ GPU が同じ (`GL_RENDERER` で比べる。違う GPU の間では共有できないので、これまでどおり読み戻す)・自動のときは画面の GPU がソフトウェアでない。`--screenshot` のときは使わない (ウィンドウを画像に描く方法では写らないため)。環境変数 `VIDEO_BUILDER_SHARED_PREVIEW=0` で使わない、`=1` で条件を問わず使う |
 | 表示 | 使っているときは、描画方式の説明に「画面と共有」と出る。使える環境なのに使わないときは理由を添える |
 | 使えないとき | ヘッドレス・Vulkan・ソフトウェアの画面の描画など。これまでどおり読み戻して `PreviewView` が描く (UI のテストはこちらを通る) |
 
@@ -2180,10 +2180,22 @@ Windows でも GPU で描画する。Linux と同じ「OpenGL ES + Skia」の作
 | 動画のデコード | `DeviceHint` は Windows では (`cuda` か `d3d11va`, DXGI の番号)。Intel / AMD を選べば D3D11VA を先に試し、D3D11VA はその番号の GPU で開く (FFmpeg の D3D11VA のデバイス名は DXGI の列挙の番号)。NVIDIA を選んだときも、NVDEC が使えなければ同じ GPU で D3D11VA を使う |
 | 確かめ方 | CI (`ci.yml` の `windows-gpu`): GPU のない `windows-latest` で、WARP を使って GPU のテスト (CPU と GPU の絵の比較・GPU の選択・繰り返しの描画) を流す。`VB_REQUIRE_GPU=1` で、GPU を作れないことを失敗にする |
 
-画面との共有 (22.28) は、まだ Linux だけ。Windows では、GPU で描いた絵を読み戻して表示する。
+#### 画面との共有 (読み戻さずに表示する)
+
 Windows の Avalonia (ANGLE) は GL のコンテキストの共有に対応していない (`UsesSharedContext => false`。コンテキストごとに別の Direct3D 11 のデバイス) ため、
-Linux と同じ方法は使えない。やるなら Direct3D 11 の共有テクスチャ (keyed mutex) を作って Avalonia に渡し、画面の描画の GPU も
-`Win32PlatformOptions.GraphicsAdapterSelectionCallback` で描画の GPU にそろえる必要がある。実機で読み戻しのままでも 2K 60fps で動いたので、後回しにした。
+Linux (22.28) と同じ方法は使えない。代わりに、Direct3D 11 の共有テクスチャで受け渡す。
+
+| 項目 | 内容 |
+|---|---|
+| 使えるか | 画面の描画が `D3D11TextureGlobalSharedHandle` の取り込みと keyed mutex に対応していれば (`ICompositionGpuInterop`)、`SharedPreviewTarget` を Direct3D 11 のやり方で作る |
+| テクスチャ | 描画の GPU コンテキスト (自分の Direct3D 11 のデバイス) で、`R8G8B8A8_UNORM`・`D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX` のテクスチャを作る (`SharedD3DTexture`)。ANGLE で pbuffer として包み (`eglCreatePbufferFromClientBuffer` + `EGL_D3D_TEXTURE_ANGLE`)、GL のテクスチャに結び付けて (`eglBindTexImage`)、Skia で直接描く。最大 3 枚を順に使う |
+| 受け渡し | 描く側は鍵 0 を取って描き (`AcquireSync(0)`。画面の描画が返すのを最大 100 ms 待ち、返らなければそのフレームは飛ばす)、GPU の処理を終えてから鍵 1 で返す。画面の描画には、共有のハンドルで取り込ませ (`ImportImage`)、`UpdateWithKeyedMutexAsync(image, 1, 0)` で渡す |
+| 同じ GPU | 共有のテクスチャは同じ GPU の間でしか開けない。起動のときに、画面の描画の GPU を描画に選んだ GPU にそろえる (`Win32PlatformOptions.GraphicsAdapterSelectionCallback` → `ScreenGpu.Choose`。LUID で、なければ名前で探す)。描画の CPU を選んでいれば、これまでどおり。描画の GPU コンテキストの LUID が画面の描画 (`ICompositionGpuInterop.DeviceLuid`) と違えば共有しない (「使う GPU」を変えた直後など。起動し直すと共有できる) |
+| 失敗したとき | テクスチャを作れない・Skia で包めない・画面の描画が取り込めないときは、その場で読み戻して表示する方法に戻す (`SharedPreviewTarget.Broken` → `ReloadBackend`) |
+| 環境変数 | `VIDEO_BUILDER_SHARED_PREVIEW=0` で使わない。`VIDEO_BUILDER_SCREEN_GPU=default` で画面の描画の GPU を選ばない (DXGI の最初の GPU)。`VIDEO_BUILDER_SHARED_PREVIEW_ORIGIN=top` で描く向きを上下逆にする (上下が逆に出る環境があったときに確かめる用) |
+| 確かめ方 | CI (Windows・WARP): 共有のテクスチャを作り、Skia で描いて色が読めること、鍵 1 で渡したあとは描く側が取れないこと。画面の GPU の選び方 (LUID・名前)。画面に出るところは、実機でしか確かめられない |
+
+画面の描画の GPU を描画の GPU にそろえるので、外付けの GPU を選ぶと、画面の描画も外付けの GPU で行う (電池の持ちは少し悪くなる)。
 
 **実機での確認 (2026-11-20)**: 内蔵 GPU (既定) と NVIDIA GeForce RTX 4070 Laptop GPU があるノート PC で確認した。
 

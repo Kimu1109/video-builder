@@ -759,6 +759,7 @@ internal static class TranslationsEn
         ("{0} (見つかりません。自動で選んでいます)", "{0} (not found; choosing automatically)"),
         ("GPU を選べません (この環境では、デスクトップの GPU で描きます)。", "GPUs cannot be chosen here (the desktop's GPU is used)."),
         ("CPU 内蔵の GPU と外付けの GPU があるときに選びます。描画・出力・動画のデコードに使います。", "Choose between an integrated and a dedicated GPU. Used for rendering, export and video decoding."),
+        ("画面の表示にも同じ GPU を使います。変えたときは、アプリを起動し直すと画面の表示も切り替わります。", "The screen is drawn on the same GPU. After changing it, restart the app to switch the screen too."),
         ("環境変数 VIDEO_BUILDER_GPU で指定されているため、ここでは変えられません。", "Set by the VIDEO_BUILDER_GPU environment variable, so it cannot be changed here."),
         ("AviUtl ライクな操作感の動画編集アプリ。", "A video editor that works like AviUtl."),
         ("ライセンス: LGPL-3.0-or-later", "License: LGPL-3.0-or-later"),

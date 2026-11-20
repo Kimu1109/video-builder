@@ -120,6 +120,8 @@ public sealed class PreviewService : IDisposable
         {
             if (ReferenceEquals(_sharedRequested, value)) return;
             _sharedRequested = value;
+            // 画面への受け渡しに失敗したら、読み戻して表示する方法に戻す
+            if (value != null) value.Broken += ReloadBackend;
             ReloadBackend();
         }
     }
@@ -145,7 +147,10 @@ public sealed class PreviewService : IDisposable
         reason = "";
         var env = Environment.GetEnvironmentVariable("VIDEO_BUILDER_SHARED_PREVIEW");
         if (env == "0") { reason = "使わない設定"; return false; }
-        // GPU 描画は Linux でだけ確かめている (Windows の ANGLE などでは、まだ使わない)
+        if (shared.IsBroken) { reason = shared.BrokenReason ?? "画面への受け渡しに失敗"; return false; }
+        // Windows (Direct3D 11) は、描画の GPU コンテキストを作ってから、画面の描画と同じ GPU か確かめる (CreateEngine)
+        if (shared.IsD3D) return OperatingSystem.IsWindows();
+        // GL での共有は Linux でだけ確かめている
         if (!OperatingSystem.IsLinux()) { reason = "この OS ではまだ使わない"; return false; }
         bool force = env == "1";
         bool software = GpuContext.IsSoftwareRenderer(shared.Renderer);
@@ -169,18 +174,27 @@ public sealed class PreviewService : IDisposable
     /// <summary>共有のテクスチャに描く SKSurface を作る (描画のスレッドで)。</summary>
     private static SKSurface? CreateTextureSurface(GRContext gr, SharedPreviewTarget.Texture texture)
     {
-        int format = texture.Shared.InternalFormat;
+        int format = texture.InternalFormat;
         const int GL_RGBA = 0x1908, GL_RGBA8 = 0x8058, GL_TEXTURE_2D = 0x0DE1;
         if (format == GL_RGBA || format == 0) format = GL_RGBA8;   // Skia には大きさ付きの形式で渡す
-        var info = new GRGlTextureInfo(GL_TEXTURE_2D, (uint)texture.Shared.TextureId, (uint)format);
+        var info = new GRGlTextureInfo(GL_TEXTURE_2D, texture.TextureId, (uint)format);
         using var backend = new GRBackendTexture(texture.Size.Width, texture.Size.Height, false, info);
-        return SKSurface.Create(gr, backend, GRSurfaceOrigin.BottomLeft, SKColorType.Rgba8888);
+        return SKSurface.Create(gr, backend, OriginOf(texture), SKColorType.Rgba8888);
     }
+
+    /// <summary>
+    /// 共有のテクスチャに描く向き。GL のテクスチャは下が先 (BottomLeft)。
+    /// Direct3D 11 のテクスチャは、画面の描画も ANGLE で GL のテクスチャとして読むので、同じく BottomLeft にしている。
+    /// 上下が逆に出る環境があれば、環境変数 VIDEO_BUILDER_SHARED_PREVIEW_ORIGIN=top で逆にできる (確かめる用)。
+    /// </summary>
+    private static GRSurfaceOrigin OriginOf(SharedPreviewTarget.Texture texture) =>
+        texture.D3D != null && Environment.GetEnvironmentVariable("VIDEO_BUILDER_SHARED_PREVIEW_ORIGIN") == "top" ? GRSurfaceOrigin.TopLeft : GRSurfaceOrigin.BottomLeft;
 
     /// <summary>今使っている共有のテクスチャと GL コンテキストを片付ける (描画のスレッドで、エンジンを捨てたあと)。</summary>
     private void ReleaseShared(GpuContext? oldGpu, bool disposeContext)
     {
-        if (_shared != null && oldGpu is { IsExternal: true })
+        // テクスチャは、作った GL コンテキスト (GL のときは共有のもの、Direct3D 11 のときは描画のもの) で捨てる
+        if (_shared != null && oldGpu != null && (oldGpu.IsExternal || ReferenceEquals(_shared.D3DOwner, oldGpu)))
         {
             oldGpu.MakeCurrent();
             _shared.DisposeResources(t => (t.Tag as SKSurface)?.Dispose());
@@ -205,12 +219,37 @@ public sealed class PreviewService : IDisposable
         var mode = _settings.RenderBackend;
         if (mode == RenderBackend.Cpu) description = "CPU";
         else if (!_allowShared) notShared = "画面の保存中";
-        else if (_shared is { } shared && SharedAllowed(shared, mode, out notShared))
+        else if (_shared is { IsD3D: true } d3dShared && SharedAllowed(d3dShared, mode, out notShared))
+        {
+            // Windows: 描画の GPU コンテキスト (自分の Direct3D 11 のデバイス) で共有のテクスチャを作って描く。
+            // 画面の描画と同じ GPU でなければ、テクスチャを開けないので使わない
+            gpu = GpuContext.TryCreate(out var error);
+            if (gpu == null) description = $"CPU (GPU を使えません: {error})";
+            else if (gpu.IsSoftware && mode == RenderBackend.Auto)
+            {
+                description = $"CPU (GPU が見つかりません: {gpu.Renderer})";
+                gpu.Dispose(); gpu = null;
+            }
+            else
+            {
+                description = $"GPU ({gpu.Renderer})";
+                if (d3dShared.DeviceLuid != 0 && gpu.DeviceLuid != d3dShared.DeviceLuid)
+                    notShared = "画面の描画と描画で GPU が違う (使う GPU を変えたあとは、アプリを起動し直すと共有できる)";
+                else
+                {
+                    d3dShared.D3DOwner = gpu;
+                    _presentsToShared = true;
+                    description = $"GPU ({gpu.Renderer}、画面と共有)";
+                }
+            }
+        }
+        else if (_shared is { IsD3D: false } shared && SharedAllowed(shared, mode, out notShared))
         {
             // 画面と共有する GL コンテキストで描く (描いた絵を読み戻さずに、そのまま画面に出す)
-            gpu = GpuContext.FromExternal(name => shared.Gl.GlInterface.GetProcAddress(name),
-                shared.Gl.Version.Type == Avalonia.OpenGL.GlProfileType.OpenGLES, shared.Renderer, shared.Vendor,
-                () => _sharedCurrent ??= shared.Gl.MakeCurrent(), () => { _sharedCurrent?.Dispose(); _sharedCurrent = null; }, out _);
+            var gl = shared.Gl!;
+            gpu = GpuContext.FromExternal(name => gl.GlInterface.GetProcAddress(name),
+                gl.Version.Type == Avalonia.OpenGL.GlProfileType.OpenGLES, shared.Renderer, shared.Vendor,
+                () => _sharedCurrent ??= gl.MakeCurrent(), () => { _sharedCurrent?.Dispose(); _sharedCurrent = null; }, out _);
             if (gpu != null)
             {
                 _presentsToShared = true;
@@ -318,7 +357,7 @@ public sealed class PreviewService : IDisposable
         var engine = _engine!;
         // 再生中は次のフレームを裏でデコードしておく (止まっているときは、次にどこを描くか分からないので読まない)
         engine.Lookahead = IsPlaying;
-        if (_presentsToShared && _shared != null && engine.Gpu is { IsExternal: true } g)
+        if (_presentsToShared && _shared != null && engine.Gpu is { } g && (g.IsExternal || ReferenceEquals(_shared.D3DOwner, g)))
         {
             RenderShared(engine, g, _shared, p, scene, frame, w, h, sw);
             return;
@@ -348,17 +387,19 @@ public sealed class PreviewService : IDisposable
     {
         g.MakeCurrent();
         var texture = shared.Acquire(new Avalonia.PixelSize(w, h), t => (t.Tag as SKSurface)?.Dispose());
-        if (texture == null) return;   // 画面に出すのが追いつかない
+        if (texture == null)
+        {
+            // 共有のテクスチャを作れない (Direct3D 11): これまでどおり読み戻す方法に戻す。そうでなければ、画面に出すのが追いつかない
+            if (shared.CreateError != null) FallBackFromShared();
+            return;
+        }
         var surface = texture.Tag as SKSurface;
         if (surface == null) texture.Tag = surface = CreateTextureSurface(g.Context, texture);
         if (surface == null)
         {
             // 共有のテクスチャに描けない: これまでどおり読み戻す方法に戻す
             shared.Release(texture);
-            _presentsToShared = false;
-            _sharedRequested = null;
-            _backendDirty = true;
-            Request();
+            FallBackFromShared();
             return;
         }
         engine.RenderToGpuSurface(p, scene, frame, surface);
@@ -381,6 +422,15 @@ public sealed class PreviewService : IDisposable
             lock (_frameLock) _postPending = false;
             FrameReady?.Invoke();
         }, DispatcherPriority.Render);
+    }
+
+    /// <summary>共有のテクスチャを使うのをやめて、読み戻して表示する方法に戻す (描画のスレッドで)。</summary>
+    private void FallBackFromShared()
+    {
+        _presentsToShared = false;
+        _sharedRequested = null;
+        _backendDirty = true;
+        Request();
     }
 
     /// <summary>描いたフレームがあるか。</summary>

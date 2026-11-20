@@ -1,15 +1,25 @@
 using Avalonia;
 using Avalonia.OpenGL;
+using Avalonia.Platform;
 using Avalonia.Rendering.Composition;
 using Avalonia.Threading;
+using VideoBuilder.Rendering;
 
 namespace VideoBuilder.App.Services;
 
 /// <summary>
-/// プレビューを、画面の描画 (Avalonia のコンポジタ) と共有する GL のテクスチャに直接描くための入れ物。
+/// プレビューを、画面の描画 (Avalonia のコンポジタ) と共有するテクスチャに直接描くための入れ物。
 ///
 /// 以前は GPU で描いた絵を毎フレーム読み戻し (ReadPixels)、それを Avalonia がまた GPU に送っていた。
-/// ここでは画面の描画と共有する GL コンテキストで、共有のテクスチャに描き、そのまま画面に出す (読み戻しも送り直しもない)。
+/// ここでは画面の描画と共有するテクスチャに描き、そのまま画面に出す (読み戻しも送り直しもない)。
+///
+/// 共有のしかたは 2 通り:
+/// <list type="bullet">
+/// <item>GL (Linux): 画面の描画と共有する GL コンテキスト (<see cref="Gl"/>) を作り、共有の GL テクスチャに描く。</item>
+/// <item>Direct3D 11 (Windows): Windows の Avalonia (ANGLE) は GL のコンテキストの共有に対応していないので、
+/// 描画の GPU コンテキスト (自分の Direct3D 11 のデバイス) で共有の Direct3D 11 のテクスチャ (<see cref="SharedD3DTexture"/>) を作って描き、
+/// 共有のハンドルで画面の描画に取り込ませる。受け渡しは keyed mutex。描画と画面の描画が同じ GPU (<see cref="DeviceLuid"/>) のときだけ使える。</item>
+/// </list>
 ///
 /// テクスチャは最大 3 枚を順に使う。画面に出しているもの・出す途中のものには描かない。
 /// GL を使う処理 (Acquire・テクスチャの破棄) は描画のスレッドで、画面への受け渡し (Present の中身) は UI スレッドで行う。
@@ -19,53 +29,81 @@ public sealed class SharedPreviewTarget
     private const int MaxTextures = 3;
     private const int GL_RENDERER = 0x1F01, GL_VENDOR = 0x1F00;
 
-    private readonly IOpenGlTextureSharingRenderInterfaceContextFeature _feature;
+    private readonly IOpenGlTextureSharingRenderInterfaceContextFeature? _feature;
     private readonly ICompositionGpuInterop _interop;
     private readonly CompositionDrawingSurface _surface;
     private readonly object _gate = new();
     private readonly List<Texture> _textures = new();
     private Texture? _shown;
 
-    /// <summary>画面の描画と共有する GL コンテキスト (描画のスレッドで使う)。</summary>
-    public IGlContext Gl { get; }
+    /// <summary>画面の描画と共有する GL コンテキスト (GL のとき。描画のスレッドで使う)。Direct3D 11 のときは null。</summary>
+    public IGlContext? Gl { get; }
+    /// <summary>Direct3D 11 の共有テクスチャで受け渡す (Windows)。</summary>
+    public bool IsD3D => Gl == null;
+    /// <summary>Direct3D 11 のとき: 画面の描画の GPU の LUID (分からなければ 0)。</summary>
+    public long DeviceLuid { get; }
+    /// <summary>
+    /// Direct3D 11 のとき: 共有テクスチャを作る、描画の GPU コンテキスト (PreviewService が描画のスレッドで設定する)。
+    /// </summary>
+    public GpuContext? D3DOwner { get; set; }
     /// <summary>プレビューを出す場所 (PreviewView の子として置く)。</summary>
     public CompositionSurfaceVisual Visual { get; }
-    public string Renderer { get; }
-    public string Vendor { get; }
+    public string Renderer { get; } = "";
+    public string Vendor { get; } = "";
     /// <summary>まだ一度も絵を出していなければ false (それまでは見せない)。</summary>
     public bool HasFrame { get; private set; }
+    /// <summary>画面への受け渡しに失敗した (この入れ物はもう使わない)。</summary>
+    public bool IsBroken { get; private set; }
+    /// <summary>受け渡しに失敗した理由。</summary>
+    public string? BrokenReason { get; private set; }
+    /// <summary>Direct3D 11 のとき: 共有のテクスチャを作れなかった理由 (描画のスレッドで設定。作れたら null)。</summary>
+    public string? CreateError { get; private set; }
     /// <summary>絵を出すたびに呼ばれる (UI スレッド)。</summary>
     public event Action? Presented;
+    /// <summary>画面への受け渡しに失敗して、使えなくなった (UI スレッド)。</summary>
+    public event Action? Broken;
 
     /// <summary>描くテクスチャ。描画のスレッドで Acquire し、描いたら Present する。</summary>
     public sealed class Texture
     {
-        public required ICompositionImportableOpenGlSharedTexture Shared;
+        /// <summary>GL のとき: 共有の GL テクスチャ。</summary>
+        public ICompositionImportableOpenGlSharedTexture? Shared;
+        /// <summary>Direct3D 11 のとき: 共有の Direct3D 11 のテクスチャ。</summary>
+        public object? D3D;
         public ICompositionImportedGpuImage? Imported;
         public PixelSize Size;
         /// <summary>描いている途中・画面に出す途中・画面に出ている。</summary>
         public bool Busy;
         /// <summary>描画のスレッドの持ち物 (SKSurface など)。</summary>
         public object? Tag;
+
+        /// <summary>Skia が描く GL のテクスチャ。</summary>
+        public uint TextureId => Shared != null ? (uint)Shared.TextureId : OperatingSystem.IsWindows() && D3D is SharedD3DTexture d ? d.GlTexture : 0;
+        public int InternalFormat => Shared != null ? Shared.InternalFormat : OperatingSystem.IsWindows() ? SharedD3DTexture.GlInternalFormat : 0;
     }
 
-    private SharedPreviewTarget(IOpenGlTextureSharingRenderInterfaceContextFeature feature, ICompositionGpuInterop interop, Compositor compositor, IGlContext gl)
+    private SharedPreviewTarget(IOpenGlTextureSharingRenderInterfaceContextFeature? feature, ICompositionGpuInterop interop, Compositor compositor, IGlContext? gl)
     {
         _feature = feature; _interop = interop; Gl = gl;
         _surface = compositor.CreateDrawingSurface();
         Visual = compositor.CreateSurfaceVisual();
         Visual.Surface = _surface;
         Visual.Visible = false;
-        using (gl.MakeCurrent())
+        if (gl != null)
         {
-            Renderer = gl.GlInterface.GetString(GL_RENDERER) ?? "";
-            Vendor = gl.GlInterface.GetString(GL_VENDOR) ?? "";
+            using (gl.MakeCurrent())
+            {
+                Renderer = gl.GlInterface.GetString(GL_RENDERER) ?? "";
+                Vendor = gl.GlInterface.GetString(GL_VENDOR) ?? "";
+            }
         }
+        else if (interop.DeviceLuid is { Length: >= 8 } luid) DeviceLuid = BitConverter.ToInt64(luid, 0);
     }
 
     /// <summary>
-    /// host の画面の描画が OpenGL で、テクスチャを共有できるなら作る。できなければ null (UI スレッドから呼ぶ)。
-    /// ヘッドレスや Vulkan・ソフトウェアの描画では使えない。
+    /// host の画面の描画と、テクスチャを共有できるなら作る。できなければ null (UI スレッドから呼ぶ)。
+    /// GL で共有できればそれを、Windows で Direct3D 11 のテクスチャを取り込めればそれを使う。
+    /// ヘッドレス・Vulkan・ソフトウェアの描画では使えない。
     /// </summary>
     public static async Task<SharedPreviewTarget?> TryCreateAsync(Visual host)
     {
@@ -75,24 +113,36 @@ public sealed class SharedPreviewTarget
             if (compositor == null) return null;
             var interop = await compositor.TryGetCompositionGpuInterop();
             if (interop == null) return null;
-            if (await compositor.TryGetRenderInterfaceFeature(typeof(IOpenGlTextureSharingRenderInterfaceContextFeature)) is not IOpenGlTextureSharingRenderInterfaceContextFeature feature
-                || !feature.CanCreateSharedContext) return null;
-            var gl = feature.CreateSharedContext(null);
-            if (gl == null) return null;
-            try { return new SharedPreviewTarget(feature, interop, compositor, gl); }
-            catch { gl.Dispose(); return null; }
+            if (await compositor.TryGetRenderInterfaceFeature(typeof(IOpenGlTextureSharingRenderInterfaceContextFeature)) is IOpenGlTextureSharingRenderInterfaceContextFeature feature
+                && feature.CanCreateSharedContext)
+            {
+                var gl = feature.CreateSharedContext(null);
+                if (gl != null)
+                {
+                    try { return new SharedPreviewTarget(feature, interop, compositor, gl); }
+                    catch { gl.Dispose(); return null; }
+                }
+            }
+            // Windows: Direct3D 11 の共有テクスチャを、keyed mutex で受け渡せるか
+            const string handleType = KnownPlatformGraphicsExternalImageHandleTypes.D3D11TextureGlobalSharedHandle;
+            if (OperatingSystem.IsWindows() && interop.SupportedImageHandleTypes.Contains(handleType)
+                && interop.GetSynchronizationCapabilities(handleType).HasFlag(CompositionGpuImportedImageSynchronizationCapabilities.KeyedMutex))
+                return new SharedPreviewTarget(null, interop, compositor, null);
+            return null;
         }
         catch { return null; }
     }
 
     /// <summary>
-    /// size の大きさで、今描いてよいテクスチャを返す (描画のスレッドで、Gl を有効にしてから呼ぶ)。
+    /// size の大きさで、今描いてよいテクスチャを返す (描画のスレッドで、描画の GL を有効にしてから呼ぶ)。
     /// 3 枚とも使用中なら、少し待ってもだめなら null。大きさの違う、使っていないテクスチャはここで捨てる。
+    /// Direct3D 11 のときは、描くための鍵も取ってから返す。
     /// </summary>
     public Texture? Acquire(PixelSize size, Action<Texture>? disposeTag)
     {
         for (int attempt = 0; attempt < 50; attempt++)
         {
+            Texture? free = null;
             lock (_gate)
             {
                 foreach (var old in _textures.Where(t => !t.Busy && t.Size != size).ToList())
@@ -101,36 +151,71 @@ public sealed class SharedPreviewTarget
                     DisposeTexture(old);
                     _textures.Remove(old);
                 }
-                var free = _textures.FirstOrDefault(t => !t.Busy && t.Size == size);
+                free = _textures.FirstOrDefault(t => !t.Busy && t.Size == size);
                 if (free == null && _textures.Count < MaxTextures)
                 {
-                    var shared = _feature.CreateSharedTextureForComposition(Gl, size);
-                    free = new Texture { Shared = shared, Size = size };
+                    free = CreateTexture(size);
+                    if (free == null) return null;
                     _textures.Add(free);
                 }
-                if (free != null) { free.Busy = true; return free; }
+                if (free != null) free.Busy = true;
+            }
+            if (free != null)
+            {
+                // Direct3D 11: 画面の描画が使い終えて鍵を返すのを待つ (返ってこなければ、このフレームは飛ばす)
+                if (OperatingSystem.IsWindows() && free.D3D is SharedD3DTexture d && !d.AcquireForDrawing(100))
+                {
+                    lock (_gate) free.Busy = false;
+                    return null;
+                }
+                return free;
             }
             Thread.Sleep(1);
         }
         return null;
     }
 
-    /// <summary>描き終えたテクスチャを画面に出す (描画のスレッドから呼ぶ。GPU の処理は終わらせておくこと)。</summary>
+    /// <summary>新しいテクスチャを作る (_gate の中で、描画のスレッドから)。作れなければ null。</summary>
+    private Texture? CreateTexture(PixelSize size)
+    {
+        if (Gl != null) return new Texture { Shared = _feature!.CreateSharedTextureForComposition(Gl, size), Size = size };
+        if (!OperatingSystem.IsWindows() || D3DOwner == null) return null;
+        var d = D3DOwner.CreateSharedD3DTexture(size.Width, size.Height, out var error);
+        if (d == null) { CreateError = error ?? "共有のテクスチャを作れません"; return null; }
+        return new Texture { D3D = d, Size = size };
+    }
+
+    /// <summary>
+    /// 描き終えたテクスチャを画面に出す (描画のスレッドから呼ぶ。GPU の処理は終わらせておくこと)。
+    /// Direct3D 11 のときは、ここで鍵を画面の描画に渡す。
+    /// </summary>
     public void Present(Texture texture)
     {
+        if (OperatingSystem.IsWindows() && texture.D3D is SharedD3DTexture d) d.ReleaseForPresent();
         Dispatcher.UIThread.Post(async () =>
         {
             Texture? previous;
             ICompositionImportedGpuImage image;
             lock (_gate)
             {
-                if (!_textures.Contains(texture)) return;   // 捨てられた (大きさが変わった・終了した)
-                texture.Imported ??= _interop.ImportImage((ICompositionImportableSharedGpuContextImage)texture.Shared);
+                if (!_textures.Contains(texture) || IsBroken) return;   // 捨てられた (大きさが変わった・終了した)
+                try { texture.Imported ??= Import(texture); }
+                catch (Exception ex)
+                {
+                    Fail("画面の描画に渡せません: " + ex.Message);
+                    return;
+                }
                 image = texture.Imported;
                 previous = _shown;
                 _shown = texture;
             }
-            try { await _surface.UpdateAsync(image); }
+            try
+            {
+                if (texture.D3D != null)
+                    await _surface.UpdateWithKeyedMutexAsync(image, (uint)SharedD3DTexture.PresentKey, (uint)SharedD3DTexture.DrawKey);
+                else
+                    await _surface.UpdateAsync(image);
+            }
             catch { /* 画面の描画が失われた (GPU のリセットなど): 次の絵で出し直す */ }
             lock (_gate)
             {
@@ -142,13 +227,35 @@ public sealed class SharedPreviewTarget
         }, DispatcherPriority.Render);
     }
 
+    private ICompositionImportedGpuImage Import(Texture texture)
+    {
+        if (texture.Shared != null) return _interop.ImportImage((ICompositionImportableSharedGpuContextImage)texture.Shared);
+        if (!OperatingSystem.IsWindows() || texture.D3D is not SharedD3DTexture d) throw new InvalidOperationException("テクスチャがありません");
+        var properties = new PlatformGraphicsExternalImageProperties
+        {
+            Width = d.Width, Height = d.Height, Format = PlatformGraphicsExternalImageFormat.R8G8B8A8UNorm,
+        };
+        return _interop.ImportImage(new PlatformHandle(d.SharedHandle, KnownPlatformGraphicsExternalImageHandleTypes.D3D11TextureGlobalSharedHandle), properties);
+    }
+
+    /// <summary>受け渡しに失敗した。これ以降は使わず、読み戻して表示する方法に戻してもらう (UI スレッド)。</summary>
+    private void Fail(string reason)
+    {
+        if (IsBroken) return;
+        IsBroken = true;
+        BrokenReason = reason;
+        Visual.Visible = false;
+        Broken?.Invoke();
+    }
+
     /// <summary>出さなかったテクスチャを返す (描画に失敗したときなど)。</summary>
     public void Release(Texture texture)
     {
+        if (OperatingSystem.IsWindows() && texture.D3D is SharedD3DTexture d) d.ReleaseUnused();
         lock (_gate) if (!ReferenceEquals(texture, _shown)) texture.Busy = false;
     }
 
-    /// <summary>すべてのテクスチャと GL コンテキストを捨てる (描画のスレッドで、Gl を有効にしてから呼ぶ)。</summary>
+    /// <summary>すべてのテクスチャを捨てる (描画のスレッドで、描画の GL を有効にしてから呼ぶ)。</summary>
     public void DisposeResources(Action<Texture>? disposeTag)
     {
         lock (_gate)
@@ -161,12 +268,13 @@ public sealed class SharedPreviewTarget
             _textures.Clear();
             _shown = null;
         }
+        D3DOwner = null;
     }
 
     /// <summary>GL コンテキストを捨てる (DisposeResources のあと、どのスレッドでもよい)。</summary>
     public void DisposeContext()
     {
-        try { Gl.Dispose(); } catch { /* 終了中など */ }
+        try { Gl?.Dispose(); } catch { /* 終了中など */ }
         Dispatcher.UIThread.Post(() => { try { _surface.Dispose(); } catch { } });
     }
 
@@ -175,5 +283,6 @@ public sealed class SharedPreviewTarget
     {
         try { (t.Imported as IAsyncDisposable)?.DisposeAsync(); } catch { }
         try { (t.Shared as IDisposable)?.Dispose(); } catch { }
+        try { (t.D3D as IDisposable)?.Dispose(); } catch { }
     }
 }

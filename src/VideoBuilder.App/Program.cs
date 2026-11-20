@@ -22,5 +22,7 @@ internal static class Program
                 DefaultFamilyName = "fonts:Inter#Inter",
                 FontFallbacks = new[] { new FontFallback { FontFamily = new FontFamily("fonts:NotoSansJP#Noto Sans JP") } },
             })
+            // Windows: 画面の描画も、描画に選んだ GPU で行う (プレビューを読み戻さずに出すため。Platform/ScreenGpu.cs)
+            .With(new Win32PlatformOptions { GraphicsAdapterSelectionCallback = Platform.ScreenGpu.Choose })
             .LogToTrace();
 }

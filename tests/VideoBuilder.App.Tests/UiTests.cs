@@ -1442,6 +1442,23 @@ public class UiTests
         Assert.False(Svc.Preview.PresentsToShared);
     }
 
+    [Fact]
+    public void Screen_gpu_on_windows_follows_the_chosen_gpu_by_luid_then_by_name()
+    {
+        // Avalonia が渡す一覧: 名前は小文字、LUID は 8 バイト
+        static Avalonia.Platform.PlatformGraphicsDeviceAdapterDescription Desc(string name, long luid) =>
+            new() { Description = name, DeviceLuid = BitConverter.GetBytes(luid) };
+        var list = new[] { Desc("intel(r) uhd graphics", 0x1111), Desc("nvidia geforce rtx 4070 laptop gpu", 0x2222) };
+        var nvidia = new VideoBuilder.Rendering.GpuAdapter(1, "NVIDIA GeForce RTX 4070 Laptop GPU", "NVIDIA", "", "", false, 0x2222, "10DE:2860:3FC817AA");
+        Assert.Equal(1, VideoBuilder.App.Platform.ScreenGpu.IndexOf(list, nvidia));
+        // LUID が合わなくても (起動し直した直後の一覧など)、名前で見つける
+        Assert.Equal(1, VideoBuilder.App.Platform.ScreenGpu.IndexOf(list, nvidia with { Luid = 0x9999 }));
+        // 選んでいない・ソフトウェア・見つからないときは、これまでどおり最初の GPU
+        Assert.Equal(0, VideoBuilder.App.Platform.ScreenGpu.IndexOf(list, null));
+        Assert.Equal(0, VideoBuilder.App.Platform.ScreenGpu.IndexOf(list, nvidia with { IsSoftware = true }));
+        Assert.Equal(0, VideoBuilder.App.Platform.ScreenGpu.IndexOf(list, nvidia with { Name = "AMD Radeon RX 7600", Luid = 0x3333 }));
+    }
+
 
     [Fact]
     public void Waveform_is_reported_part_by_part_while_it_is_computed()
