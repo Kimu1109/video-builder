@@ -206,6 +206,75 @@ public class PreviewSpeedTests : IDisposable
         Assert.Equal(0, cpu.Media.DirectUploads);
     }
 
+    /// <summary>ffmpeg で、ファイルの各フレームの中身の要約 (MD5) を取る。</summary>
+    private static string FrameHashes(string path)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("ffmpeg", $"-loglevel error -i \"{path}\" -map 0:v -f framemd5 -") { RedirectStandardOutput = true };
+        using var proc = System.Diagnostics.Process.Start(psi)!;
+        string text = proc.StandardOutput.ReadToEnd();
+        proc.WaitForExit();
+        return string.Join("\n", text.Split('\n').Where(l => l.Length > 0 && !l.StartsWith('#')).Select(l => l.Split(',').Last().Trim()));
+    }
+
+    [Fact]
+    public void Color_conversion_with_several_threads_gives_exactly_the_same_video()
+    {
+        if (!_ready) return;
+        var p = WithVideo((0, 0, 0));
+        p.Settings.Width = 1280; p.Settings.Height = 720;   // 720p 以上は BT.709 で変換する
+        string Export(int threads)
+        {
+            var old = MediaWriter.ConvertThreads;
+            MediaWriter.ConvertThreads = threads;
+            try
+            {
+                var path = Path.Combine(_dir, $"conv{threads}.mp4");
+                Exporter.Run(new ExportRequest
+                {
+                    Project = p, SceneId = p.Root.Id, StartFrame = 0, EndFrame = 9,
+                    Settings = new ExportSettings { Path = path, AudioCodec = "", Preset = "ultrafast" },
+                }, null, CancellationToken.None);
+                return FrameHashes(path);
+            }
+            finally { MediaWriter.ConvertThreads = old; }
+        }
+        var single = Export(1);
+        Assert.Equal(10, single.Split('\n').Length);
+        Assert.Equal(single, Export(4));
+    }
+
+    [Fact]
+    public void Image_sequence_is_encoded_in_parallel_and_every_frame_is_written_in_order()
+    {
+        if (!_ready) return;
+        var p = WithVideo((0, 0, 0));
+        p.Settings.Width = 320; p.Settings.Height = 180;
+        var seq = Path.Combine(_dir, "seq");
+        Directory.CreateDirectory(seq);
+        var reported = new List<int>();
+        Exporter.Run(new ExportRequest
+        {
+            Project = p, SceneId = p.Root.Id, StartFrame = 5, EndFrame = 24, ImageSequence = true,
+            Settings = new ExportSettings { Path = Path.Combine(seq, "f.png") },
+        }, new SyncProgress(x => { lock (reported) reported.Add(x.Done); }), CancellationToken.None);
+        var files = Directory.GetFiles(seq, "*.png").Order().ToArray();
+        Assert.Equal(20, files.Length);
+        Assert.Equal(Path.Combine(seq, "f_00000.png"), files[0]);
+        Assert.Equal(20, reported.Max());
+        // 番号どおりの中身になっている (5 + i フレーム目を描いたものと同じ)
+        using var e = new RenderEngine();
+        foreach (int i in new[] { 0, 7, 19 })
+        {
+            using var png = SKBitmap.Decode(files[i]);
+            Assert.Equal(Frame(e, p, 5 + i, 320, 180), png.Copy(SKColorType.Bgra8888).Bytes);
+        }
+    }
+
+    private sealed class SyncProgress(Action<(int Done, int Total)> onReport) : IProgress<(int Done, int Total)>
+    {
+        public void Report((int Done, int Total) value) => onReport(value);
+    }
+
     [Fact]
     public void Export_with_lookahead_writes_a_playable_file()
     {

@@ -37,6 +37,71 @@ public static class Exporter
         finally { stats?.Stop(); }
     }
 
+    /// <summary>
+    /// 連番 PNG を書き出す。描画はこのスレッドで順に、PNG のエンコードと書き込みは複数のスレッドで同時に行う
+    /// (PNG のエンコードは 1 枚ずつ独立していて重い。1080p で 1 枚 100 ms ほど)。
+    /// </summary>
+    private static void WriteImageSequence(ExportRequest req, RenderEngine engine, Project project, Scene scene, int total, int w, int h,
+        ExportStats? stats, IProgress<(int Done, int Total)>? progress, CancellationToken cancel, Action<Action, Action<TimeSpan>?> measure)
+    {
+        string dir = Path.GetDirectoryName(req.Settings.Path) ?? ".";
+        string name = Path.GetFileNameWithoutExtension(req.Settings.Path);
+        int workers = Math.Clamp(Environment.ProcessorCount, 1, 8);
+        // 描いたフレームの待ち行列。エンコードが追いつかなければ描画側が待つ (使うビットマップは workers * 2 + 1 枚まで)
+        using var queue = new System.Collections.Concurrent.BlockingCollection<(int Index, SKBitmap Bitmap)>(workers);
+        var pool = new System.Collections.Concurrent.ConcurrentBag<SKBitmap>();
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        Exception? error = null;
+        int done = 0;
+        var encoders = Enumerable.Range(0, workers).Select(_ => Task.Run(() =>
+        {
+            var watch = new System.Diagnostics.Stopwatch();
+            foreach (var (index, bitmap) in queue.GetConsumingEnumerable())
+            {
+                try
+                {
+                    if (stop.IsCancellationRequested) continue;
+                    watch.Restart();
+                    using (var pixmap = bitmap.PeekPixels())
+                    using (var data = pixmap.Encode(SKEncodedImageFormat.Png, 100))
+                    using (var fs = File.Create(Path.Combine(dir, $"{name}_{index:00000}.png")))
+                        data.SaveTo(fs);
+                    stats?.AddEncode(watch.Elapsed);
+                    stats?.FrameDone();
+                    progress?.Report((Interlocked.Increment(ref done), total));
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.CompareExchange(ref error, ex, null);
+                    stop.Cancel();
+                }
+                finally { pool.Add(bitmap); }
+            }
+        })).ToArray();
+
+        try
+        {
+            for (int i = 0; i < total; i++)
+            {
+                stop.Token.ThrowIfCancellationRequested();
+                if (!pool.TryTake(out var bitmap)) bitmap = new SKBitmap(Effects.Info(w, h));
+                try { measure(() => engine.RenderToBitmap(project, scene, req.StartFrame + i, bitmap), stats == null ? null : stats.AddRender); }
+                catch { pool.Add(bitmap); throw; }
+                try { queue.Add((i, bitmap), stop.Token); }
+                catch { pool.Add(bitmap); throw; }
+            }
+        }
+        catch (OperationCanceledException) when (error != null) { /* エンコード側の失敗は下で投げる */ }
+        finally
+        {
+            queue.CompleteAdding();
+            Task.WaitAll(encoders);
+            foreach (var b in pool) b.Dispose();
+        }
+        if (error != null) throw error;
+        cancel.ThrowIfCancellationRequested();
+    }
+
     private static void RunCore(ExportRequest req, Project project, Scene scene, int total, int w, int h, ExportStats? stats,
         IProgress<(int Done, int Total)>? progress, CancellationToken cancel)
     {
@@ -54,26 +119,10 @@ public static class Exporter
         using var gpu = req.UseGpu ? GpuContext.TryCreate(out _) : null;
         // フレームを順に描くので、動画の次のフレームを裏でデコードしておく
         using var engine = new RenderEngine(gpu) { Lookahead = true };
-        using var bitmap = new SKBitmap(Effects.Info(w, h));
 
         if (req.ImageSequence)
         {
-            string dir = Path.GetDirectoryName(req.Settings.Path) ?? ".";
-            string name = Path.GetFileNameWithoutExtension(req.Settings.Path);
-            for (int i = 0; i < total; i++)
-            {
-                cancel.ThrowIfCancellationRequested();
-                Measure(() => engine.RenderToBitmap(project, scene, req.StartFrame + i, bitmap), stats == null ? null : stats.AddRender);
-                Measure(() =>
-                {
-                    using var image = SKImage.FromBitmap(bitmap);
-                    using var data = image.Encode(SKEncodedImageFormat.Png, 100);
-                    using var fs = File.Create(Path.Combine(dir, $"{name}_{i:00000}.png"));
-                    data.SaveTo(fs);
-                }, stats == null ? null : stats.AddEncode);
-                stats?.FrameDone();
-                progress?.Report((i + 1, total));
-            }
+            WriteImageSequence(req, engine, project, scene, total, w, h, stats, progress, cancel, Measure);
             return;
         }
 

@@ -27,6 +27,42 @@ public sealed unsafe class MediaWriter : IDisposable
     private AVCodecContext* _venc, _aenc;
     private AVStream* _vst, _ast;
     private SwsContext* _sws;
+    private bool _swsThreaded;
+
+    /// <summary>BGRA → YUV の変換に使うスレッドの数 (1 なら今までどおり 1 スレッド)。テストで変える。</summary>
+    internal static int ConvertThreads { get; set; } = Math.Clamp(Environment.ProcessorCount, 1, 8);
+
+    /// <summary>
+    /// 色変換の準備をする。threads が 2 以上なら、FFmpeg の中で画面を帯に分けて複数スレッドで変換する設定にする
+    /// (sws_scale_frame で使う)。そうできなければ 1 スレッドの変換 (sws_scale で使う) にする。
+    /// </summary>
+    private static SwsContext* CreateScaler(int sw, int sh, AVPixelFormat sf, int dw, int dh, AVPixelFormat df, int flags, int threads, out bool threaded)
+    {
+        threaded = false;
+        if (threads > 1)
+        {
+            var c = ffmpeg.sws_alloc_context();
+            if (c != null)
+            {
+                ffmpeg.av_opt_set_int(c, "srcw", sw, 0); ffmpeg.av_opt_set_int(c, "srch", sh, 0);
+                ffmpeg.av_opt_set_int(c, "src_format", (long)sf, 0);
+                ffmpeg.av_opt_set_int(c, "dstw", dw, 0); ffmpeg.av_opt_set_int(c, "dsth", dh, 0);
+                ffmpeg.av_opt_set_int(c, "dst_format", (long)df, 0);
+                ffmpeg.av_opt_set_int(c, "sws_flags", flags, 0);
+                if (ffmpeg.av_opt_set_int(c, "threads", threads, 0) >= 0 && ffmpeg.sws_init_context(c, null, null) >= 0)
+                {
+                    threaded = true;
+                    return c;
+                }
+                ffmpeg.sws_freeContext(c);
+            }
+        }
+        return ffmpeg.sws_getContext(sw, sh, sf, dw, dh, df, flags, null, null, null);
+    }
+
+    // 描画したフレーム (BGRA) を、複製せずに FFmpeg のフレームとして渡すための「何もしない解放」
+    private static readonly av_buffer_create_free NoFreeCallback = (_, _) => { };
+    private static readonly av_buffer_create_free_func NoFree = new() { Pointer = System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate(NoFreeCallback) };
     private SwrContext* _swr;
     private AVFrame* _vframe, _aframe;
     private AVPacket* _pkt;
@@ -81,8 +117,8 @@ public sealed unsafe class MediaWriter : IDisposable
         _vframe->format = (int)softwareFormat;
         _vframe->width = _venc->width; _vframe->height = _venc->height;
         FFmpegLoader.Check(ffmpeg.av_frame_get_buffer(_vframe, 0), "フレームの確保に失敗");
-        _sws = ffmpeg.sws_getContext(_width, _height, AVPixelFormat.AV_PIX_FMT_BGRA, _venc->width, _venc->height, softwareFormat,
-            ffmpeg.SWS_BICUBIC, null, null, null);
+        _sws = CreateScaler(_width, _height, AVPixelFormat.AV_PIX_FMT_BGRA, _venc->width, _venc->height, softwareFormat,
+            ffmpeg.SWS_BICUBIC, ConvertThreads, out _swsThreaded);
         if (_sws == null) throw new InvalidOperationException("色変換の準備に失敗");
         // BT.709 で変換する (HD 以上の標準)
         if (_height >= 720)
@@ -154,9 +190,27 @@ public sealed unsafe class MediaWriter : IDisposable
         var frame = (AVFrame*)handle;
         fixed (byte* p = bgra)
         {
-            var src = new byte*[4] { p, null, null, null };
-            var strides = new int[4] { stride, 0, 0, 0 };
-            ffmpeg.sws_scale(_sws, src, strides, 0, _height, frame->data, frame->linesize);
+            if (_swsThreaded)
+            {
+                // 複数スレッドで変換する。描画したフレームは複製せず、解放しないバッファとして包んで渡す
+                var src = ffmpeg.av_frame_alloc();
+                try
+                {
+                    src->format = (int)AVPixelFormat.AV_PIX_FMT_BGRA;
+                    src->width = _width; src->height = _height;
+                    src->buf[0] = ffmpeg.av_buffer_create(p, (ulong)bgra.Length, NoFree, null, 0);
+                    src->data[0] = p; src->linesize[0] = stride;
+                    int ret = ffmpeg.sws_scale_frame(_sws, frame, src);
+                    FFmpegLoader.Check(ret, "色変換に失敗");
+                }
+                finally { ffmpeg.av_frame_free(&src); }
+            }
+            else
+            {
+                var src = new byte*[4] { p, null, null, null };
+                var strides = new int[4] { stride, 0, 0, 0 };
+                ffmpeg.sws_scale(_sws, src, strides, 0, _height, frame->data, frame->linesize);
+            }
         }
         return handle;
     }
