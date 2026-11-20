@@ -443,10 +443,11 @@ public sealed class RenderEngine : IDisposable
         using var prescaledOwner = prescaled;
         if (alpha > 0 && scale != 0)
         {
+            SnapHalfPixel(canvas, sprite);
             using var paint = new SKPaint
             {
                 Color = SKColors.White.WithAlpha((byte)MathF.Round(alpha * 255)),
-                FilterQuality = QualityFor(canvas.TotalMatrix, draft),
+                FilterQuality = QualityFor(canvas.TotalMatrix, draft, new SKPoint(-sprite.Cx, -sprite.Cy)),
                 IsAntialias = true,
             };
             if (blend == 2)
@@ -472,15 +473,38 @@ public sealed class RenderEngine : IDisposable
     }
 
     /// <summary>
-    /// 拡大縮小の補間方法を選ぶ。等倍で動かすだけなら補間は不要。プレビューでは軽い方法を使い、
-    /// 出力では常に高品質にする。
+    /// 等倍で描く画像の左上が、ちょうど画素の半分 (x.5) にあるなら、整数の位置に寄せる。
+    /// <para>
+    /// 幅や高さが奇数の画像 (文字など) は、中心で置くと左上が x.5 になる。そこに補間なし (最近傍) で描くと、
+    /// どちらの画素を拾うかが CPU と GPU (Direct3D など) で逆になり、絵が 1 画素ずれる。寄せても動くのは 0.5 画素だけで、絵はくっきりしたまま。
+    /// 少しずつ動いている (x.3 など) ときは寄せない (補間して、なめらかに動かす)。
+    /// </para>
     /// </summary>
-    private static SKFilterQuality QualityFor(SKMatrix m, bool draft)
+    internal static void SnapHalfPixel(SKCanvas canvas, Sprite sprite)
+    {
+        var m = canvas.TotalMatrix;
+        if (!IsUnitScale(m)) return;
+        var o = m.MapPoint(-sprite.Cx, -sprite.Cy);
+        static float Nudge(float v) => MathF.Abs(v - MathF.Floor(v) - 0.5f) < 1e-3f ? MathF.Floor(v + 0.5f) - v : 0;
+        float dx = Nudge(o.X), dy = Nudge(o.Y);
+        if (dx == 0 && dy == 0) return;
+        canvas.SetMatrix(SKMatrix.Concat(SKMatrix.CreateTranslation(dx, dy), m));
+    }
+
+    private static bool IsUnitScale(SKMatrix m) =>
+        m.Persp0 == 0 && m.Persp1 == 0 && m.SkewX == 0 && m.SkewY == 0 && Math.Abs(m.ScaleX - 1) < 1e-4f && Math.Abs(m.ScaleY - 1) < 1e-4f;
+
+    /// <summary>
+    /// 拡大縮小の補間方法を選ぶ。等倍で動かすだけなら補間は不要。プレビューでは軽い方法を使い、
+    /// 出力では常に高品質にする。origin は画像の左上 (描く座標系で)。等倍のとき、これが画素にそろっているかで決める。
+    /// </summary>
+    private static SKFilterQuality QualityFor(SKMatrix m, bool draft, SKPoint origin = default)
     {
         bool flat = m.Persp0 == 0 && m.Persp1 == 0 && m.SkewX == 0 && m.SkewY == 0;
-        if (flat && Math.Abs(m.ScaleX - 1) < 1e-4f && Math.Abs(m.ScaleY - 1) < 1e-4f)
+        if (IsUnitScale(m))
         {
-            bool aligned = Math.Abs(m.TransX - MathF.Round(m.TransX)) < 1e-3f && Math.Abs(m.TransY - MathF.Round(m.TransY)) < 1e-3f;
+            var o = m.MapPoint(origin);
+            bool aligned = Math.Abs(o.X - MathF.Round(o.X)) < 1e-3f && Math.Abs(o.Y - MathF.Round(o.Y)) < 1e-3f;
             return aligned ? SKFilterQuality.None : SKFilterQuality.Low;
         }
         if (!flat) return draft ? SKFilterQuality.Low : SKFilterQuality.High;

@@ -2173,6 +2173,7 @@ Windows でも GPU で描画する。Linux と同じ「OpenGL ES + Skia」の作
 | 設定に覚える ID | `名前|ベンダー:デバイス:サブシステム` (例: `NVIDIA GeForce RTX 4070 Laptop GPU|10DE:2860:3FC817AA`)。LUID は起動のたびに変わるので覚えない |
 | 開き方 | コンテキストごとに、選んだ GPU (DXGI のアダプタを LUID で探す) で Direct3D 11 のデバイスを作り (`D3D11CreateDevice`。機能レベル 11_1〜10_0)、ANGLE に渡して (`eglCreateDeviceANGLE`)、そのデバイスのディスプレイ (`EGL_PLATFORM_DEVICE_EXT`) で開く。Avalonia の画面の描画と同じやり方。開けなければ、Windows が選ぶ GPU (なければ WARP) で同じように開く。その上は Linux と同じ (pbuffer → サーフェスなし、OpenGL ES 3 → 2)。Dispose でディスプレイ・ANGLE のデバイス・Direct3D 11 のデバイスを手放す |
 | デバイスを分ける理由 | 最初は ANGLE の既定のディスプレイ (`EGL_PLATFORM_ANGLE_ANGLE`) で開いていたが、ANGLE は同じ設定のディスプレイを使い回し、Direct3D 11 のデバイスも 1 つになる。プレビューと出力のように別々のスレッドで同時に描くと壊れた (CI で、並列に流れるテストが Skia の flush の中で落ち、モザイクの絵も崩れた) |
+| 0.5 画素の位置 | 幅・高さが奇数の画像 (文字など) を等倍で中心に置くと、左上が x.5 になる。以前は補間なし (最近傍) で描いていたため、どちらの画素を拾うかが CPU と Direct3D で逆になり、文字が 1 画素ずれた (Linux の GPU は CPU と同じ向きだったので出なかった)。ちょうど x.5 のときは整数の位置に寄せて描く (`RenderEngine.SnapHalfPixel`)。補間するかどうかの判断も、キャンバスの移動量だけでなく、画像を置く位置で見る |
 | 同じ ID の GPU | 同じ名前・PCI の ID の GPU が 2 つあれば、2 つ目からは ID に `#2` などを付ける。WARP は画面のない環境で 2 つ出ることがあるので 1 つにする |
 | ソフトウェアの判定 | `GL_RENDERER` に llvmpipe・SwiftShader・"Basic Render Driver" などが入っていれば、ソフトウェアとして自動では使わない (`GpuContext.IsSoftwareRenderer`) |
 | 名前の照合 | ANGLE の `GL_RENDERER` は `ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Laptop GPU (0x00002860) Direct3D11 vs_5_0 ps_5_0, D3D11)` のような形なので、アダプタの名前が含まれていれば同じ GPU とみなす (`GpuContext.SameGpu`) |

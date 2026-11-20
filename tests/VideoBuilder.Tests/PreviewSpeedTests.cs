@@ -194,7 +194,8 @@ public class PreviewSpeedTests : IDisposable
         for (int f = 0; f < 90; f++)
         {
             if (f == 55)
-                for (int i = 0; i < 200 && ahead.Media.PreloadsInFlight > 0; i++) Thread.Sleep(10);   // 開き終えるのを待つ (再生中なら間に合う)
+                // 開き終えるのを待つ (再生中なら間に合う)。CI では、ほかのテストと並んで動くので 2 秒では足りないことがあった
+                for (int i = 0; i < 1000 && ahead.Media.PreloadsInFlight > 0; i++) Thread.Sleep(10);
             Assert.Equal(Frame(plain, p, f), Frame(ahead, p, f));
         }
         Assert.Equal(1, ahead.Media.PreloadHits);         // 切り替わりで、先に開いておいたデコーダを使った
