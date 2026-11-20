@@ -8,13 +8,35 @@ on:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    env:
+      FFMPEG_VERSION: "9.0.2"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - name: Install FFmpeg, OpenAL, software OpenGL ES and a Japanese font
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg libopenal1 fonts-ipafont-gothic libegl1 libgles2 libgl1-mesa-dri xvfb
+      - name: Install OpenAL, software OpenGL ES, a Japanese font and FFmpeg's codec libraries
+        run: sudo apt-get update && sudo apt-get install -y nasm libx264-dev libvpx-dev libopus-dev libdav1d-dev libopenal1 fonts-ipafont-gothic libegl1 libgles2 libgl1-mesa-dri xvfb
+      # Ubuntu 24.04 の FFmpeg は 6.1 なので、FFmpeg 9 をソースから作る (設計書 22.31)。作ったものはキャッシュする
+      - name: Cache FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-${{ runner.os }}-1
+      - name: Build FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" | tar xJ
+          cd "ffmpeg-${FFMPEG_VERSION}"
+          ./configure --prefix="$HOME/ffmpeg" --enable-shared --disable-static --disable-doc \
+            --enable-gpl --enable-libx264 --enable-libvpx --enable-libopus --enable-libdav1d
+          make -j"$(nproc)" && make install
+      - name: Use FFmpeg
+        run: |
+          echo "$HOME/ffmpeg/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$HOME/ffmpeg/lib" >> "$GITHUB_ENV"
+          echo "VIDEO_BUILDER_FFMPEG=$HOME/ffmpeg/lib" >> "$GITHUB_ENV"
       - name: Build
         run: dotnet build -warnaserror:CS8600,CS8602,CS8604
       - name: Test
