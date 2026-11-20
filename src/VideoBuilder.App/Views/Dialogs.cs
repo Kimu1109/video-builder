@@ -387,12 +387,19 @@ public sealed class AboutDialog : DialogBase
         Body.Children.Add(name);
         var version = typeof(AboutDialog).Assembly.GetName().Version;
         Body.Children.Add(new TextBlock { Text = $"バージョン {version?.ToString(3) ?? "0.1.0"}" });
+        Body.Children.Add(new TextBlock { Text = "AviUtl ライクな操作感の動画編集アプリ。", TextWrapping = TextWrapping.Wrap });
+        Body.Children.Add(new TextBlock { Text = "ライセンス: LGPL-3.0-or-later", Margin = new Thickness(0, 8, 0, 0) });
+        // 読み込んだ FFmpeg のライセンス (同梱するものは x264・x265 入りの GPL ビルド。THIRD_PARTY_NOTICES.md)
+        if (FFmpegLoader.EnsureLoaded())
+            Body.Children.Add(new TextBlock { Text = $"FFmpeg {FFmpegLoader.Version} ({FFmpegLoader.License})", TextWrapping = TextWrapping.Wrap });
         var text = new TextBlock
         {
             TextWrapping = TextWrapping.Wrap,
-            Text = "AviUtl ライクな操作感の動画編集アプリ。\n\n" +
-                   "使用ライブラリ: Avalonia UI (MIT), SkiaSharp (MIT), FFmpeg (LGPL / GPL), OpenAL Soft (LGPL), " +
-                   "Silk.NET (MIT), CommunityToolkit.Mvvm (MIT)\nアイコン: Material Symbols Sharp (Apache License 2.0)",
+            Margin = new Thickness(0, 8, 0, 0),
+            Text = "使用ライブラリ: FFmpeg (GPL-3.0。x264・x265 を含む), Avalonia UI (MIT), SkiaSharp (MIT), Svg.Skia (MIT), " +
+                   "FFmpeg.AutoGen (MIT), Silk.NET (MIT), OpenAL Soft (LGPL), MoonSharp (BSD)\n" +
+                   "フォント: Noto Sans JP・Inter (OFL)\nアイコン: Material Symbols Sharp (Apache License 2.0)\n\n" +
+                   "配布物は GPL のライブラリを含むため、全体を GPL-3.0-or-later の条件で配布しています。詳しくは THIRD_PARTY_NOTICES.md を参照してください。",
         };
         text.Classes.Add("secondary");
         Body.Children.Add(text);
