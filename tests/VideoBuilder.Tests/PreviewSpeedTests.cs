@@ -176,6 +176,32 @@ public class PreviewSpeedTests : IDisposable
     }
 
     [Fact]
+    public void A_clip_starting_soon_is_opened_ahead_and_the_cut_shows_the_same_frames()
+    {
+        if (!_ready) return;
+        // A を再生したあと、60 フレーム目から B (同じファイルの 0.5 秒目から。A の続きではないのでシークが要る) に切り替わる
+        // (A の続きから始まるなら、A のデコーダを読み進めれば届くので、先に開かない)
+        var p = new Project();
+        p.Settings.Width = 640; p.Settings.Height = 360;
+        var a = ObjectFactory.Create(EffectRegistry.Video, 0, 0, 60);
+        a.Main.Values["file"] = _clip;
+        var b = ObjectFactory.Create(EffectRegistry.Video, 0, 60, 30);
+        b.Main.Values["file"] = _clip;
+        b.SourceOffsetFrames = 15;
+        p.Root.Objects.AddRange(new[] { a, b });
+        using var plain = new RenderEngine();
+        using var ahead = new RenderEngine { Lookahead = true };
+        for (int f = 0; f < 90; f++)
+        {
+            if (f == 55)
+                for (int i = 0; i < 200 && ahead.Media.PreloadsInFlight > 0; i++) Thread.Sleep(10);   // 開き終えるのを待つ (再生中なら間に合う)
+            Assert.Equal(Frame(plain, p, f), Frame(ahead, p, f));
+        }
+        Assert.Equal(1, ahead.Media.PreloadHits);         // 切り替わりで、先に開いておいたデコーダを使った
+        Assert.Equal(0, plain.Media.PreloadHits);         // 先読みしないときは開かない
+    }
+
+    [Fact]
     public void Lookahead_survives_jumping_to_another_position()
     {
         if (!_ready) return;

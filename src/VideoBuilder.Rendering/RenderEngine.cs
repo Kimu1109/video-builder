@@ -571,9 +571,25 @@ public sealed class RenderEngine : IDisposable
             if (Lookahead && depth == 0 && o.Contains(frame + 1))
                 (next ??= new()).Add((o.Id, file, SourceTime(project, o, bounds, frame + 1), loop));
         }
+        if (Lookahead && depth == 0) PreloadUpcoming(project, scene, frame);
         if (requests == null) return;
         if (requests.Count >= 2 || next != null) Media.Prefetch(requests);
         if (next != null) Media.Lookahead(next);
+    }
+
+    /// <summary>1 秒以内に始まる動画のクリップを、裏で開いておく (再生・出力のとき)。</summary>
+    private void PreloadUpcoming(Project project, Scene scene, int frame)
+    {
+        int horizon = Math.Max(1, (int)Math.Ceiling(project.Settings.Fps.Value));
+        List<(int Start, string Key, string Path, double Seconds, bool Loop)>? upcoming = null;
+        foreach (var o in scene.Objects)
+        {
+            if (o.Start <= frame || o.Start > frame + horizon || !o.Enabled || o.Effects.Count == 0) continue;
+            if (o.Main.DefinitionId != EffectRegistry.Video || !scene.GetLayer(o.Layer).Visible) continue;
+            (upcoming ??= new()).Add((o.Start, o.Id, o.Main.GetString("file"), SourceTime(project, o, o.Bounds, o.Start), o.Main.GetBool("loop")));
+        }
+        if (upcoming == null) return;
+        Media.Preload(upcoming.OrderBy(u => u.Start).Select(u => (u.Key, u.Path, u.Seconds, u.Loop)).ToList());
     }
 
     private static GroupState GroupOf(TimelineObject obj, int[] bounds, int frame)

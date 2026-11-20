@@ -29,6 +29,10 @@ public sealed class MediaCache : IDisposable
         public IntPtr Data;
         /// <summary>直前の Fetch で、前の画像が指していた置き場の中身が失われた (zeroCopy で取り出しに失敗した)。</summary>
         public bool Lost;
+        /// <summary>これから始まるクリップのために、裏で開いて最初のフレームまで読んでいる間は、その作業 (Preload)。</summary>
+        public Task? Preloading;
+        /// <summary>先に開いておいたクリップのオブジェクトの ID (まだ使われていなければ)。</summary>
+        public string? PreloadKey;
     }
 
     // デコーダはファイルごとに持ち、オブジェクトには描画のたびに「いちばん都合のよいもの」を貸す。
@@ -75,6 +79,7 @@ public sealed class MediaCache : IDisposable
     public void BeginFrame()
     {
         WaitLookahead();
+        FinishPreloads(wait: false);
         _frame++;
         _assigned.Clear();
     }
@@ -182,6 +187,62 @@ public sealed class MediaCache : IDisposable
         }
     }
 
+    // ---------------- これから始まるクリップを先に開く ----------------
+
+    private const int MaxPreloads = 2;
+    private int _preloading;
+
+    /// <summary>裏で開いている途中のデコーダの数 (計測・テスト用)。</summary>
+    public int PreloadsInFlight => _byPath.Values.SelectMany(l => l).Count(e => e.Preloading is { IsCompleted: false });
+
+    /// <summary>先に開いておいたデコーダを、クリップが始まったときにそのまま使えた回数 (計測・テスト用)。</summary>
+    public long PreloadHits { get; private set; }
+
+    /// <summary>
+    /// これから始まるクリップのデコーダを裏で開き、最初のフレームまでデコードしておく (同時に 2 つまで)。
+    /// 動画の途中から始まるクリップは、始まった瞬間にデコードすると前のキーフレームから読むので時間がかかり、再生が一瞬止まる。
+    /// 開き終えるまでは誰にも貸さず、待ちもしない (間に合わなければ、これまでどおりその場で開く)。
+    /// </summary>
+    public void Preload(IReadOnlyList<(string Key, string Path, double Seconds, bool Loop)> upcoming)
+    {
+        foreach (var (key, original, rawSeconds, loop) in upcoming)
+        {
+            if (_preloading >= MaxPreloads) return;
+            if (string.IsNullOrEmpty(original) || !File.Exists(original)) continue;
+            double t = Wrap(original, rawSeconds, loop);
+            var path = EffectivePath(original, t);
+            if (!_byPath.TryGetValue(path, out var list)) _byPath[path] = list = new List<VideoEntry>();
+            // すでに開いてある (開いている途中の) もの・空いていて少し読み進めれば届くものがあれば要らない
+            if (list.Any(e => e.PreloadKey == key && Math.Abs((e.Preloading != null ? e.PendingPosition : e.Position) - t) < 0.5)) continue;
+            if (list.Any(e => e.Preloading == null && e.UsedInFrame != _frame && !double.IsNaN(e.Position) && t >= e.Position - 1e-9 && t - e.Position <= SequentialWindow)) continue;
+            int width = InfoOf(original)?.Width ?? 0;
+            var entry = new VideoEntry { Path = path, Original = original, PreloadKey = key, PendingPosition = t, LastUsed = ++_tick };
+            list.Add(entry);
+            _preloading++;
+            entry.Preloading = Task.Run(() =>
+            {
+                var opened = Open(path, original, width);
+                entry.Reader = opened.Reader;
+                entry.SourceWidth = opened.SourceWidth;
+                try { opened.Reader?.GetFramePointer(t); }
+                catch { /* 読めなければ、使うときにもう一度試す */ }
+            });
+        }
+    }
+
+    /// <summary>開き終えた先読みのデコーダを、使えるようにする。wait なら終わるのを待つ (破棄のとき)。</summary>
+    private void FinishPreloads(bool wait)
+    {
+        foreach (var e in _byPath.Values.SelectMany(l => l))
+        {
+            if (e.Preloading == null || (!wait && !e.Preloading.IsCompleted)) continue;
+            try { e.Preloading.Wait(); } catch { /* 中で握りつぶしているので来ない */ }
+            e.Preloading = null;
+            e.Position = e.Reader == null ? double.NaN : e.PendingPosition;
+            _preloading--;
+        }
+    }
+
     /// <summary>先読みが終わるのを待って、デコーダを使えるように戻す。</summary>
     private void WaitLookahead()
     {
@@ -213,7 +274,7 @@ public sealed class MediaCache : IDisposable
         double bestCost = double.MaxValue;
         foreach (var e in list)
         {
-            if (e.UsedInFrame == _frame) continue;
+            if (e.UsedInFrame == _frame || e.Preloading != null) continue;
             double t = seconds;
             double cost;
             if (double.IsNaN(e.Position)) cost = 1000;
@@ -227,6 +288,11 @@ public sealed class MediaCache : IDisposable
             list.Add(best);
             if (path != original) CloseOtherSegments(best);
             Trim();
+        }
+        if (best.PreloadKey != null)
+        {
+            if (best.PreloadKey == key && bestCost < 100) PreloadHits++;
+            best.PreloadKey = null;
         }
         best.UsedInFrame = _frame;
         best.LastUsed = ++_tick;
@@ -262,7 +328,7 @@ public sealed class MediaCache : IDisposable
         foreach (var (path, list) in _byPath.ToList())
         {
             if (path == keep.Path) continue;
-            foreach (var e in list.Where(e => e.Original == keep.Original && e.Path != e.Original && e.UsedInFrame != _frame && e.Pending == null).ToList())
+            foreach (var e in list.Where(e => e.Original == keep.Original && e.Path != e.Original && e.UsedInFrame != _frame && e.Pending == null && e.Preloading == null && e.PreloadKey == null).ToList())
             {
                 e.Reader?.Dispose(); e.Image?.Dispose();
                 list.Remove(e);
@@ -353,7 +419,7 @@ public sealed class MediaCache : IDisposable
     {
         while (ReaderCount > MaxReaders)
         {
-            var oldest = _byPath.SelectMany(kv => kv.Value.Select(e => (kv.Key, e))).Where(x => x.e.UsedInFrame != _frame).MinBy(x => x.e.LastUsed);
+            var oldest = _byPath.SelectMany(kv => kv.Value.Select(e => (kv.Key, e))).Where(x => x.e.UsedInFrame != _frame && x.e.Preloading == null).MinBy(x => x.e.LastUsed);
             if (oldest.e == null) return;
             oldest.e.Reader?.Dispose(); oldest.e.Image?.Dispose();
             _byPath[oldest.Key].Remove(oldest.e);
@@ -364,6 +430,7 @@ public sealed class MediaCache : IDisposable
     public void Dispose()
     {
         WaitLookahead();
+        FinishPreloads(wait: true);
         foreach (var e in _byPath.Values.SelectMany(l => l)) { e.Reader?.Dispose(); e.Image?.Dispose(); }
         foreach (var (img, _) in _images.Values) img?.Dispose();
         _byPath.Clear(); _assigned.Clear(); _images.Clear();
