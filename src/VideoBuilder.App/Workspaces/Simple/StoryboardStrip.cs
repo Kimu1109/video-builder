@@ -435,7 +435,7 @@ public sealed class StoryboardStrip : Control
                 {
                     double t = span.Music.TrimStart + (x - inner.X) / _pps;
                     int i = (int)(t * WaveformCache.PeaksPerSecond);
-                    if (i < 0 || i >= peaks.Values.Length) continue;
+                    if (i < 0 || i >= peaks.Ready) continue;   // まだ計算していない所は描かない
                     double h = peaks.Values[i] / 255.0 * half;
                     ctx.DrawLine(pen, new Point(x, mid - h), new Point(x, mid + h));
                 }

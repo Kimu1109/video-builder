@@ -409,7 +409,7 @@ public sealed class TimelineCanvas : Control
         double fps = project.Settings.Fps.Value;
         double x1 = Math.Max(rect.X, HeaderWidth), x2 = Math.Min(rect.Right, Bounds.Width);
         double mid = rect.Y + rect.Height / 2, half = rect.Height / 2 - 1;
-        string signature = FormattableString.Invariant($"{x1}|{x2}|{rect.Y}|{rect.Height}|{_scrollX}|{_ppf}|{o.Start}|{speed}|{offset}|{loop}|{fps}|{peaks.Values.Length}");
+        string signature = FormattableString.Invariant($"{x1}|{x2}|{rect.Y}|{rect.Height}|{_scrollX}|{_ppf}|{o.Start}|{speed}|{offset}|{loop}|{fps}|{peaks.Values.Length}|{peaks.Ready}");
         if (_waveCache.TryGetValue(o.Id, out var cached) && cached.Signature == signature)
         {
             ctx.DrawGeometry(null, WavePen, cached.Geometry);
@@ -425,9 +425,9 @@ public sealed class TimelineCanvas : Control
                 double t0 = offset + f0 / fps * speed, t1 = offset + f1 / fps * speed;
                 if (loop && peaks.Duration > 0) { double d = t1 - t0; t0 %= peaks.Duration; t1 = t0 + d; }
                 int i0 = (int)(t0 * WaveformCache.PeaksPerSecond), i1 = Math.Max(i0, (int)(t1 * WaveformCache.PeaksPerSecond));
-                if (i0 < 0 || i0 >= peaks.Values.Length) continue;
+                if (i0 < 0 || i0 >= peaks.Ready) continue;   // まだ計算していない所は描かない
                 int max = 0;
-                for (int i = i0; i <= Math.Min(i1, peaks.Values.Length - 1); i++) max = Math.Max(max, peaks.Values[i]);
+                for (int i = i0; i <= Math.Min(i1, peaks.Ready - 1); i++) max = Math.Max(max, peaks.Values[i]);
                 double hgt = Math.Max(0.5, max / 255.0 * half);
                 g.BeginFigure(new Point(x + 0.5, mid - hgt), false);
                 g.LineTo(new Point(x + 0.5, mid + hgt));

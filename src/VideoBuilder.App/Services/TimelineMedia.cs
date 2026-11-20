@@ -18,11 +18,16 @@ public sealed class WaveformCache
     public const int PeaksPerSecond = 50;
     private const int Rate = 8000;
 
-    public sealed record Peaks(byte[] Values, double Duration);
+    /// <param name="Ready">計算し終えた値の数 (先頭から)。長いファイルは、計算しながら少しずつ出す。</param>
+    public sealed record Peaks(byte[] Values, double Duration, int Ready)
+    {
+        public bool IsComplete => Ready >= Values.Length;
+    }
 
     private readonly ConcurrentDictionary<string, Peaks?> _ready = new();
     private readonly ConcurrentDictionary<string, bool> _pending = new();
-    private readonly SemaphoreSlim _gate = new(1);
+    // 複数のファイルを同時に計算する (1 本ずつだと、長いファイルの後ろで短いファイルが待たされる)
+    private readonly SemaphoreSlim _gate = new(Math.Clamp(Environment.ProcessorCount / 2, 1, 4));
 
     /// <summary>新しい波形ができた (UI スレッドで通知)。</summary>
     public event Action? Updated;
@@ -35,7 +40,19 @@ public sealed class WaveformCache
         _ = Task.Run(async () =>
         {
             await _gate.WaitAsync();
-            try { _ready[path] = LoadOrCompute(path); }
+            try
+            {
+                // 計算しながら、できた所までを見せる (1 秒に 4 回まで画面を更新する)
+                long lastPost = 0;
+                _ready[path] = LoadOrCompute(path, partial =>
+                {
+                    _ready[path] = partial;
+                    long now = Environment.TickCount64;
+                    if (now - lastPost < 250) return;
+                    lastPost = now;
+                    Dispatcher.UIThread.Post(() => Updated?.Invoke());
+                });
+            }
             catch { _ready[path] = null; }
             finally { _gate.Release(); }
             Dispatcher.UIThread.Post(() => Updated?.Invoke());
@@ -51,14 +68,14 @@ public sealed class WaveformCache
         return Path.Combine(AppPaths.CacheDir, "waveform", hash + ".peaks");
     }
 
-    private static Peaks? LoadOrCompute(string path)
+    internal static Peaks? LoadOrCompute(string path, Action<Peaks>? progress = null)
     {
         if (!File.Exists(path) || !FFmpegLoader.EnsureLoaded()) return null;
         string cache = CacheFile(path);
         if (File.Exists(cache))
         {
             var bytes = File.ReadAllBytes(cache);
-            if (bytes.Length >= 8) return new Peaks(bytes[8..], BitConverter.ToDouble(bytes, 0));
+            if (bytes.Length >= 8) return new Peaks(bytes[8..], BitConverter.ToDouble(bytes, 0), bytes.Length - 8);
         }
         using var reader = new AudioReader(path, Rate);
         double duration = reader.Duration;
@@ -69,6 +86,8 @@ public sealed class WaveformCache
         var buffer = new float[Rate * 2];   // 1 秒ずつ読む
         for (long pos = 0; pos < (long)count * bucket; pos += Rate)
         {
+            // ここまでにできた所を見せる (値の配列はこのあとも書き足すが、見せる範囲 Ready より前は変わらない)
+            if (pos > 0 && progress != null) progress(new Peaks(values, duration, (int)Math.Min(count, pos / bucket)));
             reader.Read(pos, buffer);
             for (int b = 0; b < PeaksPerSecond; b++)
             {
@@ -87,7 +106,7 @@ public sealed class WaveformCache
             fs.Write(values);
         }
         catch { /* キャッシュに書けなくても表示はできる */ }
-        return new Peaks(values, duration);
+        return new Peaks(values, duration, count);
     }
 }
 

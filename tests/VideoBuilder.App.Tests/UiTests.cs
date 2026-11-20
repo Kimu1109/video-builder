@@ -446,11 +446,11 @@ public class UiTests
             s.Edit("grid", () => s.Project.Grid = new GridSettings { Mode = GridMode.Bpm, Bpm = 120 });
 
             WaveformCache.Peaks? peaks = null; Avalonia.Media.Imaging.Bitmap? thumb = null;
-            for (int i = 0; i < 300 && (peaks == null || thumb == null); i++)
+            for (int i = 0; i < 300 && (peaks is not { IsComplete: true } || thumb == null); i++)
             {
                 await Task.Delay(20);
                 Pump();
-                peaks ??= Svc.Waveforms.Get(clip);
+                if (peaks is not { IsComplete: true }) peaks = Svc.Waveforms.Get(clip);   // 途中までのものが先に返ることがある
                 thumb ??= Svc.Thumbnails.Get(clip, 0, true);
             }
             Assert.NotNull(peaks);
@@ -1440,6 +1440,45 @@ public class UiTests
         Pump();
         Assert.Null(Svc.Preview.SharedTarget);
         Assert.False(Svc.Preview.PresentsToShared);
+    }
+
+
+    [Fact]
+    public void Waveform_is_reported_part_by_part_while_it_is_computed()
+    {
+        if (!VideoBuilder.Media.FFmpegLoader.EnsureLoaded()) return;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-wave-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            // 前半 5 秒は無音、後半 5 秒は音がある
+            var clip = Path.Combine(dir, "half.m4a");
+            using (var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ffmpeg",
+                $"-y -loglevel error -f lavfi -i \"aevalsrc='if(gte(t,5),sin(440*2*PI*t),0)':d=10\" -c:a aac \"{clip}\"")))
+            {
+                proc!.WaitForExit(30000);
+                if (proc.ExitCode != 0) return;
+            }
+            var parts = new List<WaveformCache.Peaks>();
+            var final = WaveformCache.LoadOrCompute(clip, p => parts.Add(p with { Values = p.Values.ToArray() }))!;
+            Assert.True(final.IsComplete);
+            Assert.InRange(final.Values.Length, 495, 505);
+            Assert.True(parts.Count >= 5, $"{parts.Count} 回");
+            for (int k = 1; k < parts.Count; k++) Assert.True(parts[k].Ready > parts[k - 1].Ready);
+            foreach (var part in parts)
+            {
+                Assert.False(part.IsComplete);
+                // 見せる範囲 (Ready より前) の値は、できあがりと同じ
+                Assert.Equal(final.Values.Take(part.Ready), part.Values.Take(part.Ready));
+            }
+            Assert.All(final.Values.Take(240), v => Assert.True(v < 5));      // 無音
+            Assert.Contains(final.Values.Skip(260), v => v > 100);            // 音がある
+            // 2 回目は保存したものを読むので、途中経過はない
+            var again = new List<WaveformCache.Peaks>();
+            Assert.Equal(final.Values, WaveformCache.LoadOrCompute(clip, again.Add)!.Values);
+            Assert.Empty(again);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
 }
