@@ -5,6 +5,8 @@
   <summary>AviUtl-like video editor</summary>
   <summary xml:lang="ja">AviUtl ライクな動画編集アプリ</summary>
   <metadata_license>CC0-1.0</metadata_license>
+  <!-- 本体は LGPL-3.0-or-later。同梱する FFmpeg は x264・x265 入りの GPL-3.0-or-later のビルド (THIRD_PARTY_NOTICES.md) -->
+  <project_license>LGPL-3.0-or-later AND GPL-3.0-or-later</project_license>
   <description>
     <p>A layer-based video editor with keyframes, effects, templates, Lua scripting and plugins.</p>
     <p xml:lang="ja">レイヤーとキーフレームで編集する動画編集アプリ。エフェクト・テンプレート・Lua スクリプト・プラグインに対応。</p>

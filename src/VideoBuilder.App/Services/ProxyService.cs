@@ -146,7 +146,7 @@ public sealed class ProxyService
             try
             {
                 info ??= MediaInfo.Probe(path);
-                if (info is { HasVideo: true })
+                if (info is { HasVideo: true, IsAnimatedImage: false })
                 {
                     if (ProxyStore.IsHeavy(info)) needed = true;
                     else

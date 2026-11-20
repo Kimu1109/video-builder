@@ -12,4 +12,7 @@
     <ProjectReference Include="../../src/VideoBuilder.Media/VideoBuilder.Media.csproj" />
     <ProjectReference Include="../../src/VideoBuilder.Rendering/VideoBuilder.Rendering.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="Assets/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

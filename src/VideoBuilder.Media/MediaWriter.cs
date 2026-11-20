@@ -118,7 +118,7 @@ public sealed unsafe class MediaWriter : IDisposable
         _vframe->width = _venc->width; _vframe->height = _venc->height;
         FFmpegLoader.Check(ffmpeg.av_frame_get_buffer(_vframe, 0), "フレームの確保に失敗");
         _sws = CreateScaler(_width, _height, AVPixelFormat.AV_PIX_FMT_BGRA, _venc->width, _venc->height, softwareFormat,
-            ffmpeg.SWS_BICUBIC, ConvertThreads, out _swsThreaded);
+            (int)SwsFlags.SWS_BICUBIC, ConvertThreads, out _swsThreaded);
         if (_sws == null) throw new InvalidOperationException("色変換の準備に失敗");
         // BT.709 で変換する (HD 以上の標準)
         if (_height >= 720)
@@ -135,7 +135,8 @@ public sealed unsafe class MediaWriter : IDisposable
         if (codec == null) throw new InvalidOperationException($"エンコーダ {s.AudioCodec} が使えません");
         _ast = ffmpeg.avformat_new_stream(_oc, null);
         _aenc = ffmpeg.avcodec_alloc_context3(codec);
-        _aenc->sample_fmt = codec->sample_fmts != null ? codec->sample_fmts[0] : AVSampleFormat.AV_SAMPLE_FMT_FLTP;
+        var sampleFormats = CodecSupport.SampleFormats(codec);
+        _aenc->sample_fmt = sampleFormats.Count > 0 ? sampleFormats[0] : AVSampleFormat.AV_SAMPLE_FMT_FLTP;
         _aenc->sample_rate = s.SampleRate;
         ffmpeg.av_channel_layout_default(&_aenc->ch_layout, 2);
         _aenc->bit_rate = s.AudioBitrate;

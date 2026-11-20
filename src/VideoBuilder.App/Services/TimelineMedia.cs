@@ -176,7 +176,7 @@ public sealed class ThumbnailCache
         reader.OutputDivisor = Math.Max(1, reader.Height / (Height * 2));
         var frame = reader.GetFrame(seconds);
         if (frame == null) return null;
-        var info = new SKImageInfo(reader.FrameWidth, reader.FrameHeight, SKColorType.Bgra8888, SKAlphaType.Opaque);
+        var info = new SKImageInfo(reader.FrameWidth, reader.FrameHeight, SKColorType.Bgra8888, reader.HasAlpha ? SKAlphaType.Premul : SKAlphaType.Opaque);
         using var src = new SKBitmap(info);
         System.Runtime.InteropServices.Marshal.Copy(frame, 0, src.GetPixels(), frame.Length);
         return Scale(src);

@@ -8,7 +8,14 @@ Avalonia UI / C# 製の、AviUtl ライクな動画編集アプリ (Linux 優先
 ## 必要なもの
 
 - .NET 10 SDK
-- FFmpeg 6.1 の共有ライブラリ (`libavcodec.so.60` など)。Ubuntu 24.04 なら `sudo apt install ffmpeg`
+- FFmpeg 9 の共有ライブラリ (`libavcodec.so.63` など)。Ubuntu 24.04 の標準の FFmpeg は 6.1 なので使えない。
+  配布物と同じ設定 (x264・x265 入り) のものは、次のように作れる (ffmpeg.org のソースから作る。数分かかる):
+
+  ```sh
+  sudo apt install build-essential nasm pkg-config libx264-dev libx265-dev libvpx-dev libdav1d-dev libopus-dev libffmpeg-nvenc-dev libva-dev libdrm-dev
+  packaging/ffmpeg/build.sh --prefix ~/.local/ffmpeg9
+  export VIDEO_BUILDER_FFMPEG=~/.local/ffmpeg9/lib LD_LIBRARY_PATH=~/.local/ffmpeg9/lib
+  ```
 - OpenAL Soft (`libopenal1`)。音声の再生に使う
 - (任意) EGL / OpenGL ES (`libegl1`)。GPU 描画に使う。なければ CPU で描画する
 
@@ -103,7 +110,16 @@ packaging/appimage/build.sh        # artifacts/appimage/ に出力
 ```
 
 `appimagetool` が PATH にあれば AppImage まで作り、なければ展開した状態 (AppDir) で止まる。
-FFmpeg と OpenAL は同梱しないので、利用者の環境に必要。
+FFmpeg 9 (x264・x265 入りの GPL ビルド) は `packaging/ffmpeg/build.sh` で作って同梱する。OpenAL は同梱しないので、利用者の環境に必要。
+Flatpak は `packaging/flatpak/build.sh` で作る (FFmpeg もマニフェストの中で作る)。
+Windows・macOS 向けは、GitHub Actions の `Package` ワークフロー (`.github/workflows/package.yml`) が、
+それぞれの OS で FFmpeg を作って同梱したものを作る (手動で実行するか、`v*` のタグを付ける)。
+
+## ライセンス
+
+video-builder は [LGPL-3.0-or-later](LICENSE) で配布する (条文は [COPYING.LESSER](COPYING.LESSER) と [COPYING](COPYING))。
+配布物 (AppImage・Flatpak) は x264・x265 を有効にした FFmpeg (GPL) を同梱するため、全体を GPL-3.0-or-later の条件で配る。
+使っているソフトウェアとライセンスは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照。
 
 ## 翻訳
 

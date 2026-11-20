@@ -760,5 +760,8 @@ internal static class TranslationsEn
         ("GPU を選べません (この環境では、デスクトップの GPU で描きます)。", "GPUs cannot be chosen here (the desktop's GPU is used)."),
         ("CPU 内蔵の GPU と外付けの GPU があるときに選びます。描画・出力・動画のデコードに使います。", "Choose between an integrated and a dedicated GPU. Used for rendering, export and video decoding."),
         ("環境変数 VIDEO_BUILDER_GPU で指定されているため、ここでは変えられません。", "Set by the VIDEO_BUILDER_GPU environment variable, so it cannot be changed here."),
+        ("AviUtl ライクな操作感の動画編集アプリ。", "A video editor that works like AviUtl."),
+        ("ライセンス: LGPL-3.0-or-later", "License: LGPL-3.0-or-later"),
+        ("使用ライブラリ: FFmpeg (GPL-3.0。x264・x265 を含む), Avalonia UI (MIT), SkiaSharp (MIT), Svg.Skia (MIT), FFmpeg.AutoGen (MIT), Silk.NET (MIT), OpenAL Soft (LGPL), MoonSharp (BSD)\nフォント: Noto Sans JP・Inter (OFL)\nアイコン: Material Symbols Sharp (Apache License 2.0)\n\n配布物は GPL のライブラリを含むため、全体を GPL-3.0-or-later の条件で配布しています。詳しくは THIRD_PARTY_NOTICES.md を参照してください。", "Libraries: FFmpeg (GPL-3.0, with x264 and x265), Avalonia UI (MIT), SkiaSharp (MIT), Svg.Skia (MIT), FFmpeg.AutoGen (MIT), Silk.NET (MIT), OpenAL Soft (LGPL), MoonSharp (BSD)\nFonts: Noto Sans JP, Inter (OFL)\nIcons: Material Symbols Sharp (Apache License 2.0)\n\nThe distributed packages include GPL libraries, so the whole package is distributed under the terms of GPL-3.0-or-later. See THIRD_PARTY_NOTICES.md for details."),
     };
 }

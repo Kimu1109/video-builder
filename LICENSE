@@ -1,0 +1,30 @@
+video-builder
+Copyright (C) 2026 Kimu1109 and the video-builder contributors
+
+SPDX-License-Identifier: LGPL-3.0-or-later
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Lesser General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public License
+along with this program (COPYING.LESSER), together with the GNU General
+Public License (COPYING) that it supplements.
+If not, see <https://www.gnu.org/licenses/>.
+
+----------------------------------------------------------------------------
+
+video-builder は、GNU Lesser General Public License v3.0 以降 (LGPL-3.0-or-later)
+のもとで配布する自由ソフトウェアです。条文は COPYING.LESSER (LGPL-3.0) と、
+それが元にしている COPYING (GPL-3.0) にあります。
+
+配布物 (AppImage・Flatpak・Windows・macOS) は、x264・x265 を有効にした
+FFmpeg (GPL-3.0-or-later のビルド) を同梱するため、全体を GPL-3.0-or-later の
+条件で配布します。使っているソフトウェアとそのライセンスは
+THIRD_PARTY_NOTICES.md を参照してください。

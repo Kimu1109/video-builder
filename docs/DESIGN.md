@@ -109,7 +109,7 @@ AviUtl ユーザーが迷わず使えることを目指しつつ、操作を Lin
 | DI | Microsoft.Extensions.DependencyInjection | 標準的で軽量 |
 | 2D 描画 | SkiaSharp (Avalonia が内部で使うものと共通) | GPU (OpenGL / Vulkan) 対応。テキスト描画も強い |
 | GPU エフェクト | SkiaSharp `SKRuntimeEffect` (SkSL シェーダ) | 追加依存なしでフィルタを GPU 実行できる |
-| 動画デコード / エンコード | FFmpeg + `FFmpeg.AutoGen` (現在は 6.1。[22.2](#222-設計書との差分)) | 対応コーデックが最も多い。ハードウェアデコードも使える |
+| 動画デコード / エンコード | FFmpeg + `FFmpeg.AutoGen` (現在は 9.0。[22.31](#2231-ffmpeg-9-への移行)) | 対応コーデックが最も多い。ハードウェアデコードも使える |
 | 音声出力 | Silk.NET.OpenAL (OpenAL Soft) | Linux (PulseAudio / PipeWire / ALSA) を一通りカバーできる |
 | アイコン | Material Symbols **Sharp** (SVG → `StreamGeometry`) | 角ばったデザインに合う。Apache 2.0 |
 | シリアライズ | System.Text.Json (Source Generator) | AOT 対応・高速 |
@@ -812,8 +812,8 @@ LRU で破棄する。キャッシュのキーは `(SourceId, Frame, Quality)`�
 
 ### 11.3 FFmpeg の同梱
 
-- Linux: AppImage / Flatpak には FFmpeg 共有ライブラリを同梱する (LGPL ビルド)。GPL コーデック (x264 / x265) はシステムの FFmpeg を使う設定も用意する。
-- ライセンス表示を「ヘルプ > ライセンス」に表示する。
+- Linux: AppImage / Flatpak には FFmpeg 共有ライブラリを同梱する。**x264 / x265 を有効にした GPL ビルド**にし、配布物全体を GPL-3.0-or-later の条件で配る (本体は LGPL-3.0-or-later)。詳しくは [22.33](#2233-ライセンスと-ffmpeg-の同梱)。
+- ライセンスは「ヘルプ > バージョン情報」と `THIRD_PARTY_NOTICES.md` に表示する。
 
 ---
 
@@ -1051,7 +1051,7 @@ video-builder/
 | 6 | アプリ名 | **video-builder** | リポジトリ名と同じ。C# の名前空間は `VideoBuilder` |
 | 7 | テーマ | **ライト / ダーク切替。既定はシステムに従う** | アクセントカラーもシステムに従う ([7.3](#73-テーマ切替とシステムカラー)) |
 | 8 | ランタイム | **.NET 10 (LTS)** | サポート期間が長いため |
-| 9 | FFmpeg | **当面 6.1 のまま** | 7.x への移行と同梱は、配布方法を決めるときに再検討する |
+| 9 | FFmpeg | **9.0 に移行した** ([22.31](#2231-ffmpeg-9-への移行)) | アニメーション WebP の読み込みなど。x264・x265 入りの GPL ビルドを配布物に同梱する ([22.33](#2233-ライセンスと-ffmpeg-の同梱)) |
 | 10 | フォント | **Noto Sans JP を同梱** | 画面の日本語表示と、テキストオブジェクトの既定フォントに使う |
 
 ## 22. 実装状況
@@ -1081,7 +1081,7 @@ video-builder/
 
 | 項目 | 設計 | 現在の実装 | 理由 |
 |---|---|---|---|
-| FFmpeg のバージョン | 7.x | **6.1** (`FFmpeg.AutoGen 6.1.0.1`) | Ubuntu 24.04 LTS 標準の FFmpeg が 6.1 のため。`FFmpeg.AutoGen` はライブラリのメジャーバージョンと一致している必要がある。7.x への移行は同梱方針とあわせて決める |
+| FFmpeg のバージョン | 7.x | **9.0** (`FFmpeg.AutoGen 9.0.1.1`) | 以前は Ubuntu 24.04 LTS 標準に合わせて 6.1 だった。`FFmpeg.AutoGen` はライブラリのメジャーバージョンと一致している必要がある。[22.31](#2231-ffmpeg-9-への移行) |
 | 描画バックエンド | Skia GL | **GPU (EGL + OpenGL ES) と CPU の切替**。既定は自動 | 下の [22.5](#225-gpu-描画) を参照 |
 | クロマキー | SkSL シェーダ | C# のピクセル処理 (GPU 描画中も、この効果だけ CPU) | SkiaSharp 2.88 の `SKRuntimeEffect` は描画時にネイティブ側でクラッシュするため |
 | MVVM / DI / ログ | CommunityToolkit.Mvvm / MS.DI / Serilog | 未使用 (コードビハインド + 静的な `Svc`) | 画面数が少ない間は依存を増やさない。画面が増えたら導入する |
@@ -2071,6 +2071,95 @@ AviUtl 風の詳細編集とは別に、動画・写真を並べるだけで作�
 | デコードの速さの計測 (19 本) | 同時に 3 秒、1 本あたり 124〜290 fps と測れた | 1 本ずつ (約 0.25 秒 × 本数)、正しく 549 fps 前後 |
 
 プロキシを作っている間 (CPU を多く使う) に測ると、まだ遅めに測れることがある。
+
+
+### 22.31 FFmpeg 9 への移行
+
+`FFmpeg.AutoGen` を 6.1.0.1 から **9.0.1.1** に上げ、FFmpeg 9 (libavcodec.so.63) を読み込むようにした。主な目的はアニメーション WebP の読み込み (FFmpeg 9.0 で追加)。ほかに、7.0〜9.0 で入った不具合・脆弱性の修正、VVC / MV-HEVC / APV / ProRes RAW の読み込み、D3D12VA・Vulkan・AMF まわりの改善が使えるようになる。
+
+| 変更 | 内容 |
+|---|---|
+| エンコーダの対応形式 | `AVCodec.pix_fmts` / `sample_fmts` は 7.1 で非推奨、8.0 で削除された。代わりの `avcodec_get_supported_config` を使う (`CodecSupport`) |
+| 拡大縮小の方式 | `ffmpeg.SWS_BILINEAR` などの定数が `SwsFlags` の列挙に移った。引数は int のままなので、キャストして渡す |
+| 読み込むライブラリ | 探すファイル名をバインディングの `LibraryVersionMap` から決める (`libavcodec.so.63` / `avcodec-63.dll` / `libavcodec.63.dylib`)。見つからないときの文言も FFmpeg 9 にした |
+| 音声のチャンネル | すでに新しい `AVChannelLayout` (`ch_layout`) を使っていたので、変更なし |
+
+確かめたこと (FFmpeg 9.0.2 を ffmpeg.org のソースから共有ライブラリでビルドして使った):
+- テストはすべて通る (VideoBuilder.Tests 194、VideoBuilder.App.Tests 45)。1 回目だけ `PreviewSpeedTests.A_clip_starting_soon_is_opened_ahead_and_the_cut_shows_the_same_frames` が落ちたが、単独で 5 回・全体でさらに 2 回流して再現しなかった。負荷が高いときに先読みが間に合わない、時間に依存するテスト。
+- アニメーション WebP は `MediaInfo.Probe` で映像 (`webp_anim`、10 fps) として読める。
+
+まだのこと:
+- ~~アニメーション WebP を動画として扱う~~ → [22.32](#2232-アニメーション-webpgif-を動画として読む) で対応した。
+- ~~配布物への同梱・Flatpak・ライセンスの表示~~ → [22.33](#2233-ライセンスと-ffmpeg-の同梱) で対応した。
+
+
+### 22.32 アニメーション WebP・GIF を動画として読む
+
+アニメーションする WebP・GIF を、動画オブジェクトとして読み込む。アニメーションしないものは、これまでどおり画像オブジェクトになる。
+
+| 項目 | 内容 |
+|---|---|
+| 見分け方 | ファイルの先頭を読む (`AnimatedImageFiles`、Core)。WebP は拡張 (VP8X) チャンクのアニメーションの印、GIF は画像が 2 枚以上あるか。`ObjectFactory.DefinitionForFile` で使うので、タイムライン・シンプル編集のどちらから読み込んでも同じになる。動画オブジェクトのファイル選択でも選べる |
+| 長さ | アニメーション WebP (`webp_anim`) は入れ物に長さが入っていないので、パケットを最後まで数えて求める (`AnimatedImageMedia.ScanDuration`)。GIF は FFmpeg が長さを出す |
+| シーク | `webp_anim` はシークすると末尾まで進んでしまう (索引がない)。前へ戻るときや 2 秒より先へ飛ぶときは、ファイルを開き直して先頭からデコードする。小さなファイルなので速い |
+| 透明な部分 | アニメーション画像 (`webp_anim` / `gif` / `apng`) のときだけ、`VideoReader` がアルファを掛けた BGRA を返し (`HasAlpha`)、描画は Premul として扱う。下のレイヤーが透けて見える。ほかの動画はこれまでどおり不透明 (アルファを掛ける処理が増えないように) |
+| プロキシ | 作らない (`MediaInfo.IsAnimatedImage`)。小さく、MJPEG のプロキシにすると透明な部分がなくなるため |
+| ループ | 動画オブジェクトの「ループ再生」をそのまま使える |
+
+テスト (`AnimatedImageTests`): 素材は `tests/VideoBuilder.Tests/Assets` の 32x24・4 フレーム (左半分が赤→緑→青→黄、右半分が透明) の WebP (可逆) と GIF。どの順で取り出しても正しいフレームになること、透明な部分から下のレイヤー (白) が見えることを確かめる。描画を不透明のまま (`SKAlphaType.Opaque`) にすると、透明な部分が黒になってテストが落ちることも確かめた。
+
+- アルファ付きの動画 (ProRes 4444・VP9 のアルファなど) の透明な部分は、まだ使っていない。必要になったら `HasAlpha` を広げる (4K ではアルファを掛ける処理の速さに注意)。
+
+
+### 22.33 ライセンスと FFmpeg の同梱
+
+| 項目 | 決めたこと |
+|---|---|
+| 本体のライセンス | **LGPL-3.0-or-later** (`COPYING.LESSER`・`COPYING`)。v2.1 にしないのは、同梱するアイコン (Material Symbols) が Apache-2.0 で、GPL/LGPL の v2 と両立しないため |
+| 同梱する FFmpeg | **9.0.2 を libx264・libx265 入りで作る** (`--enable-gpl --enable-version3`。GPL-3.0-or-later のビルド)。ほかに libvpx・dav1d・Opus |
+| 配布物のライセンス | GPL の FFmpeg と一緒に動く形で配るので、**全体を GPL-3.0-or-later の条件で配る**。本体のソースは LGPL-3.0-or-later のまま (GPL-3.0 と両立する) |
+| 表示 | 「バージョン情報」に本体のライセンスと、読み込んだ FFmpeg のバージョン・ライセンス (`avcodec_license`) を出す。一覧は `THIRD_PARTY_NOTICES.md`。配布物には `licenses` に条文と FFmpeg の configure の設定を入れる |
+
+FFmpeg の作り方は `packaging/ffmpeg/build.sh` にまとめた (バージョンと SHA-256 を固定して ffmpeg.org から取る)。CI・AppImage・開発用はこれを使う。
+
+| 配布の形 | FFmpeg |
+|---|---|
+| AppImage | `build.sh --bundle` で、FFmpeg と、それが使うコーデックのライブラリ (x264・x265・libvpx・dav1d・Opus・libnuma) を `usr/bin/ffmpeg` に写す。RPATH を `$ORIGIN` にするので、`LD_LIBRARY_PATH` なしで互いを見つける。libc や GPU のドライバ (libva など) は利用者の環境のものを使う。FFmpeg はその PC 向けにしか作れないので、arm64 の AppImage は arm64 の PC で作る |
+| Flatpak | ランタイムを **Freedesktop 25.08** に上げた (23.08 はサポート終了)。25.08 では ffmpeg-full 拡張がなくなったので、x264・x265・FFmpeg 9 をマニフェストのモジュールとしてソースから作り、`/app/lib` に入れる。libvpx・dav1d・Opus はランタイムのもの。OpenAL Soft は 1.24.3 に上げた (1.23.1 は 25.08 の CMake 4 で configure できず、1.25.0 は GCC 15 で C++ モジュールのビルドに失敗する) |
+| CI | `build.sh --prefix ~/ffmpeg` で作り、`actions/cache` に入れる (build.sh が変わったら作り直す) |
+
+Flatpak と `build.sh` で configure の設定・FFmpeg のソースが食い違わないことを、テスト (`PackagingTests`) で確かめる。
+
+注意すること:
+- GPL の求めに従い、配布物を公開するときは、同梱したものと同じバージョンのソース (video-builder・FFmpeg・x264・x265) を同じ場所から入手できるようにする (リリースに添付する)。
+- プラグインは同じプロセスで動くので、GPL の FFmpeg を同梱した配布物と一緒に配るプラグインは、GPL-3.0 と両立するライセンスにする。
+- H.264・H.265 には特許がある (著作権のライセンスとは別の話)。配布する国や方法によっては確認が要る。
+- Windows・macOS 向けの FFmpeg の同梱 → [22.34](#2234-windowsmacos-向けの-ffmpeg-の同梱)。
+
+
+### 22.34 Windows・macOS 向けの FFmpeg の同梱
+
+Linux と同じ FFmpeg (9.0.2、GPL-3.0、x264・x265 入り) を、Windows・macOS の配布物にも同梱する。FFmpeg はその OS の上でしか作れないので、GitHub Actions のそれぞれの OS のランナーで作る (`.github/workflows/package.yml`。手動・タグ・packaging を変えた PR で動く)。
+
+| | Windows (x64) | macOS (arm64・x64) |
+|---|---|---|
+| 作る環境 | MSYS2 の UCRT64 (`windows-latest`) | Homebrew (`macos-latest`・`macos-15-intel`) |
+| コーデックのライブラリ | MSYS2 のパッケージ (x264・x265・libvpx・dav1d・Opus) | Homebrew のもの |
+| 同梱のしかた (`build.sh --bundle`) | FFmpeg の DLL と、`ldd` で見つかる MSYS2 の DLL (C:\Windows のもの以外) を写す。GCC の実行時ライブラリ・winpthreads・libva・zlib なども入る (22 個。CI で確かめた) | 参照先を `otool -L` でたどって集め、`install_name_tool` で `@loader_path` に書き換え、ad-hoc で署名し直す。Homebrew の X11 のライブラリを拾わないよう、`--disable-libxcb --disable-xlib --disable-sdl2` を足す |
+| 読み込み | `FFmpegLoader` が `SetDllDirectory` で同梱のフォルダを足す。FFmpeg.AutoGen はフルパスで読むが、そこから読まれる DLL (x264 など) は、既定ではアプリのフォルダと PATH からしか探さないため | 変更なし (`@loader_path` で互いを見つける) |
+| GPU | NVENC・NVDEC (ヘッダは nv-codec-headers 12.1)、AMF、D3D11VA・DXVA2 | VideoToolbox |
+
+発行 (`publish-all.sh <RID>`) は、`artifacts/ffmpeg-bundle/<RID>` があれば、発行したフォルダの `ffmpeg/` に写す。`FFmpegLoader` は実行ファイルの隣の `ffmpeg` フォルダを最初に探す。ライセンスの文書は `licenses/` に入れる。
+
+確かめ方 (package.yml): 同梱したものだけで動くことを確かめるため、Windows は MSYS2 の PATH を使わないシェルで、`VIDEO_BUILDER_FFMPEG` を同梱のフォルダにしてテストの一部 (`AnimatedImageTests`・`PackagingTests`・`FFmpegBuildTests`) を流す。macOS は、同梱したライブラリが同梱のもの・OS のもの以外を参照していないことも `otool -L` で確かめる。`FFmpegBuildTests` は、読み込んだ FFmpeg が GPL v3 のビルドで、libx264・libx265・libvpx・Opus・dav1d を持つことを確かめる (CI でも流す)。
+
+NVENC のヘッダは、Linux (Ubuntu の `libffmpeg-nvenc-dev`)・Flatpak・Windows のすべてで 12.1 にした。13.x は新しいドライバ (570 以降) でないと NVENC が使えないため。
+
+注意すること:
+- macOS: Homebrew のライブラリは、ランナーの macOS 向けに作られている。そのため、配布物が動く macOS の下限は、ランナーの macOS のバージョンになる。古い macOS にも対応するなら、コーデックのライブラリも `MACOSX_DEPLOYMENT_TARGET` を指定して自分で作る必要がある。
+- macOS の署名は ad-hoc だけ。配布するには、Developer ID での署名と公証 (notarization) が要る (Gatekeeper)。
+- Windows・macOS で、アプリ全体の動作はまだ確かめていない (22.4)。確かめたのは、同梱した FFmpeg だけでの読み込み・アニメーション WebP のデコードと描画・エンコーダがあること (package.yml で 13 件のテストが通る) まで。
+- Windows の arm64 は作っていない。
 
 ---
 

@@ -24,7 +24,9 @@ public static class ObjectFactory
     {
         var ext = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
         if (EffectRegistry.VideoExtensions.Contains(ext)) return EffectRegistry.Video;
-        if (EffectRegistry.ImageExtensions.Contains(ext)) return EffectRegistry.Image;
+        // アニメーション WebP・GIF は動画として読む (FFmpeg 9 から WebP のアニメーションを読める)
+        if (EffectRegistry.ImageExtensions.Contains(ext))
+            return AnimatedImageFiles.Extensions.Contains(ext) && AnimatedImageFiles.IsAnimated(path) ? EffectRegistry.Video : EffectRegistry.Image;
         if (EffectRegistry.AudioExtensions.Contains(ext)) return EffectRegistry.Audio;
         if (EffectRegistry.VectorExtensions.Contains(ext)) return EffectRegistry.Vector;
         return null;

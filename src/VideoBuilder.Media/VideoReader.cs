@@ -27,6 +27,8 @@ public sealed unsafe class VideoReader : IDisposable
     private bool _converted;
     private bool _draining;
     private bool _eof;
+    /// <summary>シークできない形式 (アニメーション WebP) なので、前へ戻るときは開き直す。</summary>
+    private bool _reopenToSeek;
     // 変換済みフレーム (BGRA) の置き場を 2 つ持ち、変換のたびに交互に使う。
     // 直前に返したフレームは、もう 1 回変換するまで書き換わらない (先読みしている間も前のフレームを描ける)。
     // アンマネージドなので GC で動かない。大きさは元の動画の大きさで確保し、縮めて変換するときもそのまま使う
@@ -45,6 +47,12 @@ public sealed unsafe class VideoReader : IDisposable
     public double Duration { get; }
     /// <summary>デコードに使っているもの ("VAAPI" や "ソフトウェア")。</summary>
     public string DecoderName { get; private set; } = "ソフトウェア";
+
+    /// <summary>
+    /// 透明な部分がある (アニメーション WebP・GIF)。このときフレームは、アルファを掛けた BGRA (Skia の Premul) になる。
+    /// ほかの動画は不透明として扱う (アルファがあっても使わない)。
+    /// </summary>
+    public bool HasAlpha { get; private set; }
     /// <summary>ハードウェアでデコードしているか。途中で失敗してソフトウェアに戻ったら false になる。</summary>
     public bool IsHardware => _hardware;
     /// <summary>ハードウェアデコードを使わなかった (または途中でやめた) 理由。</summary>
@@ -122,6 +130,12 @@ public sealed unsafe class VideoReader : IDisposable
             Duration = st->duration != ffmpeg.AV_NOPTS_VALUE && st->duration > 0
                 ? st->duration * ffmpeg.av_q2d(_tb)
                 : _fmt->duration > 0 ? _fmt->duration / (double)ffmpeg.AV_TIME_BASE : 0;
+            HasAlpha = AnimatedImageMedia.IsAnimatedImage(st);
+            if (AnimatedImageMedia.NeedsScan(st))
+            {
+                _reopenToSeek = true;
+                if (Duration <= 0) Duration = AnimatedImageMedia.ScanDuration(path, _stream);
+            }
             _frame = ffmpeg.av_frame_alloc();
             _pkt = ffmpeg.av_packet_alloc();
         }
@@ -237,9 +251,23 @@ public sealed unsafe class VideoReader : IDisposable
     private void Seek(long target)
     {
         SeekCount++;
-        ffmpeg.av_seek_frame(_fmt, _stream, target, ffmpeg.AVSEEK_FLAG_BACKWARD);
+        // シークできない形式 (アニメーション WebP) は、開き直して先頭から読む
+        if (_reopenToSeek) Reopen();
+        else ffmpeg.av_seek_frame(_fmt, _stream, target, ffmpeg.AVSEEK_FLAG_BACKWARD);
         ffmpeg.avcodec_flush_buffers(_dec);
         _hasFrame = false; _draining = false; _eof = false;
+    }
+
+    /// <summary>ファイルを開き直して、読む位置を先頭に戻す (デコーダはそのまま使う)。</summary>
+    private void Reopen()
+    {
+        var old = _fmt;
+        ffmpeg.avformat_close_input(&old);
+        _fmt = null;
+        AVFormatContext* fmt = null;
+        FFmpegLoader.Check(ffmpeg.avformat_open_input(&fmt, Path, null, null), "ファイルを開けません");
+        _fmt = fmt;
+        FFmpegLoader.Check(ffmpeg.avformat_find_stream_info(_fmt, null), "ストリーム情報を取得できません");
     }
 
     private bool DecodeNext()
@@ -303,7 +331,7 @@ public sealed unsafe class VideoReader : IDisposable
         if (w <= 0 || h <= 0) return;
         var (ow, oh) = OutputSizeFor(_divisor);
         _sws = ffmpeg.sws_getCachedContext(_sws, w, h, (AVPixelFormat)source->format, ow, oh,
-            AVPixelFormat.AV_PIX_FMT_BGRA, ffmpeg.SWS_BILINEAR, null, null, null);
+            AVPixelFormat.AV_PIX_FMT_BGRA, (int)SwsFlags.SWS_BILINEAR, null, null, null);
         if (_sws == null) return;
         // 置き場は元の大きさで確保する (縮める大きさが変わっても確保し直さない)
         int capacity = Width * Height * 4;
@@ -323,6 +351,7 @@ public sealed unsafe class VideoReader : IDisposable
         var dst = new byte*[4] { _native[index], null, null, null };
         var stride = new int[4] { ow * 4, 0, 0, 0 };
         ffmpeg.sws_scale(_sws, source->data, source->linesize, 0, h, dst, stride);
+        if (HasAlpha) AnimatedImageMedia.Premultiply(_native[index], ow * oh);
         _nativeIndex = index;
         FrameWidth = ow; FrameHeight = oh;
         _converted = true;

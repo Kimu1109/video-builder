@@ -56,7 +56,8 @@ public static class EffectRegistry
                 T("position", "開始位置", 0, 36000, 0, 2, 0, 600),
                 T("speed", "再生速度", 0, 2000, 100, 1, 0, 400),
                 C("loop", "ループ再生"),
-                new ParamDefinition { Key = "file", Name = "ファイル", Kind = ParamKind.File, FileExtensions = VideoExtensions },
+                // アニメーション WebP・GIF も動画として選べる
+                new ParamDefinition { Key = "file", Name = "ファイル", Kind = ParamKind.File, FileExtensions = VideoExtensions.Concat(AnimatedImageFiles.Extensions).ToArray() },
             },
         });
         Register(new EffectDefinition
