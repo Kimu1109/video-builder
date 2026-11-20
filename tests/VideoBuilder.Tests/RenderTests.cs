@@ -423,6 +423,7 @@ public class GpuRenderTests
         }
         double mean = (double)total / pa.Length;
         Console.WriteLine($"BENCH gpu-vs-cpu mean={mean:0.000} max={max} far={far}");
+        if (mean >= 0.6 || far >= pa.Length / 400) ReportDifferences(p, cpuEngine, gpuEngine, a, b);
         // 輪郭のアンチエイリアスとぼかしの計算方法が少し違うので、わずかな差は許す
         Assert.True(mean < 0.6, $"平均の差が大きい: {mean}");
         Assert.True(far < pa.Length / 400, $"大きく違うピクセルが多い: {far}");
@@ -432,6 +433,49 @@ public class GpuRenderTests
         var keyedPixel = b.GetPixel(320, 180 + 110);
         Assert.True(keyedPixel.Green < 100, "クロマキーで緑が消えていない: " + keyedPixel);
         Assert.Equal(gpuEngine.LastQuads.Count, cpuEngine.LastQuads.Count);
+    }
+
+    /// <summary>絵が違ったとき、違う範囲と、どのオブジェクトが違うかを出す (GPU のドライバごとの違いを調べるため)。</summary>
+    private static void ReportDifferences(Project p, RenderEngine cpuEngine, RenderEngine gpuEngine, SKBitmap a, SKBitmap b)
+    {
+        static (double Mean, int Far, SKRectI Box) Compare(SKBitmap x, SKBitmap y)
+        {
+            long total = 0; int far = 0;
+            int l = int.MaxValue, t = int.MaxValue, r = -1, btm = -1;
+            for (int yy = 0; yy < x.Height; yy++)
+                for (int xx = 0; xx < x.Width; xx++)
+                {
+                    SKColor c = x.GetPixel(xx, yy), g = y.GetPixel(xx, yy);
+                    int d = Math.Max(Math.Max(Math.Abs(c.Red - g.Red), Math.Abs(c.Green - g.Green)), Math.Max(Math.Abs(c.Blue - g.Blue), Math.Abs(c.Alpha - g.Alpha)));
+                    total += Math.Abs(c.Red - g.Red) + Math.Abs(c.Green - g.Green) + Math.Abs(c.Blue - g.Blue) + Math.Abs(c.Alpha - g.Alpha);
+                    if (d > 24) { far++; l = Math.Min(l, xx); t = Math.Min(t, yy); r = Math.Max(r, xx); btm = Math.Max(btm, yy); }
+                }
+            return ((double)total / (x.Width * x.Height * 4), far, far == 0 ? SKRectI.Empty : new SKRectI(l, t, r + 1, btm + 1));
+        }
+        var all = Compare(a, b);
+        Console.WriteLine($"BENCH diff box={all.Box}");
+        if (!all.Box.IsEmpty)
+        {
+            int cx = all.Box.MidX, cy = all.Box.MidY;
+            Console.WriteLine($"BENCH diff center ({cx},{cy}) cpu={a.GetPixel(cx, cy)} gpu={b.GetPixel(cx, cy)}");
+        }
+        // オブジェクトを 1 つずつ (背景の上に) 描いて比べる
+        var objects = p.Root.Objects.ToList();
+        for (int i = 1; i < objects.Count; i++)
+        {
+            p.Root.Objects.Clear();
+            p.Root.Objects.Add(objects[0]);
+            p.Root.Objects.Add(objects[i]);
+            cpuEngine.RenderToBitmap(p, p.Root, 10, a);
+            gpuEngine.RenderToBitmap(p, p.Root, 10, b);
+            var one = Compare(a, b);
+            Console.WriteLine($"BENCH diff object layer={objects[i].Layer} effects={string.Join(",", objects[i].Effects.Select(f => f.DefinitionId))} blend={objects[i].Draw?.Values.GetValueOrDefault("blend")} mean={one.Mean:0.000} far={one.Far} box={one.Box}");
+        }
+        p.Root.Objects.Clear();
+        p.Root.Objects.AddRange(objects);
+        // 呼んだ側が続けて確かめられるよう、全体の絵に戻す
+        cpuEngine.RenderToBitmap(p, p.Root, 10, a);
+        gpuEngine.RenderToBitmap(p, p.Root, 10, b);
     }
 
     [Fact]
