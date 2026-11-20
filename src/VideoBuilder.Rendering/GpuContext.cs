@@ -286,10 +286,55 @@ public sealed unsafe class GpuContext : IDisposable
     }
 
     /// <summary>このスレッドで GL を使えるようにする。描画の前に呼ぶ。</summary>
-    public void MakeCurrent() => eglMakeCurrent(_display, _surface, _surface, _context);
+    public void MakeCurrent()
+    {
+        if (_externalMakeCurrent != null) { _externalMakeCurrent(); return; }
+        eglMakeCurrent(_display, _surface, _surface, _context);
+    }
+
+    // 外から渡された GL コンテキスト (画面の描画と共有するもの) を使うとき
+    private Action? _externalMakeCurrent;
+    private Action? _externalRelease;
+
+    /// <summary>
+    /// ほかのライブラリ (画面の描画) が作った GL コンテキストを使う。描くテクスチャを画面と共有でき、読み戻さずに表示できる。
+    /// makeCurrent は、このスレッドでそのコンテキストを使えるようにする。release は Dispose のときに呼ぶ。
+    /// </summary>
+    public static GpuContext? FromExternal(Func<string, IntPtr> getProcAddress, bool gles, string renderer, string vendor, Action makeCurrent, Action? release, out string? error)
+    {
+        error = null;
+        makeCurrent();
+        var gi = gles ? GRGlInterface.CreateGles(name => getProcAddress(name)) : GRGlInterface.CreateOpenGl(name => getProcAddress(name));
+        var gr = gi == null ? null : GRContext.CreateGl(gi);
+        if (gr == null)
+        {
+            gi?.Dispose();
+            error = "Skia の GPU コンテキストを作れません";
+            return null;
+        }
+        gr.SetResourceCacheLimit(384L * 1024 * 1024);
+        return new GpuContext
+        {
+            Context = gr, _interface = gi, Renderer = renderer, Vendor = vendor,
+            IsSoftware = new[] { "llvmpipe", "softpipe", "swiftshader", "software" }.Any(k => renderer.Contains(k, StringComparison.OrdinalIgnoreCase)),
+            _externalMakeCurrent = makeCurrent, _externalRelease = release,
+        };
+    }
+
+    /// <summary>画面の描画と共有している GL コンテキストか (FromExternal で作ったもの)。</summary>
+    public bool IsExternal => _externalMakeCurrent != null;
 
     public void Dispose()
     {
+        if (_externalMakeCurrent != null)
+        {
+            _externalMakeCurrent();
+            Context?.Dispose();
+            _interface?.Dispose();
+            _externalRelease?.Invoke();
+            _externalMakeCurrent = null;
+            return;
+        }
         if (_display == IntPtr.Zero) return;
         if (_context != IntPtr.Zero)
         {

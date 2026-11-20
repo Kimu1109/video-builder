@@ -4,6 +4,7 @@ using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using Avalonia.Rendering.Composition;
 using Avalonia.Rendering.SceneGraph;
 using Avalonia.Skia;
 using SkiaSharp;
@@ -24,18 +25,100 @@ public sealed class PreviewView : Control
     /// <summary>表示倍率 (0 = ウィンドウに合わせる)。</summary>
     public double Zoom { get; set; }
 
+    /// <summary>
+    /// 選択中のオブジェクトの枠を描く層。プレビューの上に重ねて置く (PreviewArea)。
+    /// 画面と共有するテクスチャでフレームを出すときは、フレームがこのコントロールの描いたものより上に出るので、枠は別の層にする。
+    /// </summary>
+    public Control Selection { get; }
+
     public PreviewView()
     {
         ClipToBounds = true;
         Focusable = true;
+        Selection = new SelectionLayer(this) { IsHitTestVisible = false, ClipToBounds = true };
         Svc.Preview.FrameReady += OnFrameReady;
-        Svc.Session.SelectionChanged += InvalidateVisual;
-        Svc.Preview.PlayStateChanged += InvalidateVisual;
-        Svc.Theme.Changed += InvalidateVisual;
+        Svc.Session.SelectionChanged += Invalidate;
+        Svc.Preview.PlayStateChanged += Invalidate;
+        Svc.Theme.Changed += Invalidate;
+        Svc.Preview.BackendChanged += Invalidate;
+    }
+
+    private void Invalidate()
+    {
+        InvalidateVisual();
+        Selection.InvalidateVisual();
     }
 
     // フレームは、描画のスレッドが描いたものを画面の描画でそのまま描く (以前は UI スレッドで WriteableBitmap に写していた)
-    private void OnFrameReady() => InvalidateVisual();
+    private void OnFrameReady() => Invalidate();
+
+    // ---------------- 画面と共有するテクスチャ ----------------
+
+    private SharedPreviewTarget? _shared;
+    private bool _creatingShared;
+
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        _ = AttachSharedAsync();
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnDetachedFromVisualTree(e);
+        // 別のウィンドウへ移るときなど: 共有をやめる (後片付けは描画のスレッドが行う)
+        if (_shared != null)
+        {
+            ElementComposition.SetElementChildVisual(this, null);
+            _shared.Presented -= Invalidate;
+            if (ReferenceEquals(Svc.Preview.SharedTarget, _shared)) Svc.Preview.SharedTarget = null;
+            _shared = null;
+        }
+    }
+
+    /// <summary>画面の描画がテクスチャの共有に対応していれば、共有の描画先を作ってプレビューに渡す。</summary>
+    private async Task AttachSharedAsync()
+    {
+        if (_shared != null || _creatingShared || Environment.GetEnvironmentVariable("VIDEO_BUILDER_SHARED_PREVIEW") == "0") return;
+        _creatingShared = true;
+        try
+        {
+            var shared = await SharedPreviewTarget.TryCreateAsync(this);
+            if (shared == null) return;
+            if (VisualRoot == null) { shared.DisposeContext(); return; }   // 作っている間に外された
+            _shared = shared;
+            ElementComposition.SetElementChildVisual(this, shared.Visual);
+            shared.Presented += Invalidate;
+            Svc.Preview.SharedTarget = shared;
+        }
+        finally { _creatingShared = false; }
+    }
+
+    /// <summary>選択中のオブジェクトの枠 (角ばった 1px 枠 + 四隅のハンドル)。</summary>
+    private sealed class SelectionLayer(PreviewView owner) : Control
+    {
+        public override void Render(DrawingContext context)
+        {
+            if (owner._dest.Width <= 0) return;
+            var accent = Svc.Brush("Accent");
+            var pen = new Pen(accent, 1);
+            foreach (var (id, quad) in Svc.Preview.Quads)
+            {
+                if (!Svc.Session.IsSelected(id)) continue;
+                var pts = quad.Select(owner.ToView).ToArray();
+                var geo = new StreamGeometry();
+                using (var g = geo.Open())
+                {
+                    g.BeginFigure(pts[0], false);
+                    g.LineTo(pts[1]); g.LineTo(pts[2]); g.LineTo(pts[3]);
+                    g.EndFigure(true);
+                }
+                context.DrawGeometry(null, pen, geo);
+                foreach (var p in pts)
+                    context.DrawRectangle(Brushes.White, pen, new Rect(Math.Round(p.X) - 3, Math.Round(p.Y) - 3, 6, 6));
+            }
+        }
+    }
 
     /// <summary>プレビューのフレームを Skia で直接描く (画面の描画のスレッドで動く)。</summary>
     private sealed class FrameDrawOperation(Rect dest, Rect clip, SKFilterQuality quality) : ICustomDrawOperation
@@ -71,7 +154,19 @@ public sealed class PreviewView : Control
         double scaling = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1;
         Svc.Preview.DisplaySize = ((int)Math.Ceiling(w * scaling), (int)Math.Ceiling(h * scaling));
 
-        if (Svc.Preview.HasFrame)
+        bool shared = _shared != null && Svc.Preview.PresentsToShared;
+        if (_shared != null)
+        {
+            // 共有のテクスチャの絵は、フレームを出す場所にぴったり重ねる
+            _shared.Visual.Offset = new Avalonia.Vector3D(_dest.X, _dest.Y, 0);
+            _shared.Visual.Size = new Vector(_dest.Width, _dest.Height);
+            _shared.Visual.Visible = shared && _shared.HasFrame;
+        }
+        if (shared)
+        {
+            if (!_shared!.HasFrame) context.FillRectangle(Brushes.Black, _dest);
+        }
+        else if (Svc.Preview.HasFrame)
         {
             // 画面に合わせて拡大するときは、いつも軽い補間 (バイリニア) にする (止まっているときも。高品質の拡大は重い)。
             // 縮小して表示するときだけ、止まっている間はなめらかに縮める (ちらつきを抑える)
@@ -82,25 +177,6 @@ public sealed class PreviewView : Control
         }
         else context.FillRectangle(Brushes.Black, _dest);
         context.DrawRectangle(null, new Pen(Svc.Brush("Border.Default")), _dest.Inflate(0.5));
-
-        // 選択中オブジェクトの枠 (角ばった 1px 枠 + 四隅のハンドル)
-        var accent = Svc.Brush("Accent");
-        var pen = new Pen(accent, 1);
-        foreach (var (id, quad) in Svc.Preview.Quads)
-        {
-            if (!Svc.Session.IsSelected(id)) continue;
-            var pts = quad.Select(ToView).ToArray();
-            var geo = new StreamGeometry();
-            using (var g = geo.Open())
-            {
-                g.BeginFigure(pts[0], false);
-                g.LineTo(pts[1]); g.LineTo(pts[2]); g.LineTo(pts[3]);
-                g.EndFigure(true);
-            }
-            context.DrawGeometry(null, pen, geo);
-            foreach (var p in pts)
-                context.DrawRectangle(Brushes.White, pen, new Rect(Math.Round(p.X) - 3, Math.Round(p.Y) - 3, 6, 6));
-        }
     }
 
     private Point ToView(SKPoint p)

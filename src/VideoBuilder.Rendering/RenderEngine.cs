@@ -97,7 +97,8 @@ public sealed class RenderEngine : IDisposable
     /// <summary>surface いっぱいにフレームを描く。surface の大きさがプロジェクトより小さければ縮小して描く。</summary>
     public void Render(Project project, Scene scene, int frame, SKSurface surface)
     {
-        var ctx = new RenderContext { Project = project, Frame = frame, Draft = Draft, Gpu = _gpuSurface != null && ReferenceEquals(surface, _gpuSurface) ? Gpu?.Context : null };
+        bool onGpu = (_gpuSurface != null && ReferenceEquals(surface, _gpuSurface)) || (_externalGpuSurface != null && ReferenceEquals(surface, _externalGpuSurface));
+        var ctx = new RenderContext { Project = project, Frame = frame, Draft = Draft, Gpu = onGpu ? Gpu?.Context : null };
         try
         {
             var canvas = surface.Canvas;
@@ -115,6 +116,21 @@ public sealed class RenderEngine : IDisposable
         }
         finally { ctx.DisposeTemporaries(); }
     }
+
+    /// <summary>
+    /// GPU の描画先 (GPU コンテキストで作った SKSurface。画面と共有するテクスチャなど) に描く。読み戻さない。
+    /// GPU 描画のエンジン (Gpu が null でない) でだけ使う。
+    /// </summary>
+    public void RenderToGpuSurface(Project project, Scene scene, int frame, SKSurface surface)
+    {
+        if (Gpu == null) throw new InvalidOperationException("GPU 描画のエンジンではありません");
+        Gpu.MakeCurrent();
+        _externalGpuSurface = surface;
+        try { Render(project, scene, frame, surface); }
+        finally { _externalGpuSurface = null; }
+    }
+
+    private SKSurface? _externalGpuSurface;
 
     /// <summary>プロジェクトの解像度でフレームを作って返す。</summary>
     public SKImage RenderImage(Project project, Scene scene, int frame)

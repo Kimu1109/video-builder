@@ -41,7 +41,8 @@ public sealed class PreviewArea : DockPanel
         SetDock(border, Dock.Bottom);
         Children.Add(border);
         // プレビューの上に、パフォーマンスチェックの表示を重ねる
-        Children.Add(new Grid { Children = { Preview, Overlay } });
+        // 選択の枠は別の層 (画面と共有するテクスチャでフレームを出すとき、フレームの上に出すため)
+        Children.Add(new Grid { Children = { Preview, Preview.Selection, Overlay } });
 
         _session.FrameChanged += UpdateTime;
         _session.ProjectChanged += UpdateTime;

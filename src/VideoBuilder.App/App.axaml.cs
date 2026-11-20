@@ -47,7 +47,12 @@ public partial class App : Application
                 }, DispatcherPriority.Background);
             }
             int shot = Array.IndexOf(args, "--screenshot");
-            if (shot >= 0 && shot + 1 < args.Length) main.Opened += (_, _) => ScreenshotAndExit(desktop, main, args[shot + 1]);
+            if (shot >= 0 && shot + 1 < args.Length)
+            {
+                // 共有のテクスチャの絵は、ウィンドウを画像に描く方法では写らないので、読み戻す方法で描く
+                Svc.Preview.AllowSharedTarget = false;
+                main.Opened += (_, _) => ScreenshotAndExit(desktop, main, args[shot + 1]);
+            }
         }
         base.OnFrameworkInitializationCompleted();
     }

@@ -1427,4 +1427,19 @@ public class UiTests
         Assert.False(w.PreviewArea.Overlay.IsVisible);
         Assert.Null(EditorCommands.PerformanceWindow);
     }
+
+    [AvaloniaFact]
+    public void Shared_preview_texture_is_used_only_on_the_same_gpu_and_falls_back_without_gl()
+    {
+        Assert.True(PreviewService.SameGpu("NVIDIA GeForce RTX 3060/PCIe/SSE2", "NVIDIA GeForce RTX 3060"));
+        Assert.True(PreviewService.SameGpu("Mesa Intel(R) UHD Graphics 620 (KBL GT2)", "Mesa Intel(R) UHD Graphics 620 (KBL GT2)"));
+        Assert.False(PreviewService.SameGpu("Mesa Intel(R) UHD Graphics 620 (KBL GT2)", "NVIDIA GeForce RTX 3060/PCIe/SSE2"));
+        Assert.False(PreviewService.SameGpu("", "NVIDIA"));
+        // ヘッドレス (GPU で合成しない画面) では共有できないので、これまでどおり読み戻して描く
+        Open();
+        Pump();
+        Assert.Null(Svc.Preview.SharedTarget);
+        Assert.False(Svc.Preview.PresentsToShared);
+    }
+
 }

@@ -103,18 +103,126 @@ public sealed class PreviewService : IDisposable
     }
 
     /// <summary>設定と環境から、GPU を使うかどうかを決めてエンジンを作る。描画スレッドから呼ぶ。</summary>
+    // ---------------- 画面と共有するテクスチャ ----------------
+
+    private volatile SharedPreviewTarget? _sharedRequested;   // UI スレッドが渡したもの
+    private SharedPreviewTarget? _shared;                      // 描画のスレッドが使っているもの
+    private IDisposable? _sharedCurrent;                        // 共有の GL コンテキストを、描画のスレッドで有効にしている間
+
+    /// <summary>
+    /// 画面と共有する GL のテクスチャ (PreviewView が作る)。渡すと、使えるときは GPU で描いた絵を読み戻さずに画面に出す。
+    /// null にすると、これまでどおり読み戻して PreviewView が描く。
+    /// </summary>
+    public SharedPreviewTarget? SharedTarget
+    {
+        get => _sharedRequested;
+        set
+        {
+            if (ReferenceEquals(_sharedRequested, value)) return;
+            _sharedRequested = value;
+            ReloadBackend();
+        }
+    }
+
+    /// <summary>
+    /// 画面と共有するテクスチャを使ってよいか。画面を画像として保存するとき (--screenshot) は false にする
+    /// (共有のテクスチャの絵は、画面の描画が直接合成するので、コントロールを画像に描く方法では写らない)。
+    /// </summary>
+    public bool AllowSharedTarget
+    {
+        get => _allowShared;
+        set { if (_allowShared == value) return; _allowShared = value; ReloadBackend(); }
+    }
+    private volatile bool _allowShared = true;
+
+    /// <summary>今、描いた絵を共有のテクスチャで画面に出しているか (PreviewView は自分で描かない)。</summary>
+    public bool PresentsToShared => _presentsToShared;
+    private volatile bool _presentsToShared;
+
+    /// <summary>共有のテクスチャを使ってよいか。画面の GPU が、描画に選んだ GPU と同じときだけ (違う GPU の間では共有できない)。</summary>
+    private static bool SharedAllowed(SharedPreviewTarget shared, RenderBackend mode, out string reason)
+    {
+        reason = "";
+        var env = Environment.GetEnvironmentVariable("VIDEO_BUILDER_SHARED_PREVIEW");
+        if (env == "0") { reason = "使わない設定"; return false; }
+        // GPU 描画は Linux でだけ確かめている (Windows の ANGLE などでは、まだ使わない)
+        if (!OperatingSystem.IsLinux()) { reason = "この OS ではまだ使わない"; return false; }
+        bool force = env == "1";
+        bool software = new[] { "llvmpipe", "softpipe", "swiftshader", "software" }.Any(k => shared.Renderer.Contains(k, StringComparison.OrdinalIgnoreCase));
+        if (software && mode == RenderBackend.Auto && !force) { reason = "画面の描画がソフトウェアの GPU"; return false; }
+        if (!force && SafeSelectedAdapter() is { IsSoftware: false } adapter && !SameGpu(adapter.Name, shared.Renderer))
+        {
+            reason = $"画面の GPU ({shared.Renderer}) と描画の GPU ({adapter.Name}) が違う";
+            return false;
+        }
+        return true;
+    }
+
+    private static GpuAdapter? SafeSelectedAdapter()
+    {
+        try { return GpuContext.SelectedAdapter(); } catch { return null; }
+    }
+
+    /// <summary>GL の GPU の名前 (GL_RENDERER) が同じ GPU を指しているか。後ろの "/PCIe/SSE2" などは比べない。</summary>
+    internal static bool SameGpu(string a, string b)
+    {
+        static string Core(string s) => (s.Split('/')[0]).Trim();
+        string x = Core(a), y = Core(b);
+        return x.Length > 0 && y.Length > 0 && (x.Contains(y, StringComparison.OrdinalIgnoreCase) || y.Contains(x, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>共有のテクスチャに描く SKSurface を作る (描画のスレッドで)。</summary>
+    private static SKSurface? CreateTextureSurface(GRContext gr, SharedPreviewTarget.Texture texture)
+    {
+        int format = texture.Shared.InternalFormat;
+        const int GL_RGBA = 0x1908, GL_RGBA8 = 0x8058, GL_TEXTURE_2D = 0x0DE1;
+        if (format == GL_RGBA || format == 0) format = GL_RGBA8;   // Skia には大きさ付きの形式で渡す
+        var info = new GRGlTextureInfo(GL_TEXTURE_2D, (uint)texture.Shared.TextureId, (uint)format);
+        using var backend = new GRBackendTexture(texture.Size.Width, texture.Size.Height, false, info);
+        return SKSurface.Create(gr, backend, GRSurfaceOrigin.BottomLeft, SKColorType.Rgba8888);
+    }
+
+    /// <summary>今使っている共有のテクスチャと GL コンテキストを片付ける (描画のスレッドで、エンジンを捨てたあと)。</summary>
+    private void ReleaseShared(GpuContext? oldGpu, bool disposeContext)
+    {
+        if (_shared != null && oldGpu is { IsExternal: true })
+        {
+            oldGpu.MakeCurrent();
+            _shared.DisposeResources(t => (t.Tag as SKSurface)?.Dispose());
+        }
+        oldGpu?.Dispose();   // 共有のものなら、ここで描画のスレッドでの有効化も解く
+        if (disposeContext && _shared != null) _shared.DisposeContext();
+    }
+
     private void CreateEngine()
     {
         _engine?.Gpu?.MakeCurrent();
         var oldGpu = _engine?.Gpu;
         _engine?.Dispose();
-        oldGpu?.Dispose();
+        var requested = _sharedRequested;
+        ReleaseShared(oldGpu, disposeContext: !ReferenceEquals(_shared, requested));
+        _shared = requested;
+        _presentsToShared = false;
 
         GpuContext? gpu = null;
-        string description;
+        string description = "";
+        string notShared = "";
         var mode = _settings.RenderBackend;
         if (mode == RenderBackend.Cpu) description = "CPU";
-        else
+        else if (!_allowShared) notShared = "画面の保存中";
+        else if (_shared is { } shared && SharedAllowed(shared, mode, out notShared))
+        {
+            // 画面と共有する GL コンテキストで描く (描いた絵を読み戻さずに、そのまま画面に出す)
+            gpu = GpuContext.FromExternal(name => shared.Gl.GlInterface.GetProcAddress(name),
+                shared.Gl.Version.Type == Avalonia.OpenGL.GlProfileType.OpenGLES, shared.Renderer, shared.Vendor,
+                () => _sharedCurrent ??= shared.Gl.MakeCurrent(), () => { _sharedCurrent?.Dispose(); _sharedCurrent = null; }, out _);
+            if (gpu != null)
+            {
+                _presentsToShared = true;
+                description = $"GPU ({gpu.Renderer}、画面と共有)";
+            }
+        }
+        if (mode != RenderBackend.Cpu && gpu == null)
         {
             gpu = GpuContext.TryCreate(out var error);
             if (gpu == null) description = $"CPU (GPU を使えません: {error})";
@@ -128,6 +236,8 @@ public sealed class PreviewService : IDisposable
         }
         _engine = new RenderEngine(gpu) { Draft = true };
         IsGpuActive = gpu != null;
+        // 画面との共有ができる環境なのに使わないときは、理由を添える (環境設定・パフォーマンスチェックに出る)
+        if (gpu != null && !_presentsToShared && _shared != null && notShared.Length > 0) description += $" ※画面との共有なし: {notShared}";
         BackendDescription = description;
         Dispatcher.UIThread.Post(() => BackendChanged?.Invoke());
     }
@@ -192,8 +302,10 @@ public sealed class PreviewService : IDisposable
         }
         // GPU のリソースは、作ったこのスレッドで片付ける
         var gpu = _engine?.Gpu;
+        gpu?.MakeCurrent();
         _engine?.Dispose();
-        gpu?.Dispose();
+        ReleaseShared(gpu, disposeContext: true);
+        _shared = null;
         _engine = null;
     }
 
@@ -211,6 +323,11 @@ public sealed class PreviewService : IDisposable
         var engine = _engine!;
         // 再生中は次のフレームを裏でデコードしておく (止まっているときは、次にどこを描くか分からないので読まない)
         engine.Lookahead = IsPlaying;
+        if (_presentsToShared && _shared != null && engine.Gpu is { IsExternal: true } g)
+        {
+            RenderShared(engine, g, _shared, p, scene, frame, w, h, sw);
+            return;
+        }
         engine.RenderToBitmap(p, scene, frame, _back);
         LastRenderMs = sw.Elapsed.TotalMilliseconds;
         LastRenderSize = (w, h);
@@ -220,6 +337,46 @@ public sealed class PreviewService : IDisposable
         lock (_frameLock)
         {
             (_front, _back) = (_back, _front);
+            _quads = quads;
+            post = !_postPending;
+            _postPending = true;
+        }
+        if (post) Dispatcher.UIThread.Post(() =>
+        {
+            lock (_frameLock) _postPending = false;
+            FrameReady?.Invoke();
+        }, DispatcherPriority.Render);
+    }
+
+    /// <summary>共有のテクスチャに描いて、画面に出す。テクスチャが空かなければ、このフレームは飛ばす。</summary>
+    private void RenderShared(RenderEngine engine, GpuContext g, SharedPreviewTarget shared, Project p, Scene scene, int frame, int w, int h, Stopwatch sw)
+    {
+        g.MakeCurrent();
+        var texture = shared.Acquire(new Avalonia.PixelSize(w, h), t => (t.Tag as SKSurface)?.Dispose());
+        if (texture == null) return;   // 画面に出すのが追いつかない
+        var surface = texture.Tag as SKSurface;
+        if (surface == null) texture.Tag = surface = CreateTextureSurface(g.Context, texture);
+        if (surface == null)
+        {
+            // 共有のテクスチャに描けない: これまでどおり読み戻す方法に戻す
+            shared.Release(texture);
+            _presentsToShared = false;
+            _sharedRequested = null;
+            _backendDirty = true;
+            Request();
+            return;
+        }
+        engine.RenderToGpuSurface(p, scene, frame, surface);
+        // 画面の描画 (別のコンテキスト) が読む前に、GPU での描画を終わらせる
+        g.Context.Flush(true, true);
+        shared.Present(texture);
+        LastRenderMs = sw.Elapsed.TotalMilliseconds;
+        LastRenderSize = (w, h);
+        Rendered?.Invoke(LastRenderMs, w, h);
+        var quads = engine.LastQuads.ToList();
+        bool post;
+        lock (_frameLock)
+        {
             _quads = quads;
             post = !_postPending;
             _postPending = true;
