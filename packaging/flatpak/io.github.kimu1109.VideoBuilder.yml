@@ -1,12 +1,12 @@
 # video-builder の Flatpak マニフェスト。packaging/flatpak/build.sh から使う (先に linux-x64 向けに発行しておく)。
 #
-# 【未対応】video-builder は FFmpeg 9 (libavcodec.so.63) 用のバインディング (FFmpeg.AutoGen 9.0) に移った (設計書 22.31)。
-# このマニフェストはまだ 23.08 ランタイムの ffmpeg-full 拡張 (FFmpeg 6.1) を使っているので、
-# このままでは FFmpeg を読み込めない。ランタイムを 25.08 に上げ、FFmpeg 9 をモジュールとしてソースから作るように直す。
-# (25.08 では ffmpeg-full 拡張がなくなり、codecs-extra 拡張に置き換わっている)
+# ランタイムは Freedesktop 25.08。video-builder は FFmpeg 9 (libavcodec.so.63) 用のバインディングを使うので、
+# ランタイムの FFmpeg は使わず、FFmpeg 9 を x264・x265 と一緒にソースから作って /app/lib に入れる (設計書 22.33)。
+# FFmpeg の configure の設定は packaging/ffmpeg/build.sh (AppImage・CI 用) と同じにする (テストで確かめている)。
+# x264・x265 が GPL なので、この Flatpak 全体は GPL-3.0-or-later の条件で配る (THIRD_PARTY_NOTICES.md)。
 app-id: io.github.kimu1109.VideoBuilder
 runtime: org.freedesktop.Platform
-runtime-version: '23.08'
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 command: video-builder
 rename-desktop-file: video-builder.desktop
@@ -22,17 +22,12 @@ finish-args:
   - --filesystem=xdg-music
   - --filesystem=xdg-pictures
 
-# 多くの形式 (H.264 など) を読み書きできる FFmpeg を、/app/lib/ffmpeg に入れてもらう
-add-extensions:
-  org.freedesktop.Platform.ffmpeg-full:
-    directory: lib/ffmpeg
-    version: '23.08'
-    add-ld-path: .
-    no-autodownload: false
-    autodelete: false
-
-cleanup-commands:
-  - mkdir -p /app/lib/ffmpeg
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+  - /share/ffmpeg/examples
+  - '*.a'
 
 modules:
   # 音の再生に使う OpenAL (ランタイムに入っていないので作る)
@@ -45,10 +40,60 @@ modules:
       - -DALSOFT_INSTALL_CONFIG=OFF
       - -DALSOFT_INSTALL_HRTF_DATA=OFF
       - -DALSOFT_INSTALL_AMBDEC_PRESETS=OFF
+      - -DCMAKE_INSTALL_LIBDIR=lib   # 1.24 は既定で lib64 に入れるが、Silk.NET は名前 (libopenal.so.1) で探すので /app/lib に置く
     sources:
       - type: archive
-        url: https://openal-soft.org/openal-releases/openal-soft-1.23.1.tar.bz2
-        sha256: 796f4b89134c4e57270b7f0d755f0fa3435b90da437b745160a49bd41c845b21
+        url: https://openal-soft.org/openal-releases/openal-soft-1.24.3.tar.bz2
+        sha256: cb5e6197a1c0da0edcf2a81024953cc8fa8545c3b9474e48c852af709d587892
+
+  # H.264 のエンコーダ (GPL-2.0-or-later)
+  - name: x264
+    config-opts:
+      - --enable-shared
+      - --disable-cli
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/x264.git
+        commit: b35605ace3ddf7c1a5d67a2eb553f034aef41d55   # stable ブランチ
+
+  # H.265 のエンコーダ (GPL-2.0-or-later)
+  - name: x265
+    buildsystem: cmake-ninja
+    subdir: source
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DENABLE_CLI=OFF
+      - -DENABLE_SHARED=ON
+      - -DCMAKE_POLICY_VERSION_MINIMUM=3.5   # x265 の CMakeLists は古い CMake を前提にしている
+    sources:
+      - type: archive
+        url: https://bitbucket.org/multicoreware/x265_git/downloads/x265_4.2.tar.gz
+        sha256: 40b1ea0453e0309f0eba934e0ddf533f8f6295966679e8894e8f1c1c8d5e1210
+
+  # FFmpeg 9 (GPL-3.0-or-later のビルド)。libvpx・dav1d・Opus はランタイムのものを使う
+  - name: ffmpeg
+    config-opts:
+      # ---- packaging/ffmpeg/build.sh の CONFIGURE_FLAGS と同じにする ----
+      - --enable-shared
+      - --disable-static
+      - --disable-doc
+      - --disable-debug
+      - --enable-gpl
+      - --enable-version3
+      - --enable-libx264
+      - --enable-libx265
+      - --enable-libvpx
+      - --enable-libdav1d
+      - --enable-libopus
+      # ---- ここまで ----
+      - --disable-programs   # ffmpeg コマンドは使わない
+    post-install:
+      - install -Dm644 COPYING.GPLv3 /app/share/licenses/ffmpeg/COPYING.GPLv3
+      - install -Dm644 LICENSE.md /app/share/licenses/ffmpeg/LICENSE.md
+    sources:
+      - type: archive
+        url: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+        sha256: 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
 
   # 発行済み (self-contained) の video-builder をそのまま入れる。.NET はアプリと一緒に入っている
   - name: video-builder
@@ -60,6 +105,7 @@ modules:
       - install -Dm644 video-builder.desktop /app/share/applications/video-builder.desktop
       - install -Dm644 video-builder.svg /app/share/icons/hicolor/scalable/apps/video-builder.svg
       - install -Dm644 io.github.kimu1109.VideoBuilder.metainfo.xml /app/share/metainfo/io.github.kimu1109.VideoBuilder.metainfo.xml
+      - install -Dm644 -t /app/share/licenses/video-builder COPYING COPYING.LESSER THIRD_PARTY_NOTICES.md
     sources:
       - type: dir
         path: ../../artifacts/publish/linux-x64
@@ -70,3 +116,9 @@ modules:
         path: ../video-builder.svg
       - type: file
         path: io.github.kimu1109.VideoBuilder.metainfo.xml
+      - type: file
+        path: ../../COPYING
+      - type: file
+        path: ../../COPYING.LESSER
+      - type: file
+        path: ../../THIRD_PARTY_NOTICES.md

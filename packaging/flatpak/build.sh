@@ -3,8 +3,9 @@
 #
 #   packaging/flatpak/build.sh [--bundle]
 #
-# 必要なもの: .NET 10 SDK、flatpak、flatpak-builder、Flathub の org.freedesktop.Platform//23.08 と Sdk//23.08
-# (flatpak install flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08)。
+# 必要なもの: .NET 10 SDK、flatpak、flatpak-builder、Flathub の org.freedesktop.Platform//25.08 と Sdk//25.08
+# (flatpak install flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08)。
+# FFmpeg 9・x264・x265 もソースから作るので、1 回目は時間がかかる (2 回目からは flatpak-builder が使い回す)。
 # linux-x64 向けに発行してから flatpak-builder で組み立て、利用者の環境 (--user) に入れる。
 # --bundle を付けると、配布用の 1 ファイル (artifacts/flatpak/video-builder.flatpak) も作る。
 set -euo pipefail
