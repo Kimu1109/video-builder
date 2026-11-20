@@ -187,7 +187,7 @@ public sealed class PreviewView : Control
             draw.Tracks["x"].Values[ix] = Math.Round(x0 + dx, 1);
             draw.Tracks["y"].Values[iy] = Math.Round(y0 + dy, 1);
         }
-        Svc.Session.NotifyChanged();
+        Svc.Session.NotifyChanged(_dragTargets.Select(t => t.Obj));
     }
 
     protected override void OnPointerReleased(PointerReleasedEventArgs e)

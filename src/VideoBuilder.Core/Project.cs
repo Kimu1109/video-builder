@@ -154,7 +154,11 @@ public sealed class Scene
     /// 取り消し用の履歴を、変わったオブジェクトのぶんだけのメモリで持つために使う。
     /// 戻り値と previous は、どちらも書き換えてはいけない (オブジェクトを共有しているため)。
     /// </summary>
-    public Scene CloneSharing(Scene? previous)
+    /// <param name="mayHaveChanged">
+    /// null でなければ、false を返すオブジェクトは「previous から変わっていない」と信じて、比べずに previous のものを使う
+    /// (ドラッグ中に、動かしているオブジェクトだけを比べるため)。
+    /// </param>
+    public Scene CloneSharing(Scene? previous, Func<TimelineObject, bool>? mayHaveChanged = null)
     {
         if (previous == null) return Clone();
         var s = new Scene { Id = Id, Name = Name, RangeStart = RangeStart, RangeEnd = RangeEnd };
@@ -162,7 +166,7 @@ public sealed class Scene
         foreach (var o in previous.Objects) old.TryAdd(o.Id, o);
         s.Objects.Capacity = Objects.Count;
         foreach (var o in Objects)
-            s.Objects.Add(old.TryGetValue(o.Id, out var prev) && TimelineObject.SameContent(o, prev) ? prev : o.Clone());
+            s.Objects.Add(old.TryGetValue(o.Id, out var prev) && (mayHaveChanged?.Invoke(o) == false || TimelineObject.SameContent(o, prev)) ? prev : o.Clone());
         foreach (var (k, v) in Layers) s.Layers[k] = v.Clone();
         s.Exposed = Exposed?.Select(x => x.Clone()).ToList();
         s.Template = Template?.Clone();
@@ -214,11 +218,11 @@ public sealed class Project
     /// 複製を作る。previous に内容が同じオブジェクトがあれば使い回す (Scene.CloneSharing を参照)。
     /// 戻り値と previous は書き換えてはいけない。
     /// </summary>
-    public Project CloneSharing(Project? previous)
+    public Project CloneSharing(Project? previous, Func<TimelineObject, bool>? mayHaveChanged = null)
     {
         if (previous == null) return Clone();
         var p = new Project { FormatVersion = FormatVersion, Settings = Settings.Clone(), Scenes = new List<Scene>(Scenes.Count), Grid = Grid.Clone(), MediaPaths = new Dictionary<string, string>(MediaPaths), Storyboard = Storyboard?.Clone() };
-        foreach (var s in Scenes) p.Scenes.Add(s.CloneSharing(previous.FindScene(s.Id)));
+        foreach (var s in Scenes) p.Scenes.Add(s.CloneSharing(previous.FindScene(s.Id), mayHaveChanged));
         return p;
     }
 

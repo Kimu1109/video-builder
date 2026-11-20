@@ -388,6 +388,36 @@ public class SnapshotReuseTests
     }
 
     [Fact]
+    public void While_dragging_only_the_reported_objects_are_compared_and_undo_still_sees_every_change()
+    {
+        var s = new EditorSession();
+        var moved = s.AddObject(EffectRegistry.Shape, 0, 0, 30)!;
+        var other = s.AddObject(EffectRegistry.Shape, 1, 0, 30)!;
+        s.BeginEdit("drag");
+        s.Scene.Find(moved.Id)!.SetRange(10, 39);
+        s.NotifyChanged(new[] { s.Scene.Find(moved.Id)! });
+        var a = s.SnapshotForRead();
+        Assert.Equal(10, a.Root.Find(moved.Id)!.Start);              // 知らされたものは今の内容
+        s.Scene.Find(moved.Id)!.SetRange(20, 49);
+        s.NotifyChanged(new[] { s.Scene.Find(moved.Id)! });
+        var b = s.SnapshotForRead();
+        Assert.Equal(20, b.Root.Find(moved.Id)!.Start);
+        Assert.Same(a.Root.Find(other.Id), b.Root.Find(other.Id));    // ほかは「編集前」の複製を使い回す
+        Assert.NotSame(s.Scene.Find(other.Id), b.Root.Find(other.Id)); // 生きているモデルそのものは渡さない
+
+        // 知らせずに書き換えたもの: どれが変わったか分からない知らせ (NotifyChanged()) のあとは、すべて比べる
+        s.Scene.Find(other.Id)!.SetRange(5, 34);
+        s.NotifyChanged();
+        Assert.Equal(5, s.SnapshotForRead().Root.Find(other.Id)!.Start);
+        s.CommitEdit();
+
+        // 確定ではいつもすべて比べるので、取り消せば両方とも元に戻る
+        s.Undo();
+        Assert.Equal(0, s.Scene.Find(moved.Id)!.Start);
+        Assert.Equal(0, s.Scene.Find(other.Id)!.Start);
+    }
+
+    [Fact]
     public void Undo_chain_stays_correct_when_snapshots_are_reused_between_edits()
     {
         var s = new EditorSession();

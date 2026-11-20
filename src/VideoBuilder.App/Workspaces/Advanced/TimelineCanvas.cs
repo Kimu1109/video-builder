@@ -691,7 +691,7 @@ public sealed class TimelineCanvas : Control
                 break;
             }
         }
-        _session.NotifyChanged();
+        _session.NotifyChanged(live.Select(x => x.Live));
     }
 
     private int? FindFreeDelta(int dFrames, int dLayers, HashSet<string> ids)

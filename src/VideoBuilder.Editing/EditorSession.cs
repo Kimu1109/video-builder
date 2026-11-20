@@ -164,6 +164,9 @@ public sealed class EditorSession
         _editBefore = _clean ?? Project.CloneSharing(_lastSnapshot);
         _clean = null;
         _editDescription = description;
+        _touched.Clear();
+        _touchedAll = false;
+        _hinted = false;
     }
 
     // 今のプロジェクトと同じ内容の、書き換えない複製。編集のたびに作り直さずに済むよう覚えておく
@@ -178,7 +181,8 @@ public sealed class EditorSession
     public Project SnapshotForRead()
     {
         // 編集の途中 (ドラッグ中など) は毎回作る。変わっていないオブジェクトは「編集前」の複製と共有する
-        if (_editBefore != null) return Project.CloneSharing(_editBefore);
+        if (_editBefore != null)
+            return _touchedAll || !_hinted ? Project.CloneSharing(_editBefore) : Project.CloneSharing(_editBefore, o => _touched.Contains(o.Id));
         return _clean ??= Project.CloneSharing(_lastSnapshot);
     }
 
@@ -188,8 +192,28 @@ public sealed class EditorSession
     public void NotifyChanged()
     {
         if (_editBefore == null) _clean = null;   // 履歴に残さない変更があったので、覚えていた複製は使えない
+        else _touchedAll = true;                  // どれが変わったか分からないので、プレビュー用の複製ではすべて比べる
         ProjectChanged?.Invoke();
     }
+
+    /// <summary>
+    /// BeginEdit 中に、changed のオブジェクトだけを書き換えたあと、画面を更新させる。
+    /// プレビュー用の複製では、これまでに知らされたオブジェクトだけを比べ、ほかは「編集前」のものをそのまま使う
+    /// (オブジェクトが多いときにドラッグが重くならないように)。書き換えたものは漏れなく渡すこと。
+    /// CommitEdit ではいつもすべて比べるので、取り消しの履歴には影響しない。
+    /// </summary>
+    public void NotifyChanged(IEnumerable<TimelineObject> changed)
+    {
+        if (_editBefore == null) { NotifyChanged(); return; }
+        if (!_touchedAll) { foreach (var o in changed) _touched.Add(o.Id); _hinted = true; }
+        ProjectChanged?.Invoke();
+    }
+
+    // BeginEdit からこれまでに書き換えたと知らされたオブジェクト。_touchedAll なら、どれが変わったか分からない
+    private readonly HashSet<string> _touched = new();
+    private bool _touchedAll;
+    // どれを書き換えたかを知らされたことがあるか (なければ、プレビュー用の複製ではすべて比べる)
+    private bool _hinted;
 
     public void CommitEdit(string? mergeKey = null)
     {
