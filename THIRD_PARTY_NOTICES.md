@@ -33,6 +33,11 @@ video-builder 本体のソースは LGPL-3.0-or-later のままで、GPL-3.0 と
 | AMF のヘッダ | MIT | https://github.com/GPUOpen-LibrariesAndSDKs/AMF | Windows の FFmpeg に組み込む (ヘッダだけ) |
 | GCC の実行時ライブラリ (libgcc_s・libstdc++) | GPL-3.0-or-later (GCC Runtime Library Exception 付き) | https://gcc.gnu.org/ | Windows に同梱する (MSYS2 で作った DLL が使う) |
 | winpthreads | MIT・BSD-3-Clause | https://www.mingw-w64.org/ | Windows に同梱する |
+| libva (Windows 版) | MIT | https://github.com/intel/libva | Windows に同梱する (MSYS2 の FFmpeg が使う) |
+| libiconv | LGPL-2.1-or-later | https://www.gnu.org/software/libiconv/ | Windows に同梱する |
+| liblzma (XZ Utils) | 0BSD | https://tukaani.org/xz/ | Windows に同梱する |
+| bzip2 | bzip2 ライセンス (BSD 系) | https://sourceware.org/bzip2/ | Windows に同梱する |
+| zlib | zlib ライセンス | https://zlib.net/ | Windows に同梱する |
 | OpenAL Soft | LGPL-2.0-or-later | https://openal-soft.org/ | 音声の再生。Flatpak には同梱する (1.24.3) |
 | Avalonia UI | MIT | https://avaloniaui.net/ | |
 | SkiaSharp / HarfBuzzSharp | MIT | https://github.com/mono/SkiaSharp | |

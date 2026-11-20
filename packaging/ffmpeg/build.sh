@@ -36,6 +36,10 @@ CONFIGURE_FLAGS=(
   --enable-libvpx --enable-libdav1d --enable-libopus
 )
 
+# macOS だけに足す設定: Homebrew の X11 のライブラリ (libxcb など) を見つけて画面取り込みを有効にしてしまい、
+# 同梱するものが増えるので切る (アプリは使わない)
+MACOS_FLAGS=(--disable-libxcb --disable-xlib --disable-sdl2)
+
 # Linux の --bundle で写すライブラリ (ファイル名の先頭)。libc や GPU のドライバ (libva・libdrm) などは利用者の環境のものを使う
 BUNDLE_PATTERN='^(libavcodec|libavformat|libavutil|libavfilter|libavdevice|libswscale|libswresample|libx264|libx265|libvpx|libdav1d|libopus|libnuma)\.so'
 
@@ -80,7 +84,9 @@ if [ ! -f "$licenses/CONFIGURATION.txt" ]; then
   tar -C "$work" -xJf "$tarball"
   (
     cd "$work/ffmpeg-$FFMPEG_VERSION"
-    ./configure --prefix="$prefix" "${CONFIGURE_FLAGS[@]}"
+    extra=()
+    [ "$os" = macos ] && extra=("${MACOS_FLAGS[@]}")
+    ./configure --prefix="$prefix" "${CONFIGURE_FLAGS[@]}" ${extra[@]+"${extra[@]}"}
     make -j"$(cpus)"
     make install
   )

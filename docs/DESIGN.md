@@ -2145,7 +2145,7 @@ Linux と同じ FFmpeg (9.0.2、GPL-3.0、x264・x265 入り) を、Windows・ma
 |---|---|---|
 | 作る環境 | MSYS2 の UCRT64 (`windows-latest`) | Homebrew (`macos-latest`・`macos-15-intel`) |
 | コーデックのライブラリ | MSYS2 のパッケージ (x264・x265・libvpx・dav1d・Opus) | Homebrew のもの |
-| 同梱のしかた (`build.sh --bundle`) | FFmpeg の DLL と、`ldd` で見つかる MSYS2 の DLL (C:\Windows のもの以外) を写す。GCC の実行時ライブラリ・winpthreads も入る | 参照先を `otool -L` でたどって集め、`install_name_tool` で `@loader_path` に書き換え、ad-hoc で署名し直す |
+| 同梱のしかた (`build.sh --bundle`) | FFmpeg の DLL と、`ldd` で見つかる MSYS2 の DLL (C:\Windows のもの以外) を写す。GCC の実行時ライブラリ・winpthreads・libva・zlib なども入る (22 個。CI で確かめた) | 参照先を `otool -L` でたどって集め、`install_name_tool` で `@loader_path` に書き換え、ad-hoc で署名し直す。Homebrew の X11 のライブラリを拾わないよう、`--disable-libxcb --disable-xlib --disable-sdl2` を足す |
 | 読み込み | `FFmpegLoader` が `SetDllDirectory` で同梱のフォルダを足す。FFmpeg.AutoGen はフルパスで読むが、そこから読まれる DLL (x264 など) は、既定ではアプリのフォルダと PATH からしか探さないため | 変更なし (`@loader_path` で互いを見つける) |
 | GPU | NVENC・NVDEC (ヘッダは nv-codec-headers 12.1)、AMF、D3D11VA・DXVA2 | VideoToolbox |
 
@@ -2158,7 +2158,7 @@ NVENC のヘッダは、Linux (Ubuntu の `libffmpeg-nvenc-dev`)・Flatpak・Win
 注意すること:
 - macOS: Homebrew のライブラリは、ランナーの macOS 向けに作られている。そのため、配布物が動く macOS の下限は、ランナーの macOS のバージョンになる。古い macOS にも対応するなら、コーデックのライブラリも `MACOSX_DEPLOYMENT_TARGET` を指定して自分で作る必要がある。
 - macOS の署名は ad-hoc だけ。配布するには、Developer ID での署名と公証 (notarization) が要る (Gatekeeper)。
-- Windows・macOS で、アプリ全体の動作はまだ確かめていない (22.4)。確かめたのは、FFmpeg の読み込み・デコード・描画と、エンコーダがあることまで。
+- Windows・macOS で、アプリ全体の動作はまだ確かめていない (22.4)。確かめたのは、同梱した FFmpeg だけでの読み込み・アニメーション WebP のデコードと描画・エンコーダがあること (package.yml で 13 件のテストが通る) まで。
 - Windows の arm64 は作っていない。
 
 ---
