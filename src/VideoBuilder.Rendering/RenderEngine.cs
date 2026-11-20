@@ -733,16 +733,21 @@ public sealed class RenderEngine : IDisposable
         // pending: 効果をかけている途中の画面。null のときは、画面 (surface) そのものが最新
         Sprite? pending = null;
         float originX = 0, originY = 0;
+        // CPU 描画で、画面のピクセルを複製せずに指しているだけの画像 (効果が何も変えなければ、描き戻さずに済む)
+        SKImage? screenView = null;
 
         void WriteBack()
         {
             if (pending is not { } p) return;
+            pending = null;
+            if (ReferenceEquals(p.Image, screenView)) return;   // 画面そのもの: 何も変わっていない
+            // CPU 描画で、画面と同じ大きさ・同じ位置の絵なら、行ごとに並列に写す (Skia の描画は 1 スレッドで遅い)
+            if (ctx.Gpu == null && CopyOver(p, originX - p.Cx, originY - p.Cy, surface)) return;
             canvas.Save();
             canvas.ResetMatrix();
             using var paint = new SKPaint { BlendMode = SKBlendMode.Src };
             canvas.DrawImage(p.Image, originX - p.Cx, originY - p.Cy, paint);
             canvas.Restore();
-            pending = null;
         }
 
         // 続けて並んだ色の変換は、行列を掛け合わせて 1 回で処理する
@@ -764,7 +769,14 @@ public sealed class RenderEngine : IDisposable
             }
             if (pending == null)
             {
-                var snap = Sprite.Centered(ctx.Own(surface.Snapshot()));
+                SKImage? view = null;
+                if (ctx.Gpu == null)
+                {
+                    using var current = surface.PeekPixels();
+                    if (current != null) view = SKImage.FromPixels(current);
+                }
+                screenView = view;
+                var snap = Sprite.Centered(ctx.Own(view ?? surface.Snapshot()));
                 originX = snap.Cx; originY = snap.Cy;
                 pending = snap;
             }
@@ -801,14 +813,16 @@ public sealed class RenderEngine : IDisposable
             }
             if (pending == null)
             {
-                // 今の画面を写し取る。CPU 描画では使い回しのバッファに写す (毎回新しく確保するより速い)
-                SKImage? copied = null;
+                // 今の画面を効果に渡す。CPU 描画では複製せずに画面のピクセルを指す画像にする
+                // (効果は渡された絵を書き換えず、新しい絵を返す。描き戻すまで画面には何も描かない)
+                SKImage? view = null;
                 if (ctx.Gpu == null)
                 {
                     using var current = surface.PeekPixels();
-                    if (current != null) copied = PixelPool.CopyOf(current);
+                    if (current != null) view = SKImage.FromPixels(current);
                 }
-                var snap = Sprite.Centered(ctx.Own(copied ?? surface.Snapshot()));
+                screenView = view;
+                var snap = Sprite.Centered(ctx.Own(view ?? surface.Snapshot()));
                 originX = snap.Cx; originY = snap.Cy;
                 pending = snap;
             }
@@ -818,6 +832,26 @@ public sealed class RenderEngine : IDisposable
         }
         FlushMatrix();
         WriteBack();
+    }
+
+    /// <summary>
+    /// 絵 p を、画面の (x, y) にそのまま (Src で) 写す。画面と同じ大きさ・整数の位置・同じ形式のときだけ、
+    /// 行ごとに並列に写して true を返す。条件に合わなければ何もせず false。
+    /// </summary>
+    private static unsafe bool CopyOver(Sprite p, float x, float y, SKSurface surface)
+    {
+        if (p.Scale != 1 || MathF.Abs(x) > 1e-3f || MathF.Abs(y) > 1e-3f) return false;
+        using var dst = surface.PeekPixels();
+        using var src = p.Image.PeekPixels();
+        if (dst == null || src == null || src.Width != dst.Width || src.Height != dst.Height
+            || src.ColorType != dst.ColorType || src.AlphaType != dst.AlphaType || dst.ColorType != SKColorType.Bgra8888) return false;
+        byte* s = (byte*)src.GetPixels(), d = (byte*)dst.GetPixels();
+        int srcRow = src.RowBytes, dstRow = dst.RowBytes, bytes = dst.Width * 4;
+        PixelOps.ForBands(dst.Width, dst.Height, (y0, y1) =>
+        {
+            for (int row = y0; row < y1; row++) Buffer.MemoryCopy(s + (long)row * srcRow, d + (long)row * dstRow, bytes, bytes);
+        });
+        return true;
     }
 
     /// <summary>直前の GetSource が返した絵の倍率 (プロキシのとき 1 より大きい)。</summary>

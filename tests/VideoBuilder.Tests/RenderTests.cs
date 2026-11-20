@@ -1030,5 +1030,43 @@ public class OptimizationTests
         var (mean, _) = Diff(a, g);
         Assert.True(mean < 0.5, $"CPU と GPU の差が大きい: {mean:0.00}");
     }
+
+    [Fact]
+    public void Frame_filters_on_the_cpu_work_on_the_screen_without_copying_it_and_give_the_same_picture()
+    {
+        Project With(params bool[] flips)
+        {
+            var p = Small();
+            var shape = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 10);
+            shape.Main.Values["color"] = "#FF0000";
+            shape.Draw!.Tracks["x"] = new AnimatedValue(-80);   // 左寄りの赤い図形
+            p.Root.Objects.Add(shape);
+            int layer = 1;
+            foreach (bool h in flips)
+            {
+                var f = ObjectFactory.Create("filter.flip", layer++, 0, 10);
+                f.Main.Values["horizontal"] = h ? "1" : "0";        // 0 なら何も変えない
+                p.Root.Objects.Add(f);
+            }
+            return p;
+        }
+        byte[] Render(Project p)
+        {
+            using var e = new RenderEngine();
+            using var bmp = new SKBitmap(new SKImageInfo(320, 240, SKColorType.Bgra8888, SKAlphaType.Premul));
+            e.RenderToBitmap(p, p.Root, 0, bmp);
+            return bmp.Bytes;
+        }
+        var plain = Render(With());
+        Assert.Equal(plain, Render(With(false)));            // 何も変えない効果: 画面はそのまま
+        Assert.Equal(plain, Render(With(true, true)));       // 左右反転を 2 回: 元どおり
+        var flipped = Render(With(true));
+        Assert.NotEqual(plain, flipped);
+        // 左右反転: 左端の列と右端の列が入れ替わる
+        for (int y = 0; y < 240; y += 13)
+            for (int x = 0; x < 320; x += 17)
+                Assert.Equal(plain.AsSpan((y * 320 + x) * 4, 4).ToArray(), flipped.AsSpan((y * 320 + (319 - x)) * 4, 4).ToArray());
+    }
+
 }
 
