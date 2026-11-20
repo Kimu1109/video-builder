@@ -14,7 +14,7 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Install OpenAL, software OpenGL ES, a Japanese font and FFmpeg's codec libraries
-        run: sudo apt-get update && sudo apt-get install -y nasm libx264-dev libx265-dev libvpx-dev libopus-dev libdav1d-dev libopenal1 fonts-ipafont-gothic libegl1 libgles2 libgl1-mesa-dri xvfb
+        run: sudo apt-get update && sudo apt-get install -y nasm libx264-dev libx265-dev libvpx-dev libopus-dev libdav1d-dev libffmpeg-nvenc-dev libva-dev libdrm-dev libopenal1 fonts-ipafont-gothic libegl1 libgles2 libgl1-mesa-dri xvfb
       # Ubuntu 24.04 の FFmpeg は 6.1 なので、配布物と同じ FFmpeg 9 (x264・x265 入り) をソースから作る (設計書 22.31)。
       # 作ったものはキャッシュする (作り方の script が変わったら作り直す)
       - name: Cache FFmpeg

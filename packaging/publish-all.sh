@@ -5,7 +5,11 @@
 #
 # RID を省くと linux-x64 linux-arm64 win-x64 osx-x64 osx-arm64 のすべて。結果は artifacts/publish/<RID>/ に置く。
 # ここで確かめるのは「発行できて、実行ファイルと Skia などのネイティブライブラリが入っている」ことまで。
-# Windows・macOS での実際の動作は確認していない (設計書 22.4)。FFmpeg と OpenAL は同梱しない。
+#
+# FFmpeg: artifacts/ffmpeg-bundle/<RID>/ があれば、発行したフォルダの ffmpeg/ に写して同梱する。
+# FFmpeg はその OS の上でしか作れないので、先にその OS で packaging/ffmpeg/build.sh --bundle artifacts/ffmpeg-bundle/<RID> を
+# 実行しておく (GitHub Actions の package.yml がそうしている。設計書 22.34)。なければ FFmpeg なしで発行する。
+# ライセンスの文書 (COPYING・COPYING.LESSER・THIRD_PARTY_NOTICES.md) も licenses/ に入れる。OpenAL は同梱しない。
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,6 +30,19 @@ for rid in "${rids[@]}"; do
     osx-*)   need=(video-builder libSkiaSharp.dylib libHarfBuzzSharp.dylib) ;;
     *)       need=(video-builder libSkiaSharp.so libHarfBuzzSharp.so) ;;
   esac
+  bundle="$root/artifacts/ffmpeg-bundle/$rid"
+  if [ -d "$bundle" ]; then
+    cp -R "$bundle" "$out/ffmpeg"
+    case "$rid" in
+      win-*) need+=(ffmpeg/avcodec-63.dll) ;;
+      osx-*) need+=(ffmpeg/libavcodec.63.dylib) ;;
+      *)     need+=(ffmpeg/libavcodec.so.63) ;;
+    esac
+  else
+    echo "   (FFmpeg は同梱しない: $bundle がありません)"
+  fi
+  mkdir -p "$out/licenses"
+  cp "$root/COPYING" "$root/COPYING.LESSER" "$root/THIRD_PARTY_NOTICES.md" "$out/licenses/"
   for f in "${need[@]}"; do
     if [ ! -e "$out/$f" ]; then echo "!! $rid: $f がありません" >&2; failed=1; fi
   done

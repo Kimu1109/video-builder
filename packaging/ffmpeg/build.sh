@@ -1,26 +1,34 @@
 #!/usr/bin/env bash
-# video-builder で使う FFmpeg (共有ライブラリ) を、ffmpeg.org のソースから作る。
+# video-builder で使う FFmpeg (共有ライブラリ) を、ffmpeg.org のソースから作る。Linux・macOS・Windows (MSYS2) で動く。
 #
 #   packaging/ffmpeg/build.sh --prefix <インストール先> [--bundle <同梱先>]
 #
-# --prefix  : make install する場所 (CI・開発用。<prefix>/lib を VIDEO_BUILDER_FFMPEG に指定する)
-# --bundle  : 配布物に入れるライブラリを <同梱先> に集める (AppImage などで使う)。
-#             FFmpeg のライブラリと、コーデックのライブラリ (x264・x265 など) を写し、
-#             同じフォルダから互いを見つけられるように RPATH を $ORIGIN にする (patchelf が要る)。
+# --prefix  : make install する場所 (CI・開発用。Linux・macOS は <prefix>/lib、Windows は <prefix>/bin を VIDEO_BUILDER_FFMPEG に指定する)
+# --bundle  : 配布物に入れるライブラリを <同梱先> に集める (発行したアプリの ffmpeg フォルダにする)。
+#             FFmpeg のライブラリと、それが使うコーデックのライブラリ (x264・x265 など) を写し、同じフォルダから互いを見つけられるようにする。
+#               Linux  : RPATH を $ORIGIN にする (patchelf が要る)
+#               macOS  : 参照先を @loader_path にして、署名し直す (ad-hoc。install_name_tool・codesign は Xcode のコマンドラインツール)
+#               Windows: 必要な DLL を写すだけ (読み込むときに FFmpegLoader が SetDllDirectory でこのフォルダを足す)
 #             ライセンスの文書は <同梱先>/licenses に入れる。
 #
 # ライセンス: --enable-gpl --enable-version3 で作るので、出来上がる FFmpeg は GPL-3.0-or-later になる
 # (libx264・libx265 が GPL のため)。video-builder 本体は LGPL-3.0-or-later で、配布物全体は GPL-3.0 の条件で配る。
-# THIRD_PARTY_NOTICES.md と設計書 22.33 を参照。
+# THIRD_PARTY_NOTICES.md と設計書 22.33・22.34 を参照。
 #
-# 必要なもの (Ubuntu 24.04): build-essential nasm pkg-config libx264-dev libx265-dev libvpx-dev libdav1d-dev libopus-dev
-#                            (--bundle のときは patchelf も)
+# 必要なもの:
+#   Ubuntu 24.04 : build-essential nasm pkg-config libx264-dev libx265-dev libvpx-dev libdav1d-dev libopus-dev libffmpeg-nvenc-dev
+#                  libva-dev libdrm-dev (VAAPI。libva は同梱せず、利用者の環境のものを使う。GPU のドライバと組で動くため)
+#                  (--bundle のときは patchelf も)
+#   macOS        : Xcode のコマンドラインツール、Homebrew の nasm pkgconf x264 x265 libvpx dav1d opus
+#   Windows      : MSYS2 の UCRT64 環境で、mingw-w64-ucrt-x86_64-{toolchain,nasm,pkgconf,x264,x265,libvpx,dav1d,opus,ffnvcodec-headers,amf-headers}
+#                  と make diffutils curl xz。UCRT64 のシェルから実行する
+# NVENC (NVIDIA) のヘッダ (ffnvcodec) と AMF のヘッダは、あれば configure が見つけて有効にする (macOS にはない)。
 set -euo pipefail
 
 FFMPEG_VERSION="9.0.2"
 FFMPEG_SHA256="8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e"
 
-# 配布物 (GPL) に入れて有効にするコーデック。ここを変えたら THIRD_PARTY_NOTICES.md も直す
+# 配布物 (GPL) に入れて有効にするコーデック。ここを変えたら THIRD_PARTY_NOTICES.md と Flatpak のマニフェストも直す
 CONFIGURE_FLAGS=(
   --enable-shared --disable-static --disable-doc --disable-debug
   --enable-gpl --enable-version3
@@ -28,7 +36,7 @@ CONFIGURE_FLAGS=(
   --enable-libvpx --enable-libdav1d --enable-libopus
 )
 
-# --bundle で写すライブラリ (ファイル名の先頭)。libc や GPU のドライバ (libva・libdrm) などは利用者の環境のものを使う
+# Linux の --bundle で写すライブラリ (ファイル名の先頭)。libc や GPU のドライバ (libva・libdrm) などは利用者の環境のものを使う
 BUNDLE_PATTERN='^(libavcodec|libavformat|libavutil|libavfilter|libavdevice|libswscale|libswresample|libx264|libx265|libvpx|libdav1d|libopus|libnuma)\.so'
 
 prefix="" bundle=""
@@ -44,37 +52,58 @@ done
 [ -n "$prefix" ] || { echo "--prefix を指定してください" >&2; exit 1; }
 prefix="$(mkdir -p "$prefix" && cd "$prefix" && pwd)"
 
+case "$(uname -s)" in
+  Linux*) os=linux ;;
+  Darwin*) os=macos ;;
+  MINGW*|MSYS*|UCRT*|CLANG*) os=windows ;;
+  *) echo "対応していない OS: $(uname -s)" >&2; exit 1 ;;
+esac
+
+cpus() { nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4; }
+check_sha256() {
+  if command -v sha256sum >/dev/null; then echo "$FFMPEG_SHA256  $1" | sha256sum -c -
+  else echo "$FFMPEG_SHA256  $1" | shasum -a 256 -c -; fi
+}
+
 work="${FFMPEG_WORK_DIR:-$(mktemp -d)}"
 mkdir -p "$work"
 tarball="$work/ffmpeg-$FFMPEG_VERSION.tar.xz"
+licenses="$prefix/share/licenses/ffmpeg"
 
-if [ ! -f "$prefix/lib/libavcodec.so" ]; then
+# 作り終えた印は CONFIGURATION.txt (ライブラリのファイル名は OS ごとに違うため)
+if [ ! -f "$licenses/CONFIGURATION.txt" ]; then
   if [ ! -f "$tarball" ]; then
     curl -sSfL --retry 3 -o "$tarball" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"
   fi
-  echo "$FFMPEG_SHA256  $tarball" | sha256sum -c -
+  check_sha256 "$tarball"
   rm -rf "$work/ffmpeg-$FFMPEG_VERSION"
   tar -C "$work" -xJf "$tarball"
   (
     cd "$work/ffmpeg-$FFMPEG_VERSION"
     ./configure --prefix="$prefix" "${CONFIGURE_FLAGS[@]}"
-    make -j"$(nproc)"
+    make -j"$(cpus)"
     make install
   )
   # 配布するときにソースと一緒に置けるよう、ライセンスの文書と configure の設定を残す
-  mkdir -p "$prefix/share/licenses/ffmpeg"
-  cp "$work/ffmpeg-$FFMPEG_VERSION/COPYING.GPLv3" "$work/ffmpeg-$FFMPEG_VERSION/LICENSE.md" "$prefix/share/licenses/ffmpeg/"
-  echo "ffmpeg $FFMPEG_VERSION: ${CONFIGURE_FLAGS[*]}" > "$prefix/share/licenses/ffmpeg/CONFIGURATION.txt"
-  echo "source: https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz (sha256 $FFMPEG_SHA256)" >> "$prefix/share/licenses/ffmpeg/CONFIGURATION.txt"
+  mkdir -p "$licenses"
+  cp "$work/ffmpeg-$FFMPEG_VERSION/COPYING.GPLv3" "$work/ffmpeg-$FFMPEG_VERSION/LICENSE.md" "$licenses/"
+  {
+    echo "ffmpeg $FFMPEG_VERSION ($os): ${CONFIGURE_FLAGS[*]}"
+    echo "source: https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz (sha256 $FFMPEG_SHA256)"
+  } > "$licenses/CONFIGURATION.txt"
 else
   echo "FFmpeg はすでに $prefix にあります (作り直すときは消してから実行)"
 fi
 
-if [ -n "$bundle" ]; then
+[ -n "$bundle" ] || exit 0
+mkdir -p "$bundle/licenses"
+bundle="$(cd "$bundle" && pwd)"
+
+bundle_linux() {
   command -v patchelf >/dev/null || { echo "--bundle には patchelf が要ります" >&2; exit 1; }
-  mkdir -p "$bundle/licenses"
   # FFmpeg のライブラリと、それが使うコーデックのライブラリ (ldd で見つかるもの) を写す
   # 読み込むのは soname の名前 (libavcodec.so.63 など) だけなので、それだけを写す (libavcodec.so.63.1.102 は写さない)
+  local libs deps f name
   libs=$(ls "$prefix"/lib/lib*.so.* 2>/dev/null | grep -E '\.so\.[0-9]+$')
   deps=$(for l in $libs; do ldd "$l" | awk '$3 ~ /^\// {print $3}'; done | sort -u)
   for f in $libs $deps; do
@@ -85,7 +114,68 @@ if [ -n "$bundle" ]; then
       patchelf --set-rpath '$ORIGIN' "$bundle/$name"
     fi
   done
-  cp "$prefix/share/licenses/ffmpeg/"* "$bundle/licenses/"
-  echo "同梱するライブラリ: $bundle"
-  ls "$bundle"
-fi
+}
+
+# macOS: OS に入っているもの (/usr/lib・/System) 以外の参照先を、たどって全部集める
+mac_deps() { otool -L "$1" | tail -n +2 | awk '{print $1}' | grep -vE '^(/usr/lib/|/System/)' || true; }
+mac_resolve() {
+  # @rpath/… や @loader_path/… は、prefix と Homebrew の lib から探す
+  local ref="$1" from="$2" name d
+  case "$ref" in
+    @rpath/*|@loader_path/*|@executable_path/*)
+      name="${ref##*/}"
+      for d in "$(dirname "$from")" "$prefix/lib" "$(brew --prefix 2>/dev/null)/lib"; do
+        [ -e "$d/$name" ] && { echo "$d/$name"; return; }
+      done
+      echo "見つからない参照: $ref ($from)" >&2; exit 1 ;;
+    *) echo "$ref" ;;
+  esac
+}
+bundle_macos() {
+  local queue=() seen=" " f ref path name
+  # libavcodec.63.dylib のような名前 (AutoGen が読む名前) のものだけを起点にする
+  for f in "$prefix"/lib/lib*.dylib; do
+    [[ "$(basename "$f")" =~ ^lib[a-z0-9_]+\.[0-9]+\.dylib$ ]] && queue+=("$f")
+  done
+  while [ ${#queue[@]} -gt 0 ]; do
+    f="${queue[0]}"; queue=("${queue[@]:1}")
+    name="$(basename "$f")"
+    case "$seen" in *" $name "*) continue ;; esac
+    seen="$seen$name "
+    cp -L "$f" "$bundle/$name"
+    chmod 644 "$bundle/$name"
+    for ref in $(mac_deps "$f"); do
+      path="$(mac_resolve "$ref" "$f")"
+      queue+=("$path")
+    done
+  done
+  # 参照先を @loader_path (同じフォルダ) に書き換え、書き換えで壊れた署名を付け直す
+  for f in "$bundle"/*.dylib; do
+    install_name_tool -id "@loader_path/$(basename "$f")" "$f"
+    for ref in $(mac_deps "$f"); do
+      [ "$ref" = "@loader_path/$(basename "$ref")" ] && continue
+      install_name_tool -change "$ref" "@loader_path/$(basename "$ref")" "$f"
+    done
+    codesign --force --sign - "$f"
+  done
+}
+
+bundle_windows() {
+  # FFmpeg の DLL (avcodec-63.dll など) と、MSYS2 から来る DLL (x264・x265・GCC の実行時ライブラリなど) を写す。
+  # Windows に入っている DLL (C:\Windows) は写さない
+  local f dep
+  for f in "$prefix"/bin/*.dll; do
+    cp "$f" "$bundle/"
+    for dep in $(ldd "$f" | awk '$3 ~ /^\// {print $3}'); do
+      case "$dep" in
+        /c/[Ww][Ii][Nn][Dd][Oo][Ww][Ss]/*) ;;
+        *) cp -n "$dep" "$bundle/" ;;
+      esac
+    done
+  done
+}
+
+"bundle_$os"
+cp "$licenses/"* "$bundle/licenses/"
+echo "同梱するライブラリ: $bundle"
+ls "$bundle"

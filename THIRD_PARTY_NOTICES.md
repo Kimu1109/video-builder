@@ -5,7 +5,7 @@
 video-builder は **GNU Lesser General Public License v3.0 以降 (LGPL-3.0-or-later)** で配布する。
 条文は [COPYING.LESSER](COPYING.LESSER) (LGPL-3.0) と、それが元にしている [COPYING](COPYING) (GPL-3.0) にある。
 
-## 配布物 (AppImage・Flatpak) のライセンス
+## 配布物 (AppImage・Flatpak・Windows・macOS) のライセンス
 
 配布物には、**libx264・libx265 を有効にした FFmpeg (GPL-3.0-or-later のビルド)** を同梱する。
 GPL のライブラリと一緒に動く形で配るので、**配布物全体は GPL-3.0-or-later の条件で配る**。
@@ -29,6 +29,10 @@ video-builder 本体のソースは LGPL-3.0-or-later のままで、GPL-3.0 と
 | dav1d | BSD-2-Clause | https://code.videolan.org/videolan/dav1d | FFmpeg に組み込む (AV1 の読み込み) |
 | Opus | BSD-3-Clause | https://opus-codec.org/ | FFmpeg に組み込む |
 | libnuma | LGPL-2.1-or-later | https://github.com/numactl/numactl | x265 が使う。AppImage に同梱する |
+| nv-codec-headers (NVENC・NVDEC) | MIT | https://github.com/FFmpeg/nv-codec-headers | FFmpeg に組み込む (ヘッダだけ。ドライバは利用者の環境のもの) |
+| AMF のヘッダ | MIT | https://github.com/GPUOpen-LibrariesAndSDKs/AMF | Windows の FFmpeg に組み込む (ヘッダだけ) |
+| GCC の実行時ライブラリ (libgcc_s・libstdc++) | GPL-3.0-or-later (GCC Runtime Library Exception 付き) | https://gcc.gnu.org/ | Windows に同梱する (MSYS2 で作った DLL が使う) |
+| winpthreads | MIT・BSD-3-Clause | https://www.mingw-w64.org/ | Windows に同梱する |
 | OpenAL Soft | LGPL-2.0-or-later | https://openal-soft.org/ | 音声の再生。Flatpak には同梱する (1.24.3) |
 | Avalonia UI | MIT | https://avaloniaui.net/ | |
 | SkiaSharp / HarfBuzzSharp | MIT | https://github.com/mono/SkiaSharp | |

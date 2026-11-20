@@ -31,6 +31,7 @@ public static unsafe class FFmpegLoader
             var candidates = new List<string>();
             var env = Environment.GetEnvironmentVariable("VIDEO_BUILDER_FFMPEG");
             if (!string.IsNullOrEmpty(env)) candidates.Add(env);
+            // 配布物は実行ファイルの隣の ffmpeg フォルダに同梱する (packaging/ffmpeg/build.sh --bundle)
             candidates.Add(Path.Combine(AppContext.BaseDirectory, "ffmpeg"));
             candidates.Add(AppContext.BaseDirectory);
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
@@ -45,6 +46,9 @@ public static unsafe class FFmpegLoader
                 try
                 {
                     ffmpeg.RootPath = dir;
+                    // Windows では、avcodec-63.dll が使う DLL (x264・x265 など) を同じフォルダから探させる
+                    // (FFmpeg.AutoGen はフルパスで読むが、そこから読まれる DLL は既定ではアプリのフォルダと PATH からしか探さない)
+                    if (OperatingSystem.IsWindows()) SetDllDirectoryW(dir);
                     DynamicallyLoadedBindings.Initialize();
                     Version = ffmpeg.av_version_info() ?? "";
                     License = ffmpeg.avcodec_license() ?? "";
@@ -58,6 +62,9 @@ public static unsafe class FFmpegLoader
             return false;
         }
     }
+
+    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetDllDirectoryW(string path);
 
     private static bool HasLibrary(string dir)
     {

@@ -70,6 +70,17 @@ modules:
         url: https://bitbucket.org/multicoreware/x265_git/downloads/x265_4.2.tar.gz
         sha256: 40b1ea0453e0309f0eba934e0ddf533f8f6295966679e8894e8f1c1c8d5e1210
 
+  # NVENC・NVDEC (NVIDIA) のヘッダ (MIT)。FFmpeg が実行時にドライバを読み込む。
+  # 13.x は新しいドライバ (570 以降) でないと NVENC が使えないので 12.1 にする (package.yml・Ubuntu 24.04 と同じ)
+  - name: nv-codec-headers
+    buildsystem: simple
+    build-commands:
+      - make install PREFIX=/app
+    sources:
+      - type: git
+        url: https://github.com/FFmpeg/nv-codec-headers.git
+        commit: 1889e62e2d35ff7aa9baca2bceb14f053785e6f1   # n12.1.14.0
+
   # FFmpeg 9 (GPL-3.0-or-later のビルド)。libvpx・dav1d・Opus はランタイムのものを使う
   - name: ffmpeg
     config-opts:

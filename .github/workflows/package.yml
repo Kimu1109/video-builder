@@ -1,0 +1,96 @@
+name: Package
+
+# Windows・macOS 向けに、FFmpeg 9 (x264・x265 入り) を作って同梱した配布物を作る (設計書 22.34)。
+# FFmpeg はその OS の上でしか作れないので、それぞれの OS のランナーで packaging/ffmpeg/build.sh を実行する。
+# 作った FFmpeg だけで (開発用のライブラリを見ずに) 動くことを、テストの一部を流して確かめる。
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - packaging/**
+      - .github/workflows/package.yml
+      - src/VideoBuilder.Media/FFmpegLoader.cs
+
+env:
+  # NVENC のヘッダ。13.x は新しいドライバ (570 以降) でないと NVENC が使えないので 12.1 にする (Ubuntu 24.04 と同じ)
+  NV_CODEC_HEADERS_COMMIT: 1889e62e2d35ff7aa9baca2bceb14f053785e6f1   # n12.1.14.0
+  # FFmpeg を読み込んで、アニメーション WebP のデコード・描画と、x264・x265 があることを確かめるテスト
+  SMOKE_TESTS: FullyQualifiedName~AnimatedImageTests|FullyQualifiedName~PackagingTests|FullyQualifiedName~FFmpegBuildTests
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit   # dotnet を使えるようにする
+          install: make diffutils curl xz tar git
+          pacboy: toolchain:p nasm:p pkgconf:p x264:p x265:p libvpx:p dav1d:p opus:p amf-headers:p
+      - name: Install NVENC headers
+        run: |
+          git clone https://github.com/FFmpeg/nv-codec-headers.git "$RUNNER_TEMP/nv-codec-headers"
+          cd "$RUNNER_TEMP/nv-codec-headers"
+          git checkout "$NV_CODEC_HEADERS_COMMIT"
+          make install PREFIX="$MINGW_PREFIX"
+      - name: Build FFmpeg
+        run: packaging/ffmpeg/build.sh --prefix "$(cygpath -u "$RUNNER_TEMP")/ffmpeg" --bundle artifacts/ffmpeg-bundle/win-x64
+      - name: Smoke test with the bundled FFmpeg only
+        # MSYS2 の PATH を使わない (同梱したものだけで読み込めることを確かめる)
+        shell: pwsh
+        env:
+          VB_REQUIRE_FFMPEG: "1"
+        run: |
+          $env:VIDEO_BUILDER_FFMPEG = (Resolve-Path artifacts/ffmpeg-bundle/win-x64).Path
+          dotnet test tests/VideoBuilder.Tests --filter "$env:SMOKE_TESTS"
+      - name: Publish
+        run: packaging/publish-all.sh win-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video-builder-win-x64
+          path: artifacts/publish/win-x64
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest       # Apple Silicon
+            rid: osx-arm64
+          - runner: macos-15-intel     # Intel
+            rid: osx-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Install codec libraries
+        run: brew install nasm pkgconf x264 x265 libvpx dav1d opus
+      - name: Build FFmpeg
+        run: packaging/ffmpeg/build.sh --prefix "$RUNNER_TEMP/ffmpeg" --bundle "artifacts/ffmpeg-bundle/${{ matrix.rid }}"
+      - name: Check that the bundle refers only to itself and the OS
+        run: |
+          bad=$(otool -L artifacts/ffmpeg-bundle/${{ matrix.rid }}/*.dylib | grep -vE ':$|@loader_path/|/usr/lib/|/System/' || true)
+          if [ -n "$bad" ]; then echo "$bad"; exit 1; fi
+      - name: Smoke test with the bundled FFmpeg only
+        env:
+          VB_REQUIRE_FFMPEG: "1"
+        run: |
+          export VIDEO_BUILDER_FFMPEG="$PWD/artifacts/ffmpeg-bundle/${{ matrix.rid }}"
+          dotnet test tests/VideoBuilder.Tests --filter "$SMOKE_TESTS"
+      - name: Publish
+        run: packaging/publish-all.sh ${{ matrix.rid }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video-builder-${{ matrix.rid }}
+          path: artifacts/publish/${{ matrix.rid }}

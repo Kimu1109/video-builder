@@ -2134,7 +2134,32 @@ Flatpak と `build.sh` で configure の設定・FFmpeg のソースが食い違
 - GPL の求めに従い、配布物を公開するときは、同梱したものと同じバージョンのソース (video-builder・FFmpeg・x264・x265) を同じ場所から入手できるようにする (リリースに添付する)。
 - プラグインは同じプロセスで動くので、GPL の FFmpeg を同梱した配布物と一緒に配るプラグインは、GPL-3.0 と両立するライセンスにする。
 - H.264・H.265 には特許がある (著作権のライセンスとは別の話)。配布する国や方法によっては確認が要る。
-- Windows・macOS 向けの FFmpeg の同梱は、まだ作っていない (`publish-all.sh` は FFmpeg を入れない)。
+- Windows・macOS 向けの FFmpeg の同梱 → [22.34](#2234-windowsmacos-向けの-ffmpeg-の同梱)。
+
+
+### 22.34 Windows・macOS 向けの FFmpeg の同梱
+
+Linux と同じ FFmpeg (9.0.2、GPL-3.0、x264・x265 入り) を、Windows・macOS の配布物にも同梱する。FFmpeg はその OS の上でしか作れないので、GitHub Actions のそれぞれの OS のランナーで作る (`.github/workflows/package.yml`。手動・タグ・packaging を変えた PR で動く)。
+
+| | Windows (x64) | macOS (arm64・x64) |
+|---|---|---|
+| 作る環境 | MSYS2 の UCRT64 (`windows-latest`) | Homebrew (`macos-latest`・`macos-15-intel`) |
+| コーデックのライブラリ | MSYS2 のパッケージ (x264・x265・libvpx・dav1d・Opus) | Homebrew のもの |
+| 同梱のしかた (`build.sh --bundle`) | FFmpeg の DLL と、`ldd` で見つかる MSYS2 の DLL (C:\Windows のもの以外) を写す。GCC の実行時ライブラリ・winpthreads も入る | 参照先を `otool -L` でたどって集め、`install_name_tool` で `@loader_path` に書き換え、ad-hoc で署名し直す |
+| 読み込み | `FFmpegLoader` が `SetDllDirectory` で同梱のフォルダを足す。FFmpeg.AutoGen はフルパスで読むが、そこから読まれる DLL (x264 など) は、既定ではアプリのフォルダと PATH からしか探さないため | 変更なし (`@loader_path` で互いを見つける) |
+| GPU | NVENC・NVDEC (ヘッダは nv-codec-headers 12.1)、AMF、D3D11VA・DXVA2 | VideoToolbox |
+
+発行 (`publish-all.sh <RID>`) は、`artifacts/ffmpeg-bundle/<RID>` があれば、発行したフォルダの `ffmpeg/` に写す。`FFmpegLoader` は実行ファイルの隣の `ffmpeg` フォルダを最初に探す。ライセンスの文書は `licenses/` に入れる。
+
+確かめ方 (package.yml): 同梱したものだけで動くことを確かめるため、Windows は MSYS2 の PATH を使わないシェルで、`VIDEO_BUILDER_FFMPEG` を同梱のフォルダにしてテストの一部 (`AnimatedImageTests`・`PackagingTests`・`FFmpegBuildTests`) を流す。macOS は、同梱したライブラリが同梱のもの・OS のもの以外を参照していないことも `otool -L` で確かめる。`FFmpegBuildTests` は、読み込んだ FFmpeg が GPL v3 のビルドで、libx264・libx265・libvpx・Opus・dav1d を持つことを確かめる (CI でも流す)。
+
+NVENC のヘッダは、Linux (Ubuntu の `libffmpeg-nvenc-dev`)・Flatpak・Windows のすべてで 12.1 にした。13.x は新しいドライバ (570 以降) でないと NVENC が使えないため。
+
+注意すること:
+- macOS: Homebrew のライブラリは、ランナーの macOS 向けに作られている。そのため、配布物が動く macOS の下限は、ランナーの macOS のバージョンになる。古い macOS にも対応するなら、コーデックのライブラリも `MACOSX_DEPLOYMENT_TARGET` を指定して自分で作る必要がある。
+- macOS の署名は ad-hoc だけ。配布するには、Developer ID での署名と公証 (notarization) が要る (Gatekeeper)。
+- Windows・macOS で、アプリ全体の動作はまだ確かめていない (22.4)。確かめたのは、FFmpeg の読み込み・デコード・描画と、エンコーダがあることまで。
+- Windows の arm64 は作っていない。
 
 ---
 
