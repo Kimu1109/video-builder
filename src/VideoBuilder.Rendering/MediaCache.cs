@@ -15,6 +15,8 @@ public sealed class MediaCache : IDisposable
         public long LastUsed;
         /// <summary>プロキシを読んでいるときの、元の動画の幅 (元の動画を読んでいるときは 0)。</summary>
         public int SourceWidth;
+        /// <summary>元の動画のパス (Path がプロキシの区切りのときに、どの動画のものかを知るため)。</summary>
+        public string Original = "";
         /// <summary>最後に取り出した位置 (秒)。まだなら NaN。</summary>
         public double Position = double.NaN;
         /// <summary>最後に使った描画の番号。同じ描画の中で、別のオブジェクトに貸さないために使う。</summary>
@@ -23,6 +25,10 @@ public sealed class MediaCache : IDisposable
         public Task? Pending;
         /// <summary>先読みしている位置 (秒)。</summary>
         public double PendingPosition;
+        /// <summary>直前の Fetch で取り出したフレーム (デコーダの置き場)。取り出せなければ IntPtr.Zero。</summary>
+        public IntPtr Data;
+        /// <summary>直前の Fetch で、前の画像が指していた置き場の中身が失われた (zeroCopy で取り出しに失敗した)。</summary>
+        public bool Lost;
     }
 
     // デコーダはファイルごとに持ち、オブジェクトには描画のたびに「いちばん都合のよいもの」を貸す。
@@ -42,7 +48,20 @@ public sealed class MediaCache : IDisposable
     /// 動画フレームを複製せず、デコーダのバッファを直接指す画像を作る。
     /// 画像は「次のフレームを取り出すまで」しか正しくないので、すぐに描き切る CPU 描画でだけ使う。
     /// </param>
-    public MediaCache(bool zeroCopy = false) => _zeroCopy = zeroCopy;
+    /// <param name="gpu">
+    /// GPU 描画のときのコンテキスト。動画のフレームを、デコーダの置き場から直接 GPU に送る
+    /// (メモリ上で複製してから送るより 1 回少ない)。描画のスレッドからだけ使う。
+    /// </param>
+    public MediaCache(bool zeroCopy = false, GRContext? gpu = null)
+    {
+        _zeroCopy = zeroCopy;
+        _gpu = gpu;
+    }
+
+    private readonly GRContext? _gpu;
+
+    /// <summary>今の描画が GPU で描かれるか (GPU の描画先を作れずに CPU で描くときは false にして、GPU へ送らない)。</summary>
+    public bool DrawingOnGpu { get; set; } = true;
 
     /// <summary>プレビュー用: プロキシがあれば元の動画の代わりに使う。</summary>
     public bool UseProxies { get; set; }
@@ -72,8 +91,10 @@ public sealed class MediaCache : IDisposable
     public SKImage? GetVideoFrame(string key, string path, double seconds, bool loop, out float scale, float detail = 1)
     {
         scale = 1;
-        var e = Acquire(key, EffectivePath(path), path, seconds, loop);
-        var image = e == null ? null : Decode(e, seconds, loop, detail, path);
+        seconds = Wrap(path, seconds, loop);
+        var e = Acquire(key, EffectivePath(path, seconds), path, seconds);
+        if (e != null) Fetch(e, seconds, detail, path);
+        var image = e == null ? null : ImageOf(e);
         if (image != null) scale = OriginalWidth(e!, path) / (float)image.Width;
         return image;
     }
@@ -93,8 +114,21 @@ public sealed class MediaCache : IDisposable
     }
 
     /// <summary>実際に読むファイル (プロキシを使う設定でプロキシがあれば、プロキシ)。</summary>
-    private string EffectivePath(string path) =>
-        UseProxies && ProxyStore.Enabled && ProxyStore.FindReady(path) is { } proxy ? proxy : path;
+    private string EffectivePath(string path, double seconds) =>
+        UseProxies && ProxyStore.Enabled && ProxyStore.FindSegment(path, seconds) is { } proxy ? proxy : path;
+
+    // 元の動画の情報 (長さ・幅)。プロキシの区切りを読んでいても、ループの長さや大きさは元の動画で決める
+    private readonly Dictionary<string, MediaInfo?> _info = new();
+
+    private MediaInfo? InfoOf(string original)
+    {
+        if (!_info.TryGetValue(original, out var info)) _info[original] = info = MediaInfo.Probe(original);
+        return info;
+    }
+
+    /// <summary>ループするときは、元の動画の長さで割った余りにする (VideoReader.Duration と同じ長さ)。</summary>
+    private double Wrap(string original, double seconds, bool loop) =>
+        loop && InfoOf(original) is { VideoDuration: > 0 } info ? seconds % info.VideoDuration : seconds;
 
     /// <summary>
     /// 複数の動画のフレームを、動画ごとに別スレッドで同時にデコードしておく。
@@ -104,13 +138,16 @@ public sealed class MediaCache : IDisposable
     {
         // デコーダの割り当て (一覧の書き換え) は 1 スレッドで済ませ、デコードだけを並列にする
         var jobs = new List<(VideoEntry Entry, double Seconds, bool Loop, float Detail, string Original)>();
-        foreach (var (key, path, seconds, loop, detail) in requests)
+        foreach (var (key, path, rawSeconds, loop, detail) in requests)
         {
-            var e = Acquire(key, EffectivePath(path), path, seconds, loop);
-            if (e?.Reader != null && jobs.All(j => !ReferenceEquals(j.Entry, e))) jobs.Add((e, seconds, loop, detail, path));
+            double seconds = Wrap(path, rawSeconds, loop);
+            var e = Acquire(key, EffectivePath(path, seconds), path, seconds);
+            if (e?.Reader != null && jobs.All(j => !ReferenceEquals(j.Entry, e))) jobs.Add((e, seconds, false, detail, path));
         }
-        if (jobs.Count == 1) Decode(jobs[0].Entry, jobs[0].Seconds, jobs[0].Loop, jobs[0].Detail, jobs[0].Original);
-        else if (jobs.Count >= 2) Parallel.ForEach(jobs, job => Decode(job.Entry, job.Seconds, job.Loop, job.Detail, job.Original));
+        // デコードは並列に、画像を作る (GPU なら送る) のはこのスレッドで (GPU のコンテキストはこのスレッドのもの)
+        if (jobs.Count == 1) Fetch(jobs[0].Entry, jobs[0].Seconds, jobs[0].Detail, jobs[0].Original);
+        else if (jobs.Count >= 2) Parallel.ForEach(jobs, job => Fetch(job.Entry, job.Seconds, job.Detail, job.Original));
+        foreach (var job in jobs) ImageOf(job.Entry);
     }
 
     /// <summary>最後に取り出した動画フレームの大きさ (縮めてデコードしたときは縮めた大きさ。計測・テスト用)。</summary>
@@ -124,12 +161,14 @@ public sealed class MediaCache : IDisposable
     /// key は、この描画で GetVideoFrame / Prefetch に渡したもの。先読みが終わるまで、そのデコーダには触らない
     /// (次の BeginFrame で終わるのを待つ)。
     /// </summary>
-    public void Lookahead(IReadOnlyList<(string Key, double Seconds, bool Loop)> next)
+    public void Lookahead(IReadOnlyList<(string Key, string Path, double Seconds, bool Loop)> next)
     {
-        foreach (var (key, seconds, loop) in next)
+        foreach (var (key, path, seconds, loop) in next)
         {
             if (!_assigned.TryGetValue(key, out var e) || e.Reader is not { } r || e.Pending != null) continue;
-            double t = Normalize(e, seconds, loop);
+            double t = Wrap(path, seconds, loop);
+            // 次のフレームが別のファイル (プロキシの次の区切り・プロキシと元の動画の切り替わり) なら、このデコーダでは読まない
+            if (EffectivePath(path, t) != e.Path) continue;
             // 今のフレームの範囲内なら、読むものがない
             if (!double.IsNaN(e.Position) && Math.Abs(t - e.Position) < 1e-9) continue;
             // 今のフレームの画像は、合成が終わるまで読まれる。先読みの変換で上書きしないよう、置き場を押さえておく
@@ -156,19 +195,17 @@ public sealed class MediaCache : IDisposable
         }
     }
 
-    private static double Normalize(VideoEntry e, double seconds, bool loop) =>
-        loop && e.Reader is { Duration: > 0 } r ? seconds % r.Duration : seconds;
 
     /// <summary>
     /// このオブジェクトに貸すデコーダを決める。同じ描画の中では、1 つのデコーダを 2 つのオブジェクトに貸さない。
     /// 選び方: 少し先まで読み進めれば届くもの (シーク不要) → それ以外で使われていないもの → 新しく開く。
     /// </summary>
     /// <param name="original">path がプロキシのときの、元の動画のパス。</param>
-    private VideoEntry? Acquire(string key, string path, string original, double seconds, bool loop)
+    private VideoEntry? Acquire(string key, string path, string original, double seconds)
     {
         if (string.IsNullOrEmpty(path)) return null;
         // 同じ描画の中で、先に割り当てたもの (Prefetch) があればそれを使う
-        if (_assigned.TryGetValue(key, out var mine) && mine.Path == path && Math.Abs(mine.Position - Normalize(mine, seconds, loop)) < 1e-9)
+        if (_assigned.TryGetValue(key, out var mine) && mine.Path == path && Math.Abs(mine.Position - seconds) < 1e-9)
             return mine;
 
         if (!_byPath.TryGetValue(path, out var list)) _byPath[path] = list = new List<VideoEntry>();
@@ -177,7 +214,7 @@ public sealed class MediaCache : IDisposable
         foreach (var e in list)
         {
             if (e.UsedInFrame == _frame) continue;
-            double t = Normalize(e, seconds, loop);
+            double t = seconds;
             double cost;
             if (double.IsNaN(e.Position)) cost = 1000;
             else if (t >= e.Position - 1e-9 && t - e.Position <= SequentialWindow) cost = t - e.Position;   // 読み進めれば届く
@@ -186,8 +223,9 @@ public sealed class MediaCache : IDisposable
         }
         if (best == null)
         {
-            best = Open(path, original);
+            best = Open(path, original, InfoOf(original)?.Width ?? 0);
             list.Add(best);
+            if (path != original) CloseOtherSegments(best);
             Trim();
         }
         best.UsedInFrame = _frame;
@@ -196,10 +234,12 @@ public sealed class MediaCache : IDisposable
         return best;
     }
 
-    private static VideoEntry Open(string path, string original)
+    /// <param name="sourceWidth">元の動画の幅 (path がプロキシのとき、縮小率を求めるのに使う)。</param>
+    private static VideoEntry Open(string path, string original, int sourceWidth)
     {
-        var e = new VideoEntry { Path = path };
-        try { e.Reader = File.Exists(path) ? new VideoReader(path) : null; }
+        var e = new VideoEntry { Path = path, Original = original };
+        // プロキシの区切りは、元の動画と同じ時刻で書いてあるので、時刻をそのまま使って読む
+        try { e.Reader = File.Exists(path) ? new VideoReader(path, absoluteTime: path != original) : null; }
         catch { e.Reader = null; }
         if (e.Reader == null && original != path)
         {
@@ -209,34 +249,81 @@ public sealed class MediaCache : IDisposable
             catch { e.Reader = null; }
         }
         else if (original != path)
-            e.SourceWidth = MediaInfo.Probe(original)?.Width ?? 0;
+            e.SourceWidth = sourceWidth;
         return e;
     }
 
-    private SKImage? Decode(VideoEntry e, double seconds, bool loop, float detail = 1, string? original = null)
+    /// <summary>
+    /// 同じ動画の、ほかのプロキシの区切りのデコーダを閉じる (この描画で使っていないもの)。
+    /// 再生が区切りをまたぐたびに新しく開くので、残しておくと数がふくらむ。
+    /// </summary>
+    private void CloseOtherSegments(VideoEntry keep)
+    {
+        foreach (var (path, list) in _byPath.ToList())
+        {
+            if (path == keep.Path) continue;
+            foreach (var e in list.Where(e => e.Original == keep.Original && e.Path != e.Original && e.UsedInFrame != _frame && e.Pending == null).ToList())
+            {
+                e.Reader?.Dispose(); e.Image?.Dispose();
+                list.Remove(e);
+            }
+            if (list.Count == 0) _byPath.Remove(path);
+        }
+    }
+
+    /// <summary>デコーダから seconds のフレームを取り出す (Data に入れる)。どのスレッドからでもよい (1 つの entry を同時に使わなければ)。</summary>
+    private void Fetch(VideoEntry e, double seconds, float detail = 1, string? original = null)
     {
         var r = e.Reader;
-        if (r == null) return null;
         // 先読み中のデコーダには触らない (この描画のフレームは、先読みを始める前に取り出してある)
-        if (e.Pending != null) return e.Image;
-        seconds = Normalize(e, seconds, loop);
+        if (r == null || e.Pending != null) { e.Data = IntPtr.Zero; e.Lost = false; return; }
         e.Position = seconds;
         r.OutputDivisor = DivisorFor(e, original ?? e.Path, detail);
         long before = r.CurrentFrameId;
-        var data = r.GetFramePointer(seconds);
-        if (data == IntPtr.Zero) return _zeroCopy && r.CurrentFrameId != before ? null : e.Image;
+        e.Data = r.GetFramePointer(seconds);
+        e.Lost = e.Data == IntPtr.Zero && _zeroCopy && r.CurrentFrameId != before;
+    }
+
+    /// <summary>直前の Fetch で取り出したフレームの画像を返す (同じフレームなら前の画像)。描画のスレッドから呼ぶ。</summary>
+    private SKImage? ImageOf(VideoEntry e)
+    {
+        var r = e.Reader;
+        if (r == null) return null;
+        if (e.Data == IntPtr.Zero) return e.Lost ? null : e.Image;
         if (e.Image == null || e.FrameId != r.CurrentFrameId || e.Image.Width != r.FrameWidth || e.Image.Height != r.FrameHeight)
         {
             // zeroCopy の古い画像は、デコーダの置き場を指しているだけなので、取り出した後に手放してよい
             e.Image?.Dispose();
             var info = new SKImageInfo(r.FrameWidth, r.FrameHeight, SKColorType.Bgra8888, SKAlphaType.Opaque);
-            e.Image = _zeroCopy
-                ? SKImage.FromPixels(info, data, r.FrameWidth * 4)
-                : SKImage.FromPixelCopy(info, data, r.FrameWidth * 4);
+            e.Image = _zeroCopy ? SKImage.FromPixels(info, e.Data, r.FrameWidth * 4) : Upload(info, e.Data);
             e.FrameId = r.CurrentFrameId;
         }
+        e.Data = IntPtr.Zero;
         LastFrameSize = (e.Image.Width, e.Image.Height);
         return e.Image;
+    }
+
+    /// <summary>GPU へ送った回数 (メモリ上で複製せずに直接送ったもの。計測・テスト用)。</summary>
+    public long DirectUploads { get; private set; }
+
+    /// <summary>
+    /// フレームを、描画が終わるまで使える画像にする。GPU 描画なら、デコーダの置き場から直接 GPU のテクスチャに送る。
+    /// 送るのは Flush の中で済むので、そのあとは置き場が書き換わってもよい。GPU に送れなければ、メモリ上に複製する。
+    /// </summary>
+    private SKImage Upload(SKImageInfo info, IntPtr data)
+    {
+        if (_gpu != null && DrawingOnGpu)
+        {
+            using var view = SKImage.FromPixels(info, data, info.Width * 4);
+            var texture = view?.ToTextureImage(_gpu);
+            if (texture != null)
+            {
+                _gpu.Flush(true, false);
+                DirectUploads++;
+                return texture;
+            }
+        }
+        return SKImage.FromPixelCopy(info, data, info.Width * 4);
     }
 
     public SKImage? GetImage(string path)

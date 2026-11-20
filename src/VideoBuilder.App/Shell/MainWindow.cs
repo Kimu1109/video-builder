@@ -87,7 +87,7 @@ public sealed class MainWindow : Window, IShell
         Svc.Proxies.Changed += () =>
         {
             _proxyStatus.Text = Svc.Proxies.Status;
-            ToolTip.SetTip(_proxyStatus, Svc.Proxies.LastError);
+            ToolTip.SetTip(_proxyStatus, Svc.Proxies.LastError ?? (Svc.Proxies.StatusDetail.Length > 0 ? Svc.Proxies.StatusDetail : null));
         };
         Closed += (_, _) =>
         {

@@ -89,7 +89,13 @@ public sealed unsafe class VideoReader : IDisposable
     /// <summary>最後に GetFrame が返したフレームの時刻 (秒)。同じフレームかどうかの判定に使う。</summary>
     public long CurrentFrameId => _curPts;
 
-    public VideoReader(string path)
+    public VideoReader(string path) : this(path, false) { }
+
+    /// <param name="absoluteTime">
+    /// 時刻をファイルの時刻そのまま (最初のフレームの時刻を 0 にしない) で扱う。
+    /// 元の動画の途中から始まるプロキシの区切り (元の動画と同じ時刻で書いてある) を読むときに使う。
+    /// </param>
+    public VideoReader(string path, bool absoluteTime)
     {
         if (!FFmpegLoader.EnsureLoaded()) throw new InvalidOperationException(FFmpegLoader.Error);
         Path = path;
@@ -104,13 +110,12 @@ public sealed unsafe class VideoReader : IDisposable
             FFmpegLoader.Check(_stream, "映像ストリームがありません");
             var st = _fmt->streams[_stream];
             _codec = codec;
-            bool wantHardware = HardwareDecoding.Mode == HardwareDecodeMode.Auto && !HardwareDecoding.DisabledByEnvironment;
-            if (!wantHardware || !OpenHardwareDecoder(st)) OpenSoftwareDecoder(st);
+            if (!HardwareDecoding.Wanted || !OpenHardwareDecoder(st)) OpenSoftwareDecoder(st);
 
             Width = _dec->width; Height = _dec->height;
             FrameWidth = Width; FrameHeight = Height;
             _tb = st->time_base;
-            _startPts = st->start_time != ffmpeg.AV_NOPTS_VALUE ? st->start_time : 0;
+            _startPts = !absoluteTime && st->start_time != ffmpeg.AV_NOPTS_VALUE ? st->start_time : 0;
             var r = st->avg_frame_rate.num != 0 ? st->avg_frame_rate : st->r_frame_rate;
             FrameRate = r.den != 0 && r.num != 0 ? (double)r.num / r.den : 30;
             _defaultDur = Math.Max(1, (long)Math.Round(1.0 / FrameRate / ffmpeg.av_q2d(_tb)));
@@ -149,42 +154,13 @@ public sealed unsafe class VideoReader : IDisposable
             DecoderName = "TEST";
             return true;
         }
-        var reasons = new List<string>();
-        foreach (var type in HardwareDecoding.DeviceOrder())
-        {
-            var format = HardwareDecoding.HardwareFormatFor(_codec, type);
-            if (format == null) { reasons.Add($"{HardwareDecoding.NameOf(type)}: この形式には対応していません"); continue; }
-            var device = HardwareDecoding.SharedDevice(type, out var error);
-            if (device == null) { reasons.Add(error ?? HardwareDecoding.NameOf(type)); continue; }
-
-            var ctx = ffmpeg.avcodec_alloc_context3(_codec);
-            int level = ffmpeg.av_log_get_level();
-            ffmpeg.av_log_set_level(ffmpeg.AV_LOG_QUIET);
-            try
-            {
-                if (ffmpeg.avcodec_parameters_to_context(ctx, st->codecpar) < 0) { reasons.Add("デコーダの設定に失敗"); continue; }
-                ctx->hw_device_ctx = ffmpeg.av_buffer_ref(device);
-                ctx->get_format = HardwareDecoding.GetFormatPointer;
-                ctx->opaque = (void*)(nint)(int)format.Value;     // GetFormat で読む
-                // GPU がデコードするので、CPU のスレッドは少なくてよい
-                ctx->thread_count = 1;
-                int ret = ffmpeg.avcodec_open2(ctx, _codec, null);
-                if (ret < 0) { reasons.Add($"{HardwareDecoding.NameOf(type)}: {FFmpegLoader.ErrorText(ret)}"); continue; }
-                _dec = ctx;
-                ctx = null;
-                _hardware = true;
-                _hwFormat = format.Value;
-                DecoderName = HardwareDecoding.NameOf(type);
-                return true;
-            }
-            finally
-            {
-                ffmpeg.av_log_set_level(level);
-                if (ctx != null) ffmpeg.avcodec_free_context(&ctx);
-            }
-        }
-        HardwareError = reasons.Count == 0 ? "使えるデバイスがありません" : string.Join(" / ", reasons);
-        return false;
+        var ctx = HardwareDecoding.Open(_codec, st, out var format, out var name, out var error);
+        if (ctx == null) { HardwareError = error; return false; }
+        _dec = ctx;
+        _hardware = true;
+        _hwFormat = format;
+        DecoderName = name;
+        return true;
     }
 
     /// <summary>

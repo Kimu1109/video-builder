@@ -187,6 +187,26 @@ public class PreviewSpeedTests : IDisposable
     }
 
     [Fact]
+    public void Gpu_rendering_sends_video_frames_straight_to_the_gpu_and_matches_the_cpu()
+    {
+        if (!_ready) return;
+        using var gpu = GpuContext.TryCreate(out _);
+        if (gpu == null) return;
+        // 2 本の動画 (並列にデコードしてから、描画のスレッドで GPU へ送る) + 先読み
+        var p = WithVideo((0, 0, -160), (1, 45, 160));
+        using var cpu = new RenderEngine();
+        using var onGpu = new RenderEngine(gpu) { Lookahead = true };
+        for (int f = 0; f < 40; f += 3)
+        {
+            var a = Frame(cpu, p, f);
+            var b = Frame(onGpu, p, f);
+            Assert.True(MeanDifference(a, b) < 1.0, $"frame {f}: {MeanDifference(a, b):0.00}");
+        }
+        Assert.True(onGpu.Media.DirectUploads >= 2 * 14, $"{onGpu.Media.DirectUploads} 回");   // 複製せずに GPU へ送った
+        Assert.Equal(0, cpu.Media.DirectUploads);
+    }
+
+    [Fact]
     public void Export_with_lookahead_writes_a_playable_file()
     {
         if (!_ready) return;
