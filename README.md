@@ -117,7 +117,7 @@ Windows・macOS 向けは、GitHub Actions の `Package` ワークフロー (`.g
 
 ## ライセンス
 
-video-builder は [LGPL-3.0-or-later](COPYING.LESSER) で配布する。
+video-builder は [LGPL-3.0-or-later](LICENSE) で配布する (条文は [COPYING.LESSER](COPYING.LESSER) と [COPYING](COPYING))。
 配布物 (AppImage・Flatpak) は x264・x265 を有効にした FFmpeg (GPL) を同梱するため、全体を GPL-3.0-or-later の条件で配る。
 使っているソフトウェアとライセンスは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照。
 

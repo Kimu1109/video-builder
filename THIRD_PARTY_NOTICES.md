@@ -3,7 +3,7 @@
 ## video-builder 本体
 
 video-builder は **GNU Lesser General Public License v3.0 以降 (LGPL-3.0-or-later)** で配布する。
-条文は [COPYING.LESSER](COPYING.LESSER) (LGPL-3.0) と、それが元にしている [COPYING](COPYING) (GPL-3.0) にある。
+著作権の表示は [LICENSE](LICENSE)、条文は [COPYING.LESSER](COPYING.LESSER) (LGPL-3.0) と、それが元にしている [COPYING](COPYING) (GPL-3.0) にある。
 
 ## 配布物 (AppImage・Flatpak・Windows・macOS) のライセンス
 

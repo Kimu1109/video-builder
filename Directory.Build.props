@@ -7,5 +7,9 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- ライセンス (LICENSE・COPYING.LESSER)。アセンブリの情報にも入る -->
+    <Product>video-builder</Product>
+    <Copyright>Copyright (C) 2026 Kimu1109 and the video-builder contributors. LGPL-3.0-or-later</Copyright>
+    <PackageLicenseExpression>LGPL-3.0-or-later</PackageLicenseExpression>
   </PropertyGroup>
 </Project>

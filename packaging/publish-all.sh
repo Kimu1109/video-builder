@@ -9,7 +9,7 @@
 # FFmpeg: artifacts/ffmpeg-bundle/<RID>/ があれば、発行したフォルダの ffmpeg/ に写して同梱する。
 # FFmpeg はその OS の上でしか作れないので、先にその OS で packaging/ffmpeg/build.sh --bundle artifacts/ffmpeg-bundle/<RID> を
 # 実行しておく (GitHub Actions の package.yml がそうしている。設計書 22.34)。なければ FFmpeg なしで発行する。
-# ライセンスの文書 (COPYING・COPYING.LESSER・THIRD_PARTY_NOTICES.md) も licenses/ に入れる。OpenAL は同梱しない。
+# ライセンスの文書 (LICENSE・COPYING・COPYING.LESSER・THIRD_PARTY_NOTICES.md) も licenses/ に入れる。OpenAL は同梱しない。
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -42,7 +42,7 @@ for rid in "${rids[@]}"; do
     echo "   (FFmpeg は同梱しない: $bundle がありません)"
   fi
   mkdir -p "$out/licenses"
-  cp "$root/COPYING" "$root/COPYING.LESSER" "$root/THIRD_PARTY_NOTICES.md" "$out/licenses/"
+  cp "$root/LICENSE" "$root/COPYING" "$root/COPYING.LESSER" "$root/THIRD_PARTY_NOTICES.md" "$out/licenses/"
   for f in "${need[@]}"; do
     if [ ! -e "$out/$f" ]; then echo "!! $rid: $f がありません" >&2; failed=1; fi
   done

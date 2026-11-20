@@ -39,7 +39,7 @@ fi
 "$root/packaging/ffmpeg/build.sh" --prefix "$root/artifacts/ffmpeg/linux-$arch" --bundle "$appdir/usr/bin/ffmpeg"
 # ライセンスの文書
 mkdir -p "$appdir/usr/share/licenses/video-builder"
-cp "$root/COPYING" "$root/COPYING.LESSER" "$root/THIRD_PARTY_NOTICES.md" "$appdir/usr/share/licenses/video-builder/"
+cp "$root/LICENSE" "$root/COPYING" "$root/COPYING.LESSER" "$root/THIRD_PARTY_NOTICES.md" "$appdir/usr/share/licenses/video-builder/"
 
 cp "$root/packaging/video-builder.desktop" "$appdir/usr/share/applications/"
 cp "$root/packaging/video-builder.desktop" "$appdir/"

@@ -116,7 +116,7 @@ modules:
       - install -Dm644 video-builder.desktop /app/share/applications/video-builder.desktop
       - install -Dm644 video-builder.svg /app/share/icons/hicolor/scalable/apps/video-builder.svg
       - install -Dm644 io.github.kimu1109.VideoBuilder.metainfo.xml /app/share/metainfo/io.github.kimu1109.VideoBuilder.metainfo.xml
-      - install -Dm644 -t /app/share/licenses/video-builder COPYING COPYING.LESSER THIRD_PARTY_NOTICES.md
+      - install -Dm644 -t /app/share/licenses/video-builder LICENSE COPYING COPYING.LESSER THIRD_PARTY_NOTICES.md
     sources:
       - type: dir
         path: ../../artifacts/publish/linux-x64
@@ -127,6 +127,8 @@ modules:
         path: ../video-builder.svg
       - type: file
         path: io.github.kimu1109.VideoBuilder.metainfo.xml
+      - type: file
+        path: ../../LICENSE
       - type: file
         path: ../../COPYING
       - type: file
