@@ -1068,5 +1068,54 @@ public class OptimizationTests
                 Assert.Equal(plain.AsSpan((y * 320 + x) * 4, 4).ToArray(), flipped.AsSpan((y * 320 + (319 - x)) * 4, 4).ToArray());
     }
 
+
+    [Fact]
+    public void Text_animation_reuses_the_text_layout_on_every_frame()
+    {
+        var p = Small();
+        var t = ObjectFactory.Create(EffectRegistry.Text, 0, 0, 120);
+        t.Main.Values["text"] = "字の並びを使い回す " + Guid.NewGuid().ToString("N")[..6];   // ほかのテストと同じ並びにならないように
+        t.Main.Values["anim"] = "2";
+        t.Main.Tracks["interval"] = new AnimatedValue(0.05);
+        p.Root.Objects.Add(t);
+        using var e = new RenderEngine();
+        using var bmp = new SKBitmap(new SKImageInfo(320, 240, SKColorType.Bgra8888, SKAlphaType.Premul));
+        e.RenderToBitmap(p, p.Root, 1, bmp);
+        long built = Generators.TextLayoutsBuilt;
+        for (int f = 2; f < 30; f++) e.RenderToBitmap(p, p.Root, f, bmp);
+        // 毎フレーム描き直しているが (文字が順に出てくる)、字の並びは作り直していない。ほかのテストが同時に作るぶんは許す
+        Assert.True(Generators.TextLayoutsBuilt - built < 5, $"{Generators.TextLayoutsBuilt - built} 回作り直した");
+        var a = Generators.RenderText("あいう abc", "", 30, SKColors.White, false, false, 0, 0, 0, i => new Generators.CharStyle(1, 0, 1));
+        var b = Generators.RenderText("あいう abc", "", 30, SKColors.White, false, false, 0, 0, 0, i => new Generators.CharStyle(1, 0, 1));
+        using (a) using (b) Assert.Equal(a!.Encode().ToArray(), b!.Encode().ToArray());
+    }
+
+    [Fact]
+    public void A_lottie_frame_is_not_redrawn_while_the_same_frame_is_shown()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-lottie-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var path = Path.Combine(dir, "move.json");
+            File.WriteAllText(path, """{"v":"5.7.4","fr":30,"ip":0,"op":30,"w":100,"h":100,"layers":[{"ty":4,"ip":0,"op":30,"st":0,"ks":{"o":{"a":0,"k":100},"r":{"a":0,"k":0},"p":{"a":1,"k":[{"t":0,"s":[20,50,0]},{"t":29,"s":[80,50,0]}]},"a":{"a":0,"k":[0,0,0]},"s":{"a":0,"k":[100,100,100]}},"shapes":[{"ty":"el","p":{"a":0,"k":[0,0]},"s":{"a":0,"k":[20,20]}},{"ty":"fl","c":{"a":0,"k":[1,0,0,1]},"o":{"a":0,"k":100}}]}]}""");
+            var p = Small();
+            var o = ObjectFactory.Create(EffectRegistry.Vector, 0, 0, 90);
+            o.Main.Values["file"] = path;
+            p.Root.Objects.Add(o);
+            using var e = new RenderEngine();
+            using var bmp = new SKBitmap(new SKImageInfo(320, 240, SKColorType.Bgra8888, SKAlphaType.Premul));
+            for (int i = 0; i < 5; i++) e.RenderToBitmap(p, p.Root, 10, bmp);   // 止まったまま描き直す (編集中など)
+            Assert.Equal(1, e.LottieRenders);
+            var still = bmp.Bytes;
+            e.RenderToBitmap(p, p.Root, 11, bmp);
+            Assert.Equal(2, e.LottieRenders);                                     // 動けば描き直す
+            Assert.NotEqual(still, bmp.Bytes);
+            e.RenderToBitmap(p, p.Root, 10, bmp);
+            Assert.Equal(still, bmp.Bytes);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
 }
 

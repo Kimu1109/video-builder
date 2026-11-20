@@ -145,7 +145,8 @@ internal sealed class VectorSources : IDisposable
         float scale = size > 0 ? size / Math.Max(w, h) : 1;
         scale = Math.Min(scale, MaxSide / Math.Max(w, h));
         int pw = Math.Max(1, (int)MathF.Ceiling(w * scale)), ph = Math.Max(1, (int)MathF.Ceiling(h * scale));
-        using var surface = SKSurface.Create(new SKImageInfo(pw, ph, SKColorType.Rgba8888, SKAlphaType.Premul));
+        // 描画のほかの絵と同じ形式 (BGRA) で作る (形式が違うと、描くたびに変換が入る)
+        using var surface = SKSurface.Create(Effects.Info(pw, ph));
         if (surface == null) return null;
         var canvas = surface.Canvas;
         canvas.Clear(SKColors.Transparent);

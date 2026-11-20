@@ -951,8 +951,8 @@ public sealed class RenderEngine : IDisposable
                     return Cached($"V|{file}|{info.Version}|{Generators.F(size)}", () => _vectors.Render(info, size, 0));
                 _sourceAnimated = true;
                 double t = SourceTime(p, obj, bounds, frame);
-                var img = _vectors.Render(info, size, main.GetBool("loop") ? t % Math.Max(1e-6, info.Duration) : Math.Min(t, info.Duration));
-                return img == null ? null : ctx.Own(img);
+                double at = main.GetBool("loop") ? t % Math.Max(1e-6, info.Duration) : Math.Min(t, info.Duration);
+                return AnimatedVector(obj, depth, info, size, at);
             }
             case EffectRegistry.SceneRef:
             {
@@ -1114,6 +1114,36 @@ public sealed class RenderEngine : IDisposable
         return true;
     }
 
+    // Lottie の、オブジェクトごとの直前の絵。同じ時刻・大きさなら描き直さない (止まって編集しているとき、
+    // 同じフレームを何度も描き直すので)
+    private readonly Dictionary<string, (string Key, SKImage? Image, long LastUsed)> _lottieLast = new();
+
+    /// <summary>Lottie の絵を描き直した回数 (計測・テスト用)。</summary>
+    public long LottieRenders { get; private set; }
+
+    private SKImage? AnimatedVector(TimelineObject obj, int depth, VectorSources.Item info, float size, double at)
+    {
+        string key = $"{info.Version}|{Generators.F(size)}|{Generators.F(at)}";
+        string id = depth == 0 ? obj.Id : obj.Id + "@" + depth;
+        _tick++;
+        if (_lottieLast.TryGetValue(id, out var last) && last.Key == key)
+        {
+            _lottieLast[id] = last with { LastUsed = _tick };
+            return last.Image;
+        }
+        var img = _vectors.Render(info, size, at);
+        LottieRenders++;
+        if (_lottieLast.Count >= 64 && !_lottieLast.ContainsKey(id))
+            foreach (var k in _lottieLast.Where(kv => kv.Value.LastUsed < _frameStartTick).Select(kv => kv.Key).ToList())
+            {
+                _lottieLast[k].Image?.Dispose();
+                _lottieLast.Remove(k);
+            }
+        last.Image?.Dispose();
+        _lottieLast[id] = (key, img, _tick);
+        return img;
+    }
+
     /// <summary>オブジェクト内のフレーム位置を、素材の再生位置 (秒) に直す。</summary>
     public static double SourceTime(Project p, TimelineObject obj, int[] bounds, int frame)
     {
@@ -1149,6 +1179,8 @@ public sealed class RenderEngine : IDisposable
         foreach (var e in _filterCache.Values) e.Sprite.Image.Dispose();
         foreach (var e in _dofCache.Values) e.Sprite.Image.Dispose();
         foreach (var e in _sceneCache.Values) e.Image.Dispose();
+        foreach (var e in _lottieLast.Values) e.Image?.Dispose();
+        _lottieLast.Clear();
         _sceneCache.Clear();
         _dofCache.Clear();
         _filterCache.Clear();
