@@ -360,7 +360,8 @@ public sealed class MediaCache : IDisposable
         {
             // zeroCopy の古い画像は、デコーダの置き場を指しているだけなので、取り出した後に手放してよい
             e.Image?.Dispose();
-            var info = new SKImageInfo(r.FrameWidth, r.FrameHeight, SKColorType.Bgra8888, SKAlphaType.Opaque);
+            // アニメーション WebP・GIF は透明な部分を残す (VideoReader がアルファを掛けて渡す)
+            var info = new SKImageInfo(r.FrameWidth, r.FrameHeight, SKColorType.Bgra8888, r.HasAlpha ? SKAlphaType.Premul : SKAlphaType.Opaque);
             e.Image = _zeroCopy ? SKImage.FromPixels(info, e.Data, r.FrameWidth * 4) : Upload(info, e.Data);
             e.FrameId = r.CurrentFrameId;
         }

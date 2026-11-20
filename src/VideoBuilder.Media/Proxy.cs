@@ -193,7 +193,7 @@ public static class ProxyStore
 
     /// <summary>重い動画 (プロキシを作ると効果が大きいもの) か。自動でプロキシを作るかどうかの判断に使う。</summary>
     public static bool IsHeavy(MediaInfo info) =>
-        info.HasVideo && ((long)info.Width * info.Height > 1920L * 1080 || info.VideoCodec is "hevc" or "av1" or "prores" or "vp9" or "dnxhd");
+        info.HasVideo && !info.IsAnimatedImage && ((long)info.Width * info.Height > 1920L * 1080 || info.VideoCodec is "hevc" or "av1" or "prores" or "vp9" or "dnxhd");
 
     /// <summary>
     /// 自動でプロキシを作るか。重い動画 (IsHeavy) は作る。そうでなくても、この PC で実際に測って (check)、
@@ -202,7 +202,8 @@ public static class ProxyStore
     /// </summary>
     public static bool NeedsProxy(MediaInfo info, DecodeCheck? check)
     {
-        if (!info.HasVideo) return false;
+        // アニメーション画像は小さく、プロキシ (MJPEG) にすると透明な部分がなくなるので作らない
+        if (!info.HasVideo || info.IsAnimatedImage) return false;
         if (IsHeavy(info)) return true;
         if (check == null) return false;
         double fps = info.FrameRate > 0 ? info.FrameRate : 30;

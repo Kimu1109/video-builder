@@ -7,6 +7,9 @@ public sealed record MediaInfo(bool HasVideo, bool HasAudio, int Width, int Heig
     /// <summary>映像の圧縮方式の名前 ("h264" "hevc" など)。映像がなければ空。</summary>
     public string VideoCodec { get; init; } = "";
 
+    /// <summary>アニメーション画像 (WebP・GIF・APNG) か。透明な部分を残すので、プロキシは作らない。</summary>
+    public bool IsAnimatedImage => VideoCodec is "webp_anim" or "gif" or "apng";
+
     /// <summary>映像の長さ (秒)。VideoReader.Duration と同じ求め方 (映像ストリームの長さ、なければファイルの長さ)。</summary>
     public double VideoDuration { get; init; }
 
@@ -39,6 +42,9 @@ public sealed record MediaInfo(bool HasVideo, bool HasAudio, int Width, int Heig
             }
             double dur = fmt->duration > 0 ? fmt->duration / (double)ffmpeg.AV_TIME_BASE : 0;
             if (videoDuration <= 0) videoDuration = dur;
+            // アニメーション WebP は長さが入っていないので、パケットを数えて求める
+            if (v >= 0 && dur <= 0 && AnimatedImageMedia.NeedsScan(fmt->streams[v]))
+                dur = videoDuration = AnimatedImageMedia.ScanDuration(path, v);
             return new MediaInfo(v >= 0, a >= 0, w, h, fps, dur) { VideoCodec = codec, VideoDuration = videoDuration };
         }
         finally { ffmpeg.avformat_close_input(&fmt); }
