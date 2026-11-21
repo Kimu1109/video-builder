@@ -2193,7 +2193,7 @@ Linux (22.28) と同じ方法は使えない。代わりに、Direct3D 11 の共
 | 同じ GPU | 共有のテクスチャは同じ GPU の間でしか開けない。起動のときに、画面の描画の GPU を描画に選んだ GPU にそろえる (`Win32PlatformOptions.GraphicsAdapterSelectionCallback` → `ScreenGpu.Choose`。LUID で、なければ名前で探す)。描画の CPU を選んでいれば、これまでどおり。描画の GPU コンテキストの LUID が画面の描画 (`ICompositionGpuInterop.DeviceLuid`) と違えば共有しない (「使う GPU」を変えた直後など。起動し直すと共有できる) |
 | 失敗したとき | テクスチャを作れない・Skia で包めない・画面の描画が取り込めないときは、その場で読み戻して表示する方法に戻す (`SharedPreviewTarget.Broken` → `ReloadBackend`) |
 | 環境変数 | `VIDEO_BUILDER_SHARED_PREVIEW=0` で使わない。`VIDEO_BUILDER_SCREEN_GPU=default` で画面の描画の GPU を選ばない (DXGI の最初の GPU)。`VIDEO_BUILDER_SHARED_PREVIEW_ORIGIN=top` で描く向きを上下逆にする (上下が逆に出る環境があったときに確かめる用) |
-| 確かめ方 | CI (Windows・WARP): 共有のテクスチャを作り、Skia で描いて色が読めること、鍵 1 で渡したあとは描く側が取れないこと。画面の GPU の選び方 (LUID・名前)。画面に出るところは、実機でしか確かめられない |
+| 確かめ方 | CI (Windows・WARP): 共有のテクスチャを作り、Skia で描いて色が読めること、鍵 1 で渡したあとは描く側が取れないこと。画面の GPU の選び方 (LUID・名前)。実機 (内蔵 GPU + RTX 4070 Laptop GPU、2026-11-21): 「画面と共有」で表示され、向き (BottomLeft) も正しく、読み戻すときより速くなった |
 
 画面の描画の GPU を描画の GPU にそろえるので、外付けの GPU を選ぶと、画面の描画も外付けの GPU で行う (電池の持ちは少し悪くなる)。
 
