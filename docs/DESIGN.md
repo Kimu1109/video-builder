@@ -2213,7 +2213,7 @@ Linux の arm64 (aarch64) にも、x64 と同じ作り (CPU で描画・デコ�
 |---|---|
 | コード | 変更なし。SIMD は `Vector128`/`Vector256` (機種に依存しない API) で書いてあり、arm64 では `Vector256` が速く動かないので `Vector128` (NEON) の処理になる。SkiaSharp・HarfBuzzSharp は linux-arm64 のライブラリが NuGet に入っている。`FFmpegLoader` は `/usr/lib/aarch64-linux-gnu` も探す |
 | CI (`ci.yml`) | `test` の job を `ubuntu-24.04` と `ubuntu-24.04-arm` (GitHub の arm64 ランナー。エミュレーションなし) の 2 つで流す。FFmpeg のキャッシュはアーキテクチャごとに分ける (`runner.arch` をキーに入れる) |
-| 配布物 (`package.yml`) | `linux` の job (x64・arm64): FFmpeg を作って同梱 → 同梱したライブラリが同梱のものを参照していること (`ldd`) → 同梱の FFmpeg だけでテストの一部 → 発行して tar.gz → AppImage。`flatpak` の job (x64・arm64): 発行したものを使って、その CPU のランナーで Flatpak を組み立てる |
+| 配布物 (`package.yml`) | `linux` の job (x64・arm64): FFmpeg を作って同梱 → 同梱したライブラリが同梱のものを参照していること (`ldd`) → 同梱の FFmpeg だけでテストの一部 → 発行して tar.gz → AppImage。`flatpak` の job (x64・arm64): その CPU のランナーに flatpak-builder と Freedesktop 25.08 を入れ、`packaging/flatpak/build.sh --bundle` をそのまま実行する。入れたアプリの中に FFmpeg 9 と、その CPU 向けの本体があることを確かめる。flatpak-github-actions のコンテナは、入っている SDK の更新に失敗する (Invalid cross-device link) ので使わない |
 | AppImage | `packaging/appimage/build.sh [x64\|arm64]`。省くとこの PC のアーキテクチャ。FFmpeg を同梱するので、ほかのアーキテクチャを指定したら、発行の前に止める。CI では appimagetool を FUSE なしで動かす (`APPIMAGE_EXTRACT_AND_RUN=1`) |
 | Flatpak | `packaging/flatpak/build.sh [--bundle] [--arch x64\|arm64]`。省くとこの PC のアーキテクチャ。マニフェストには変数を書けないので、発行したものを決まった場所 (`artifacts/flatpak/publish`) に写して、マニフェストはそこから入れる。バンドルの名前は `video-builder-<arch>.flatpak` |
 

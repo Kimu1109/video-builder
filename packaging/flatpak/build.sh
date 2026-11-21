@@ -12,6 +12,8 @@
 # --arch を省くと、この PC のアーキテクチャ (uname -m) にする。FFmpeg などはマニフェストの中でソースから作るので、
 # ほかのアーキテクチャ向けに作るには、そのアーキテクチャのランタイムと qemu-user (binfmt) が要り、とても遅い。
 # arm64 向けは arm64 の PC で作るのがよい。
+#
+# 環境変数 FLATPAK_BUILDER_ARGS に、flatpak-builder に足す引数を書ける (CI では --disable-rofiles-fuse など)。
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -43,7 +45,8 @@ esac
 rm -rf "$out/publish"
 cp -a "$root/artifacts/publish/linux-$arch" "$out/publish"
 
-flatpak-builder --user --install --force-clean --arch="$flatpak_arch" --repo="$out/repo" --state-dir="$out/.flatpak-builder" \
+# shellcheck disable=SC2086  # FLATPAK_BUILDER_ARGS は空白で区切った引数として渡す
+flatpak-builder --user --install --force-clean --arch="$flatpak_arch" ${FLATPAK_BUILDER_ARGS:-} --repo="$out/repo" --state-dir="$out/.flatpak-builder" \
   "$out/build-$flatpak_arch" "$here/io.github.kimu1109.VideoBuilder.yml"
 
 if [ "$bundle" = 1 ]; then

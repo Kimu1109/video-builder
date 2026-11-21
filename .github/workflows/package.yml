@@ -98,10 +98,10 @@ jobs:
           name: video-builder-${{ matrix.appimage_arch }}.AppImage
           path: artifacts/appimage/*.AppImage
 
-  # Flatpak。linux の job で発行したものを、マニフェストの決まった場所 (artifacts/flatpak/publish) に置いて組み立てる。
-  # FFmpeg・x264・x265・OpenAL はマニフェストの中でソースから作る (その CPU のランナーで作る)
+  # Flatpak。packaging/flatpak/build.sh (発行 → flatpak-builder) を、その CPU のランナーでそのまま実行する。
+  # FFmpeg・x264・x265・OpenAL はマニフェストの中でソースから作る (時間がかかるので、flatpak-builder の状態をキャッシュする)。
+  # flatpak-github-actions のコンテナは、入っている SDK の更新に失敗する (Invalid cross-device link) ので使わない
   flatpak:
-    needs: linux
     strategy:
       fail-fast: false
       matrix:
@@ -113,26 +113,38 @@ jobs:
             arch: arm64
             flatpak_arch: aarch64
     runs-on: ${{ matrix.runner }}
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
-      options: --privileged
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/setup-dotnet@v4
         with:
-          name: video-builder-linux-${{ matrix.arch }}
-          path: artifacts
-      - name: Put the published app where the manifest expects it
+          dotnet-version: 10.0.x
+      - name: Install flatpak-builder and the Freedesktop 25.08 runtime
         run: |
-          tar -C artifacts -xzf artifacts/video-builder-linux-${{ matrix.arch }}.tar.gz
-          mkdir -p artifacts/flatpak
-          mv artifacts/video-builder artifacts/flatpak/publish
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+          sudo apt-get update && sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive --arch=${{ matrix.flatpak_arch }} flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
+      - name: Cache flatpak-builder
+        uses: actions/cache@v4
         with:
-          manifest-path: packaging/flatpak/io.github.kimu1109.VideoBuilder.yml
-          bundle: video-builder-${{ matrix.arch }}.flatpak
-          arch: ${{ matrix.flatpak_arch }}
-          cache-key: flatpak-builder-${{ matrix.flatpak_arch }}-${{ hashFiles('packaging/flatpak/io.github.kimu1109.VideoBuilder.yml') }}
+          path: artifacts/flatpak/.flatpak-builder
+          key: flatpak-builder-${{ matrix.flatpak_arch }}-${{ hashFiles('packaging/flatpak/io.github.kimu1109.VideoBuilder.yml') }}
+          restore-keys: flatpak-builder-${{ matrix.flatpak_arch }}-
+      - name: Build Flatpak
+        env:
+          FLATPAK_BUILDER_ARGS: --disable-rofiles-fuse
+        run: packaging/flatpak/build.sh --bundle --arch ${{ matrix.arch }}
+      - name: Check the installed app
+        run: |
+          flatpak info --user io.github.kimu1109.VideoBuilder
+          # サンドボックスの中に、FFmpeg 9 と、この CPU 向けの本体があること (ELF の e_machine: x86-64 は 3e、aarch64 は b7)
+          machine=$(flatpak run --user --command=sh io.github.kimu1109.VideoBuilder -c \
+            'ls /app/lib/libavcodec.so.63 >&2 && od -An -tx1 -j18 -N1 /app/lib/video-builder/video-builder' | tr -d ' ')
+          echo "e_machine=$machine"
+          [ "$machine" = "${{ matrix.arch == 'arm64' && 'b7' || '3e' }}" ]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video-builder-${{ matrix.arch }}.flatpak
+          path: artifacts/flatpak/video-builder-${{ matrix.arch }}.flatpak
 
   windows:
     runs-on: windows-latest
