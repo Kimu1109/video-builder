@@ -7,7 +7,7 @@
 
 *A layer-based video editor for Linux, Windows and macOS, with keyframes, effects, reusable templates, Lua scripting and plugins. The UI is available in Japanese and English.*
 
-- 対応 OS: Linux (Ubuntu 22.04+ / Fedora 39+ / Arch) ・ Windows 10+ ・ macOS 13+
+- 対応 OS: Linux (Ubuntu 22.04+ / Fedora 39+ / Arch。x64・arm64) ・ Windows 10+ ・ macOS 13+
 - 表示言語: 日本語 / English
 - ライセンス: [LGPL-3.0-or-later](#ライセンス)
 
@@ -65,9 +65,9 @@
 > [!NOTE]
 > まだ正式なリリースはありません。今は次のどちらかの方法で試せます。
 
-### 配布物をダウンロードする (Windows・macOS)
+### 配布物をダウンロードする (Linux・Windows・macOS)
 
-GitHub Actions の [Package ワークフロー](https://github.com/Kimu1109/video-builder/actions/workflows/package.yml) の実行結果 (Artifacts) から、FFmpeg を同梱した Windows・macOS 向けの配布物をダウンロードできます (GitHub へのログインが必要です)。
+GitHub Actions の [Package ワークフロー](https://github.com/Kimu1109/video-builder/actions/workflows/package.yml) の実行結果 (Artifacts) から、FFmpeg を同梱した Linux (x64・arm64 の AppImage・Flatpak・tar.gz)・Windows・macOS 向けの配布物をダウンロードできます (GitHub へのログインが必要です)。
 
 ### ソースからビルドする (Linux など)
 
@@ -176,13 +176,14 @@ dotnet test
 ### 配布用のビルド
 
 ```sh
-packaging/appimage/build.sh        # artifacts/appimage/ に出力
+packaging/appimage/build.sh        # artifacts/appimage/ に出力 (この PC のアーキテクチャ向け)
 ```
 
+- x64 と arm64 に対応しています (`build.sh x64` / `build.sh arm64`)。FFmpeg を同梱するため、作れるのは実行する PC と同じアーキテクチャのものだけです。
 - `appimagetool` が PATH にあれば AppImage まで作り、なければ展開した状態 (AppDir) で止まります。
 - FFmpeg 9 (x264・x265 入りの GPL ビルド) は `packaging/ffmpeg/build.sh` で作って同梱します。OpenAL は同梱しないので、利用者の環境に必要です。
-- Flatpak は `packaging/flatpak/build.sh` で作ります (FFmpeg もマニフェストの中で作ります)。
-- Windows・macOS 向けは、GitHub Actions の `Package` ワークフロー (`.github/workflows/package.yml`) が、それぞれの OS で FFmpeg を作って同梱したものを作ります (手動で実行するか、`v*` のタグを付けます)。
+- Flatpak は `packaging/flatpak/build.sh` で作ります (FFmpeg もマニフェストの中で作ります。`--arch x64|arm64` で指定でき、省くとこの PC のアーキテクチャ)。
+- Linux (x64・arm64)・Windows・macOS 向けは、GitHub Actions の `Package` ワークフロー (`.github/workflows/package.yml`) が、それぞれの OS で FFmpeg を作って同梱したものを作ります (手動で実行するか、`v*` のタグを付けます)。
 
 ### 翻訳
 
