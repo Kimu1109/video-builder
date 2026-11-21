@@ -758,6 +758,25 @@ public class OptimizationTests
         return bmp;
     }
 
+    /// <summary>失敗したときの手がかり: 差の大きさごとの画素数と、いちばん差の大きい画素とその周り (BGRA)。</summary>
+    private static string WhereDiffers(SKBitmap a, SKBitmap b)
+    {
+        var pa = a.Bytes; var pb = b.Bytes;
+        var hist = new int[256]; int at = 0, max = 0;
+        for (int i = 0; i < pa.Length; i++) { int d = Math.Abs(pa[i] - pb[i]); hist[d]++; if (d > max) { max = d; at = i; } }
+        int px = at / 4, w = a.Width;
+        var sb = new System.Text.StringBuilder();
+        sb.Append("diffs=").AppendJoin(' ', Enumerable.Range(1, 255).Where(d => hist[d] > 0).Select(d => $"{d}:{hist[d]}"));
+        sb.Append($" worst=({px % w},{px / w}) ch={at % 4}");
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            int q = (px + dx) * 4;
+            if (q < 0 || q + 3 >= pa.Length) continue;
+            sb.Append($" [{dx:+0;-0;0}] {pa[q]},{pa[q + 1]},{pa[q + 2]},{pa[q + 3]} vs {pb[q]},{pb[q + 1]},{pb[q + 2]},{pb[q + 3]}");
+        }
+        return sb.ToString();
+    }
+
     private static (double Mean, int Max) Diff(SKBitmap a, SKBitmap b)
     {
         var pa = a.Bytes; var pb = b.Bytes;
@@ -1353,7 +1372,7 @@ public class OptimizationTests
             long signedSum = 0;
             for (int i = 0; i < a.Length; i++) signedSum += a[i] - b[i];
             double bias = (double)signedSum / a.Length;
-            Assert.True(mean < 0.3 && max <= 3 && Math.Abs(bias) < 0.05, $"mean={mean:0.000} max={max} bias={bias:0.000}");
+            Assert.True(mean < 0.3 && max <= 3 && Math.Abs(bias) < 0.05, $"mean={mean:0.000} max={max} bias={bias:0.000} {WhereDiffers(mine, skia)}");
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
