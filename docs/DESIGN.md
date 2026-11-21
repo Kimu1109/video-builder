@@ -1105,7 +1105,7 @@ video-builder/
 - **波形・サムネイル・BPM グリッド**: テスト用の動画で表示を確認した。長時間の素材での速度は未計測。
 - **英語表示**: 主要な画面を確認した。エラーメッセージの一部 (FFmpeg やプラグインの読み込みエラーの詳細) は日本語のまま。
 - **実機での操作感**: 画面は仮想ディスプレイ上のスクリーンショットと UI 自動テストで確認した。Wayland・タイル型 WM・IME での動作は未確認。
-- **Linux の arm64**: CI の arm64 ランナーでテストと配布物の作成を回すだけで、実機 (Raspberry Pi 5 など) では動かしていない。ARM の GPU 描画・GPU でのデコードも未確認 ([22.36](#2236-linux-の-arm64))。
+- **Linux の arm64**: CI の arm64 ランナーでテストと配布物の作成を回すだけで、実機 (Raspberry Pi 5 など) では動かしていない。ARM の GPU 描画・V4L2 でのデコード・エンコードも、実機では未確認 ([22.36](#2236-linux-の-arm64)・[22.37](#2237-arm-の-gpu-描画と-v4l2-でのデコード))。
 
 ---
 
@@ -2223,8 +2223,40 @@ CI の arm64 で分かったこと: 書き出しの拡大を Skia の bicubic �
 
 注意すること:
 - arm64 の実機 (Raspberry Pi 5 など) での動作は、まだ確かめていない (22.4)。確かめるのは CI のランナー (Ubuntu 24.04) の上で、テストと、配布物を作れることまで。
-- ARM の GPU 描画 (Mali・Adreno・V3D などの EGL / OpenGL ES) と、GPU でのデコード (V4L2) は、まだ手を付けていない。`HardwareDecoding` は CUDA と VAAPI しか試さないので、ARM の多くの SoC では CPU でデコードする。ARM の SoC は、画面を出す装置と GPU が別の DRM デバイスであることが多く、`GpuContext` の「card N ↔ renderD(128+N)」の推測は外れやすい。
+- ARM の GPU 描画と V4L2 でのデコード → [22.37](#2237-arm-の-gpu-描画と-v4l2-でのデコード)。
 - GitHub の arm64 ランナーは、公開リポジトリでは無料。非公開にすると、有料のランナーになる。
+
+### 22.37 ARM の GPU 描画と V4L2 でのデコード
+
+Linux の arm64 ([22.36](#2236-linux-の-arm64)) で、ARM の SoC の GPU (V3D・Mali・Adreno など) での描画と、V4L2 の装置での動画のデコード・エンコードを使えるようにする。
+
+| 項目 | 内容 |
+|---|---|
+| GPU 描画 | 作りは x64 と同じ (EGL のデバイスを 1 つずつ開き、OpenGL ES 3 → 2 の順にコンテキストを作る)。ARM の GPU は名前で区別しないので、優先度は「その他の GPU」(10)。ソフトウェア (llvmpipe) より優先する |
+| レンダーノード | EGL がレンダーノードを教えないとき、`/sys/class/drm/cardN/device/drm/renderD*` (同じ装置の下) から探す。これまでは「card N ↔ renderD(128+N)」と推測していたが、ARM の SoC では画面を出す装置 (vc4・rockchip-drm など) と GPU (v3d・panfrost など) が別の DRM デバイスで、番号の対応が外れる。sysfs が読めないときだけ、番号で推測する |
+| 二重に並ぶ GPU | 画面を出すだけの装置 (レンダーノードがない) の EGL のデバイスも、実際には GPU で描くので、同じ GL_RENDERER が 2 つ並ぶ。レンダーノードのある、同じ名前の GPU があれば、ない方を一覧から外す |
+| デコード (V4L2 M2M) | Linux では、hwaccel (CUDA・VAAPI) のあとに、FFmpeg の V4L2 M2M のデコーダ (`h264_v4l2m2m`・`hevc_v4l2m2m`・`vp9_v4l2m2m` など) を試す。hwaccel ではなく別のデコーダで、デコードしたフレームはふつうのメモリにある (GPU 上の形式は NONE) ので、`VideoReader`・プロキシの作成はそのまま扱える。デコーダは `/dev/video*` からデコードできる装置を探す。開けなかったデコーダは覚えて、2 回目からは試さない |
+| 指定 | `VIDEO_BUILDER_HWDEC=v4l2m2m` で V4L2 だけを試す。ほかの種類 (`vaapi` など) を指定したら V4L2 は試さない |
+| 表示 | 環境設定 > 動画のデコード に、V4L2 の行 (FFmpeg にデコーダがあるか・開けたもの「使用中」・開けなかった理由) を出す |
+| エンコード | `h264_v4l2m2m` に加えて `hevc_v4l2m2m` を候補にした。使えるかは、これまでどおり開いてみて確かめる (`HardwareEncoders.Probe`) |
+| FFmpeg | `--enable-v4l2-m2m` は Linux で自動で有効になる (linux/videodev2.h があれば)。CI で、読み込んだ FFmpeg に `h264_v4l2m2m` などがあることを確かめる |
+| 実機の確認 | `tools/arm-check.sh` で、DRM デバイスとドライバ・レンダーノード・EGL・V4L2 の装置を表示する (何も変えない)。出力の最後に、アプリで見るところを出す |
+
+使えないもの:
+- ステートレスの V4L2 デコーダ (Raspberry Pi 5 の HEVC、Rockchip の rkvdec・hantro、Allwinner の cedrus など。`/dev/media*` と組で使う) は、FFmpeg の本体に入っていないので使えない。これらの SoC ではソフトウェアでデコードする。Raspberry Pi 5 には H.264 のデコーダがなく (CPU でデコードする前提)、エンコーダもない。
+- Rockchip の MPP (`h264_rkmpp`)・Jetson の NVMPI も FFmpeg の本体にない。
+- Flatpak: サンドボックスに入れる装置は `--device=dri` (GPU) だけで、`/dev/video*` は入らない。Flatpak には V4L2 の装置だけを許す設定がなく、`--device=all` は広すぎるので既定にはしない。使うときは `flatpak override --user --device=all io.github.kimu1109.VideoBuilder`。AppImage・tar.gz では使える。
+
+確かめたこと: CI (x64・arm64 のランナー。GPU も V4L2 の装置もない) で、V4L2 を試してからソフトウェアに戻り、絵が同じこと。sysfs の探し方と、二重に並ぶ GPU を外すこと (テスト用に作ったフォルダで)。**実機ではまだ確かめていない** (22.4)。
+
+**実機で確かめること**:
+
+| 機種の例 | GPU 描画 | デコード | エンコード |
+|---|---|---|---|
+| Raspberry Pi 4 (V3D 4.2・bcm2835-codec) | V3D で描けるか。CPU 描画より速いか | `h264_v4l2m2m` (ステートフル) で使えるはず | `h264_v4l2m2m` |
+| Raspberry Pi 5 (V3D 7.1) | 同上。画面を出す装置 (vc4) と GPU (v3d) が別の DRM デバイス | H.264 は CPU、HEVC はステートレスなので使えない | なし |
+| Rockchip RK3588 など (Mali-G610・Panfrost) | Panfrost で描けるか | ステートレスなので使えない | (ベンダーのカーネルなら MPP。使えない) |
+| Qualcomm (Adreno・Freedreno・venus) | Freedreno で描けるか | `h264_v4l2m2m`・`hevc_v4l2m2m` | `h264_v4l2m2m`・`hevc_v4l2m2m` |
 
 ---
 

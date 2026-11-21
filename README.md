@@ -145,10 +145,14 @@ FFmpeg を標準以外の場所に置いている場合は、環境変数 `VIDEO
 
 重い動画でも軽快に編集できるよう、次の仕組みを備えています。どれも基本は自動で働きます。
 
-- **GPU 描画**: GPU が使えれば GPU で、なければ自動で CPU で描画します (GPU 描画は Linux と Windows。macOS は今のところ CPU で描画します)。
-- **ハードウェアデコード**: NVDEC / VAAPI / VideoToolbox などを使います。使えなければ自動でソフトウェアに戻ります。
-- **ハードウェアエンコード**: NVENC / Quick Sync / VAAPI などが使える環境では、出力ダイアログの形式に自動で出ます。
+- **GPU 描画**: GPU が使えれば GPU で、なければ自動で CPU で描画します (GPU 描画は Linux (ARM のボードの GPU を含む) と Windows。macOS は今のところ CPU で描画します)。
+- **ハードウェアデコード**: NVDEC / VAAPI / VideoToolbox / V4L2 (Raspberry Pi 4 など ARM のボード) などを使います。使えなければ自動でソフトウェアに戻ります。
+- **ハードウェアエンコード**: NVENC / Quick Sync / VAAPI / V4L2 などが使える環境では、出力ダイアログの形式に自動で出ます。
 - **プロキシ編集**: 4K などの重い動画は、プレビュー用の小さな動画を自動で作って使います。
+
+### ARM のボードで使う
+
+Raspberry Pi などの ARM のボードで GPU やハードウェアデコードが使えないときは、`tools/arm-check.sh` を実行すると、GPU・V4L2 の装置の構成と、アプリで確かめるところが表示されます (何も変更しません)。Flatpak 版で V4L2 のデコードを使うには、`flatpak override --user --device=all io.github.kimu1109.VideoBuilder` が必要です。
 
 ### 使う GPU を選ぶ
 

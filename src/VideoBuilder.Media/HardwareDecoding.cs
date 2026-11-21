@@ -14,6 +14,10 @@ public enum HardwareDecodeMode
 /// <summary>
 /// GPU を使った動画のデコード (NVDEC・VAAPI・Quick Sync・VideoToolbox・D3D11VA など)。
 /// VideoReader から使う。デバイスは種類ごとに 1 つだけ作り、すべての動画で共有する。
+/// <para>
+/// Linux では最後に V4L2 M2M (h264_v4l2m2m などの専用のデコーダ。Raspberry Pi 4・Qualcomm・Amlogic など ARM の SoC の多く) も試す (設計書 22.37)。
+/// こちらは FFmpeg の hwaccel ではなく別のデコーダで、デコードしたフレームはふつうのメモリにある (GPU 上の形式は NONE)。
+/// </para>
 /// </summary>
 public static unsafe class HardwareDecoding
 {
@@ -21,7 +25,7 @@ public static unsafe class HardwareDecoding
     public static HardwareDecodeMode Mode { get; set; } = HardwareDecodeMode.Auto;
 
     /// <summary>
-    /// 試すデバイスを 1 つに絞る ("vaapi" "cuda" など)。null なら OS ごとの既定の順に試す。
+    /// 試すデバイスを 1 つに絞る ("vaapi" "cuda" "v4l2m2m" など)。null なら OS ごとの既定の順に試す。
     /// 環境変数 VIDEO_BUILDER_HWDEC でも指定できる ("off" でハードウェアデコードを使わない)。
     /// </summary>
     public static string? PreferredDevice { get; set; } = Environment.GetEnvironmentVariable("VIDEO_BUILDER_HWDEC") is { Length: > 0 } v && v != "off" ? v : null;
@@ -41,6 +45,7 @@ public static unsafe class HardwareDecoding
     {
         if (PreferredDevice != null)
         {
+            if (PreferredDevice == V4l2M2mName) return Array.Empty<AVHWDeviceType>();
             var t = ffmpeg.av_hwdevice_find_type_by_name(PreferredDevice);
             return t == AVHWDeviceType.AV_HWDEVICE_TYPE_NONE ? Array.Empty<AVHWDeviceType>() : new[] { t };
         }
@@ -103,12 +108,18 @@ public static unsafe class HardwareDecoding
             }
             Devices.Clear();
             Failures.Clear();
+            M2mFailures.Clear();
+            M2mOpened.Clear();
         }
     }
 
     private static readonly object Gate = new();
     private static readonly Dictionary<AVHWDeviceType, IntPtr> Devices = new();
     private static readonly Dictionary<AVHWDeviceType, string> Failures = new();
+    /// <summary>開けなかった V4L2 M2M のデコーダ (h264_v4l2m2m など) と理由。2 回目からは試さない。</summary>
+    private static readonly Dictionary<string, string> M2mFailures = new();
+    /// <summary>開けた V4L2 M2M のデコーダ (環境設定の表示用)。</summary>
+    private static readonly HashSet<string> M2mOpened = new();
 
     /// <summary>
     /// 種類ごとに共有するデバイスを返す (呼び出し側は av_buffer_ref して使う)。作れなければ null。
@@ -184,8 +195,90 @@ public static unsafe class HardwareDecoding
                 if (ctx != null) ffmpeg.avcodec_free_context(&ctx);
             }
         }
+        if (TriesV4l2M2m)
+        {
+            var m2m = OpenV4l2M2m(codec, st, extraFrames, out var m2mError);
+            if (m2m != null) { name = "V4L2"; return m2m; }
+            if (m2mError != null) reasons.Add(m2mError);
+        }
         error = reasons.Count == 0 ? "使えるデバイスがありません" : string.Join(" / ", reasons);
         return null;
+    }
+
+    /// <summary>VIDEO_BUILDER_HWDEC などで V4L2 M2M を指定するときの名前。</summary>
+    internal const string V4l2M2mName = "v4l2m2m";
+
+    /// <summary>V4L2 M2M のデコーダを試すか。Linux だけで、ほかの種類に絞っていなければ試す。</summary>
+    internal static bool TriesV4l2M2m => OperatingSystem.IsLinux() && (PreferredDevice == null || PreferredDevice == V4l2M2mName);
+
+    /// <summary>
+    /// コーデックに対応する V4L2 M2M のデコーダの名前 (FFmpeg の名前)。対応するものがなければ null。
+    /// FFmpeg が V4L2 なしで作られていれば、名前があっても avcodec_find_decoder_by_name で見つからない。
+    /// </summary>
+    internal static string? V4l2M2mDecoderName(AVCodecID id) => id switch
+    {
+        AVCodecID.AV_CODEC_ID_H264 => "h264_v4l2m2m",
+        AVCodecID.AV_CODEC_ID_HEVC => "hevc_v4l2m2m",
+        AVCodecID.AV_CODEC_ID_VP8 => "vp8_v4l2m2m",
+        AVCodecID.AV_CODEC_ID_VP9 => "vp9_v4l2m2m",
+        AVCodecID.AV_CODEC_ID_MPEG2VIDEO => "mpeg2_v4l2m2m",
+        AVCodecID.AV_CODEC_ID_MPEG4 => "mpeg4_v4l2m2m",
+        AVCodecID.AV_CODEC_ID_H263 => "h263_v4l2m2m",
+        AVCodecID.AV_CODEC_ID_VC1 => "vc1_v4l2m2m",
+        AVCodecID.AV_CODEC_ID_MPEG1VIDEO => "mpeg1_v4l2m2m",
+        _ => null,
+    };
+
+    /// <summary>
+    /// V4L2 M2M のデコーダ (h264_v4l2m2m など) を開く。開けなければ null (error に理由。対応するデコーダがなければ error も null)。
+    /// デコーダは /dev/video* からデコードできる装置を探すので、ない PC では開くのに失敗する。失敗はデコーダごとに覚える。
+    /// </summary>
+    private static AVCodecContext* OpenV4l2M2m(AVCodec* codec, AVStream* st, int extraFrames, out string? error)
+    {
+        error = null;
+        var decoderName = V4l2M2mDecoderName(codec->id);
+        if (decoderName == null) return null;
+        lock (Gate)
+        {
+            if (M2mFailures.TryGetValue(decoderName, out error)) return null;
+        }
+        var m2m = ffmpeg.avcodec_find_decoder_by_name(decoderName);
+        if (m2m == null) { error = $"V4L2: FFmpeg に {decoderName} がありません"; Remember(decoderName, error); return null; }
+        if (!HasV4l2Devices()) { error = NoV4l2Devices; Remember(decoderName, error); return null; }
+
+        var ctx = ffmpeg.avcodec_alloc_context3(m2m);
+        AVDictionary* opts = null;
+        int level = ffmpeg.av_log_get_level();
+        ffmpeg.av_log_set_level(ffmpeg.AV_LOG_QUIET);
+        try
+        {
+            if (ffmpeg.avcodec_parameters_to_context(ctx, st->codecpar) < 0) { error = "V4L2: デコーダの設定に失敗"; return null; }
+            // 取り出したフレームを手元に置く分 (プロキシの区切りなど) だけ、受け取る側の置き場を増やす (既定は 20)
+            if (extraFrames > 0) ffmpeg.av_dict_set(&opts, "num_capture_buffers", (20 + extraFrames).ToString(System.Globalization.CultureInfo.InvariantCulture), 0);
+            int ret = ffmpeg.avcodec_open2(ctx, m2m, &opts);
+            if (ret < 0)
+            {
+                // 装置はあるが、この形式をデコードできない (Raspberry Pi 5 の HEVC のようなステートレスの装置も、ここで失敗する)
+                error = $"V4L2 ({decoderName}): この形式をデコードできる装置がありません ({FFmpegLoader.ErrorText(ret)})";
+                Remember(decoderName, error);
+                return null;
+            }
+            var opened = ctx;
+            ctx = null;
+            lock (Gate) M2mOpened.Add(decoderName);
+            return opened;
+        }
+        finally
+        {
+            ffmpeg.av_log_set_level(level);
+            ffmpeg.av_dict_free(&opts);
+            if (ctx != null) ffmpeg.avcodec_free_context(&ctx);
+        }
+
+        static void Remember(string decoder, string reason)
+        {
+            lock (Gate) M2mFailures[decoder] = reason;
+        }
     }
 
     /// <summary>新しく開く動画でハードウェアデコードを試すか (設定と環境変数)。</summary>
@@ -243,7 +336,35 @@ public static unsafe class HardwareDecoding
             string where = DevicePath(type) is { } path ? type == AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA ? $" (GPU {path})" : $" ({path})" : "";
             lines.Add(ok ? $"{NameOf(type)}{where}: 使用可能" : error ?? $"{NameOf(type)}: 使用不可");
         }
+        if (TriesV4l2M2m) lines.Add(DescribeV4l2M2m());
         return lines.Count == 0 ? "使えるデバイスがありません" : string.Join("\n", lines);
+    }
+
+    private const string NoV4l2Devices = "V4L2: 装置 (/dev/video*) がありません";
+
+    /// <summary>V4L2 の装置 (/dev/video*) があるか。ない PC (多くの x64 の PC) では、デコーダを開いてみるまでもない。</summary>
+    private static bool HasV4l2Devices()
+    {
+        try { return Directory.EnumerateFileSystemEntries("/dev", "video*").Any(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>環境設定に出す V4L2 M2M の状態。デコーダは動画を開くときに試すので、ここでは FFmpeg にあるかと、これまでの結果だけを出す。</summary>
+    private static string DescribeV4l2M2m()
+    {
+        var names = new[] { AVCodecID.AV_CODEC_ID_H264, AVCodecID.AV_CODEC_ID_HEVC, AVCodecID.AV_CODEC_ID_VP9 }
+            .Select(V4l2M2mDecoderName).OfType<string>()
+            .Where(n => ffmpeg.avcodec_find_decoder_by_name(n) != null).ToList();
+        if (names.Count == 0) return "V4L2: FFmpeg が V4L2 なしで作られています";
+        if (!HasV4l2Devices()) return NoV4l2Devices;
+        List<string> lines;
+        lock (Gate)
+        {
+            lines = M2mOpened.Order(StringComparer.Ordinal).Select(n => $"V4L2 ({n}): 使用中").ToList();
+            lines.AddRange(names.Where(M2mFailures.ContainsKey).Select(n => M2mFailures[n]));
+        }
+        if (lines.Count > 0) return string.Join("\n", lines);
+        return $"V4L2 ({string.Join("・", names)}): 動画を開くときに試します";
     }
 
     /// <summary>テスト用: ソフトウェアでデコードしながら、ハードウェアで開けたように振る舞わせる (戻す処理の確認に使う)。</summary>
