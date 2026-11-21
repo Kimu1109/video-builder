@@ -497,6 +497,38 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public void Preferences_are_split_into_categories_that_fit_the_window()
+    {
+        var w = Open();
+        var d = new PreferencesDialog();
+        d.Show(w);
+        try
+        {
+            Pump();
+            var list = d.GetVisualDescendants().OfType<ListBox>().First();
+            Assert.Equal(6, list.ItemCount);
+            Assert.Equal(520, d.Height);        // 項目の数で縦に伸びない
+            for (int i = 0; i < list.ItemCount; i++)
+            {
+                list.SelectedIndex = i;
+                Pump();
+                d.CaptureRenderedFrame()?.Dispose();    // 切り替えた項目を組み立てる
+                Shot(d, "preferences-" + i);
+                var title = (string)((IList<string>)list.ItemsSource!)[i];
+                Assert.Contains(d.GetVisualDescendants().OfType<TextBlock>(), b => b.Text == L.T(title) && b.FontSize == 16);
+            }
+            // 開き直すと、最後に開いた分類から
+            d.Close();
+            d = new PreferencesDialog();
+            d.Show(w);
+            Pump();
+            Assert.Equal(5, d.GetVisualDescendants().OfType<ListBox>().First().SelectedIndex);
+            d.GetVisualDescendants().OfType<ListBox>().First().SelectedIndex = 0;
+        }
+        finally { d.Close(); }
+    }
+
+    [AvaloniaFact]
     public void Template_is_inserted_as_one_object_and_its_exposed_items_are_edited_in_the_properties()
     {
         var w = Open();

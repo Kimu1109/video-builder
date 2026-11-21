@@ -235,6 +235,7 @@ internal static class TranslationsEn
         ("変更したい操作のボタンを押してから、新しいキーを押してください。", "Click a command's button, then press the new key."),
         ("変更をやめました", "Change cancelled"),
         ("外観", "Appearance"),
+        ("情報", "About"),
         ("大 (32)", "Large (32)"),
         ("太字", "Bold"),
         ("字間", "Letter spacing"),
