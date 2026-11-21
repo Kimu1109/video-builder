@@ -1372,7 +1372,14 @@ public class OptimizationTests
             long signedSum = 0;
             for (int i = 0; i < a.Length; i++) signedSum += a[i] - b[i];
             double bias = (double)signedSum / a.Length;
-            Assert.True(mean < 0.3 && max <= 3 && Math.Abs(bias) < 0.05, $"mean={mean:0.000} max={max} bias={bias:0.000} {WhereDiffers(mine, skia)}");
+            // arm64: 比べる相手の Skia の bicubic が NEON で少し違う絵になり、暗い色が 0 に切られる透明との境目で 9 ほど差が出る。
+            // 自前の拡大は整数の計算 (Vector128) なので、x64 と arm64 で同じ絵になる (CI の arm64 ランナーで確かめた。設計書 22.36)。
+            // そのため arm64 では、大きな差を、ごく一部 (3 より大きい差が全体の 0.02% まで) に限って許す
+            int over3 = 0;
+            for (int i = 0; i < a.Length; i++) if (Math.Abs(a[i] - b[i]) > 3) over3++;
+            bool arm = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.Arm64;
+            bool fewLarge = arm ? max <= 12 && over3 <= a.Length / 5000 : max <= 3;
+            Assert.True(mean < 0.3 && fewLarge && Math.Abs(bias) < 0.05, $"mean={mean:0.000} max={max} over3={over3} bias={bias:0.000} {WhereDiffers(mine, skia)}");
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }

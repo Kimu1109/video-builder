@@ -2219,6 +2219,8 @@ Linux の arm64 (aarch64) にも、x64 と同じ作り (CPU で描画・デコ�
 
 Flatpak の build.sh とマニフェストで、入れるものの場所が食い違わないことを、テスト (`PackagingTests`) で確かめる。
 
+CI の arm64 で分かったこと: 書き出しの拡大を Skia の bicubic と比べるテストで、Skia の側が x64 と違う絵になる (暗い色が 0 に切られる透明との境目で、最大 9 の差。3 より大きい差は全体の 0.01%)。自前の拡大の絵は x64 と同じだった (いちばん差の大きい画素で比べた)。arm64 では、このテストの許す差を広げ、代わりに大きな差の数を 0.02% までに抑える。
+
 注意すること:
 - arm64 の実機 (Raspberry Pi 5 など) での動作は、まだ確かめていない (22.4)。確かめるのは CI のランナー (Ubuntu 24.04) の上で、テストと、配布物を作れることまで。
 - ARM の GPU 描画 (Mali・Adreno・V3D などの EGL / OpenGL ES) と、GPU でのデコード (V4L2) は、まだ手を付けていない。`HardwareDecoding` は CUDA と VAAPI しか試さないので、ARM の多くの SoC では CPU でデコードする。ARM の SoC は、画面を出す装置と GPU が別の DRM デバイスであることが多く、`GpuContext` の「card N ↔ renderD(128+N)」の推測は外れやすい。
