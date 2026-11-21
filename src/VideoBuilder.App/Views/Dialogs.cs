@@ -13,6 +13,8 @@ namespace VideoBuilder.App.Views;
 public class DialogBase : Window
 {
     protected readonly StackPanel Body = new() { Margin = new Thickness(16), Spacing = 8 };
+    /// <summary>下端のボタン列と本文を並べる入れ物。本文を別の作りにしたいダイアログは、Body を差し替える。</summary>
+    protected readonly DockPanel Root;
     protected readonly StackPanel Buttons = new() { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(12, 8) };
 
     public DialogBase(string title, double width)
@@ -25,11 +27,11 @@ public class DialogBase : Window
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         var footer = new Border { Child = Buttons, BorderThickness = new Thickness(0, 1, 0, 0) };
         footer.Classes.Add("panel");
-        var dock = new DockPanel();
+        Root = new DockPanel();
         DockPanel.SetDock(footer, Dock.Bottom);
-        dock.Children.Add(footer);
-        dock.Children.Add(Body);
-        Content = dock;
+        Root.Children.Add(footer);
+        Root.Children.Add(Body);
+        Content = Root;
         KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Escape) Close(); };
     }
 
@@ -142,6 +144,52 @@ public sealed class PreferencesDialog : DialogBase
     private Action? _showDecode;
     private void ShowDecodeLater() => _showDecode?.Invoke();
 
+    // 項目が多く縦に長くなるので、左に分類の一覧、右にその分類の項目を出す。最後に開いた分類を覚えておく (起動中だけ)
+    private static int _lastPage;
+    private readonly ListBox _categories = new() { SelectionMode = SelectionMode.Single, Background = Brushes.Transparent };
+    private readonly List<string> _categoryNames = new();
+    private readonly List<Control> _pages = new();
+    private readonly ContentControl _pageHost = new();
+
+    /// <summary>分類を 1 つ足して、その項目を入れる入れ物を返す。</summary>
+    private StackPanel AddPage(string name)
+    {
+        var panel = new StackPanel { Margin = new Thickness(20, 16), Spacing = 8 };
+        var title = new TextBlock { Text = name, FontSize = 16, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 0, 0, 4) };
+        panel.Children.Add(title);
+        _categoryNames.Add(name);
+        _pages.Add(new ScrollViewer { Content = panel, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled });
+        return panel;
+    }
+
+    private void ShowPage(int index)
+    {
+        _lastPage = index;
+        _pageHost.Content = _pages[index];
+        if (_categories.SelectedIndex != index) _categories.SelectedIndex = index;
+    }
+
+    /// <summary>本文を「分類の一覧 + 項目」の 2 段組みに差し替える。</summary>
+    private void BuildLayout()
+    {
+        SizeToContent = SizeToContent.Manual;
+        Height = 520;
+        MinWidth = 600;
+        MinHeight = 360;
+        CanResize = true;
+        Root.Children.Remove(Body);
+        _categories.ItemsSource = _categoryNames;
+        _categories.ContainerPrepared += (_, e) => { if (e.Container is ListBoxItem item) item.Padding = new Thickness(16, 8); };
+        _categories.SelectionChanged += (_, _) => { if (_categories.SelectedIndex >= 0) ShowPage(_categories.SelectedIndex); };
+        var side = new Border { Child = _categories, Width = 168, BorderThickness = new Thickness(0, 0, 1, 0), Padding = new Thickness(0, 8) };
+        side.Classes.Add("panel");
+        var body = new DockPanel();
+        DockPanel.SetDock(side, Dock.Left);
+        body.Children.Add(side);
+        body.Children.Add(_pageHost);
+        Root.Children.Add(body);
+    }
+
     /// <summary>「使う GPU」の一覧を作る。一覧は描画と同じ方法 (EGL のデバイス列挙) で調べる。</summary>
     private static async Task FillGpuListAsync(ComboBox combo, TextBlock note, Action changed)
     {
@@ -197,7 +245,7 @@ public sealed class PreferencesDialog : DialogBase
         };
     }
 
-    public PreferencesDialog() : base("環境設定", 440)
+    public PreferencesDialog() : base("環境設定", 720)
     {
         var s = Svc.Settings;
         ComboBox Combo(string[] items, int index, Action<int> changed)
@@ -206,21 +254,22 @@ public sealed class PreferencesDialog : DialogBase
             c.SelectionChanged += (_, _) => { if (c.SelectedIndex >= 0) { changed(c.SelectedIndex); s.Save(); } };
             return c;
         }
+        StackPanel page;
 
-        Body.Children.Add(Heading("外観"));
+        page = AddPage("外観");
         // 言語名はどの表示言語でも読めるよう、それぞれの言語で書く
-        Body.Children.Add(Row("言語", Combo(new[] { "自動", "日本語", "English" }, (int)s.Language, i => s.Language = (Language)i)));
+        page.Children.Add(Row("言語", Combo(new[] { "自動", "日本語", "English" }, (int)s.Language, i => s.Language = (Language)i)));
         var langNote = new TextBlock { Text = "言語の変更は、次回起動時に反映されます。", TextWrapping = TextWrapping.Wrap };
         langNote.Classes.Add("secondary");
-        Body.Children.Add(langNote);
-        Body.Children.Add(Row("編集モード", Combo(new[] { "詳細編集 (AviUtl 風)", "シンプル編集 (ムービーメーカー風)" }, (int)s.EditorMode, i =>
+        page.Children.Add(langNote);
+        page.Children.Add(Row("編集モード", Combo(new[] { "詳細編集 (AviUtl 風)", "シンプル編集 (ムービーメーカー風)" }, (int)s.EditorMode, i =>
         {
             EditorCommands.SetEditorMode((EditorMode)i);
         })));
         var modeNote = new TextBlock { Text = "シンプル編集は、動画・写真を並べて切り替え効果・キャプション・音楽を付けるだけの簡単な編集画面です。", TextWrapping = TextWrapping.Wrap };
         modeNote.Classes.Add("secondary");
-        Body.Children.Add(modeNote);
-        Body.Children.Add(Row("テーマ", Combo(new[] { "システムに従う", "ライト", "ダーク" }, (int)s.Theme, i => { s.Theme = (ThemeMode)i; Svc.Theme.Apply(); })));
+        page.Children.Add(modeNote);
+        page.Children.Add(Row("テーマ", Combo(new[] { "システムに従う", "ライト", "ダーク" }, (int)s.Theme, i => { s.Theme = (ThemeMode)i; Svc.Theme.Apply(); })));
 
         var custom = new ColorPicker { Color = Color.TryParse(s.CustomAccent, out var cc) ? cc : Colors.DodgerBlue, IsAlphaEnabled = false, IsAlphaVisible = false, HorizontalAlignment = HorizontalAlignment.Left, IsEnabled = s.Accent == AccentMode.Custom };
         custom.ColorChanged += (_, e) =>
@@ -229,39 +278,39 @@ public sealed class PreferencesDialog : DialogBase
             s.Save();
             if (s.Accent == AccentMode.Custom) Svc.Theme.Apply();
         };
-        Body.Children.Add(Row("アクセントカラー", Combo(new[] { "システムに従う", "アプリ既定 (青)", "カスタム" }, (int)s.Accent, i =>
+        page.Children.Add(Row("アクセントカラー", Combo(new[] { "システムに従う", "アプリ既定 (青)", "カスタム" }, (int)s.Accent, i =>
         {
             s.Accent = (AccentMode)i; custom.IsEnabled = s.Accent == AccentMode.Custom; Svc.Theme.Apply();
         })));
-        Body.Children.Add(Row("カスタム色", custom));
-        Body.Children.Add(Row("ウィンドウ", Combo(new[] { "自動 (1 つのウィンドウにまとめる)", "ウィンドウを分ける", "1 つのウィンドウにまとめる" }, (int)s.WindowMode, i =>
+        page.Children.Add(Row("カスタム色", custom));
+        page.Children.Add(Row("ウィンドウ", Combo(new[] { "自動 (1 つのウィンドウにまとめる)", "ウィンドウを分ける", "1 つのウィンドウにまとめる" }, (int)s.WindowMode, i =>
         {
             s.WindowMode = (WindowMode)i; EditorCommands.ApplyWindowMode();
         })));
-        Body.Children.Add(Row("レイヤーの高さ", Combo(new[] { "小 (20)", "中 (24)", "大 (32)" }, s.LayerHeight <= 20 ? 0 : s.LayerHeight <= 24 ? 1 : 2, i =>
+        page.Children.Add(Row("レイヤーの高さ", Combo(new[] { "小 (20)", "中 (24)", "大 (32)" }, s.LayerHeight <= 20 ? 0 : s.LayerHeight <= 24 ? 1 : 2, i =>
         {
             s.LayerHeight = new[] { 20, 24, 32 }[i]; Svc.Session.NotifyChanged();
         })));
 
-        Body.Children.Add(Heading("描画"));
+        page = AddPage("描画");
         var backend = new TextBlock { TextWrapping = TextWrapping.Wrap };
         backend.Classes.Add("secondary");
         void ShowBackend() => backend.Text = "現在: " + Svc.Preview.BackendDescription;
         Svc.Preview.BackendChanged += ShowBackend;
         Closed += (_, _) => Svc.Preview.BackendChanged -= ShowBackend;
-        Body.Children.Add(Row("描画方式", Combo(new[] { "自動 (GPU があれば使う)", "GPU", "CPU" }, (int)s.RenderBackend, i =>
+        page.Children.Add(Row("描画方式", Combo(new[] { "自動 (GPU があれば使う)", "GPU", "CPU" }, (int)s.RenderBackend, i =>
         {
             s.RenderBackend = (RenderBackend)i; Svc.Preview.ReloadBackend();
         })));
         ShowBackend();
-        Body.Children.Add(backend);
+        page.Children.Add(backend);
 
         // 使う GPU: CPU 内蔵と外付けの GPU があるとき、どちらで描くか (調べるのに少し時間がかかるので、裏で一覧を作る)
         var gpu = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch, IsEnabled = false, PlaceholderText = L.T("GPU を調べています...") };
         var gpuNote = new TextBlock { TextWrapping = TextWrapping.Wrap };
         gpuNote.Classes.Add("secondary");
-        Body.Children.Add(Row("使う GPU", gpu));
-        Body.Children.Add(gpuNote);
+        page.Children.Add(Row("使う GPU", gpu));
+        page.Children.Add(gpuNote);
         _ = FillGpuListAsync(gpu, gpuNote, ShowDecodeLater);
         var decodeInfo = new TextBlock { TextWrapping = TextWrapping.Wrap, Text = "確認中..." };
         decodeInfo.Classes.Add("secondary");
@@ -271,28 +320,28 @@ public sealed class PreferencesDialog : DialogBase
             var text = await Task.Run(VideoBuilder.Media.HardwareDecoding.Describe);
             decodeInfo.Text = text;
         }
-        Body.Children.Add(Row("動画のデコード", Combo(new[] { "自動 (GPU があれば使う)", "ソフトウェアのみ" }, s.HardwareDecode == VideoBuilder.Media.HardwareDecodeMode.Auto ? 0 : 1, i =>
+        page.Children.Add(Row("動画のデコード", Combo(new[] { "自動 (GPU があれば使う)", "ソフトウェアのみ" }, s.HardwareDecode == VideoBuilder.Media.HardwareDecodeMode.Auto ? 0 : 1, i =>
         {
             s.HardwareDecode = i == 0 ? VideoBuilder.Media.HardwareDecodeMode.Auto : VideoBuilder.Media.HardwareDecodeMode.Off;
             VideoBuilder.Media.HardwareDecoding.Mode = s.HardwareDecode;
             Svc.Preview.ReloadBackend();     // 開いている動画を閉じて、新しい設定で開き直す
             ShowDecode();
         })));
-        Body.Children.Add(decodeInfo);
+        page.Children.Add(decodeInfo);
         ShowDecode();
         _showDecode = ShowDecode;
 
-        Body.Children.Add(Heading("プロキシ"));
+        page = AddPage("プロキシ");
         var useProxy = new CheckBox { Content = "プレビューでプロキシを使う (出力には使わない)", IsChecked = s.UseProxies };
         useProxy.IsCheckedChanged += (_, _) =>
         {
             s.UseProxies = useProxy.IsChecked == true; VideoBuilder.Media.ProxyStore.Enabled = s.UseProxies; s.Save(); Svc.Preview.Request();
         };
-        Body.Children.Add(useProxy);
+        page.Children.Add(useProxy);
         var autoProxy = new CheckBox { Content = "再生が重くなりそうな動画は自動でプロキシを作る (4K・H.265 など。この PC でのデコードの速さも測って決める)", IsChecked = s.AutoProxy };
         autoProxy.IsCheckedChanged += (_, _) => { s.AutoProxy = autoProxy.IsChecked == true; s.Save(); };
-        Body.Children.Add(autoProxy);
-        Body.Children.Add(Row("プロキシの大きさ", Combo(new[] { "縦横 1/2", "縦横 1/4" }, s.ProxyDivisor == 4 ? 1 : 0, i =>
+        page.Children.Add(autoProxy);
+        page.Children.Add(Row("プロキシの大きさ", Combo(new[] { "縦横 1/2", "縦横 1/4" }, s.ProxyDivisor == 4 ? 1 : 0, i =>
         {
             s.ProxyDivisor = i == 1 ? 4 : 2;
             VideoBuilder.Media.ProxyStore.Divisor = s.ProxyDivisor;
@@ -304,35 +353,35 @@ public sealed class PreferencesDialog : DialogBase
         var clearProxies = new Button { Content = "すべてのプロキシを削除", HorizontalAlignment = HorizontalAlignment.Left };
         clearProxies.Click += (_, _) => { Svc.Proxies.CancelAll(); VideoBuilder.Media.ProxyStore.Clear(); ShowProxySize(); };
         ShowProxySize();
-        Body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { clearProxies, proxySize } });
+        page.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { clearProxies, proxySize } });
 
-        Body.Children.Add(Heading("編集"));
-        Body.Children.Add(Row("プレビュー品質", Combo(new[] { "自動 (表示の大きさ)", "フル", "1/2", "1/4" },
+        page = AddPage("編集");
+        page.Children.Add(Row("プレビュー品質", Combo(new[] { "自動 (表示の大きさ)", "フル", "1/2", "1/4" },
             s.PreviewDivisor <= 0 ? 0 : s.PreviewDivisor >= 4 ? 3 : s.PreviewDivisor >= 2 ? 2 : 1, i =>
         {
             s.PreviewDivisor = new[] { 0, 1, 2, 4 }[i]; Svc.Preview.Request();
         })));
         var seconds = new NumberBox { Minimum = 0.1, Maximum = 600, Decimals = 1, Value = s.DefaultObjectSeconds, Width = 80, HorizontalAlignment = HorizontalAlignment.Left };
         seconds.Committed += v => { s.DefaultObjectSeconds = v; s.Save(); };
-        Body.Children.Add(Row("新規オブジェクトの長さ (秒)", seconds, 180));
+        page.Children.Add(Row("新規オブジェクトの長さ (秒)", seconds, 180));
         var crossfade = new NumberBox { Minimum = 0.05, Maximum = 30, Decimals = 2, Value = s.CrossfadeSeconds, Width = 80, HorizontalAlignment = HorizontalAlignment.Left };
         crossfade.Committed += v => { s.CrossfadeSeconds = v; s.Save(); };
-        Body.Children.Add(Row("クロスフェードの長さ (秒)", crossfade, 180));
+        page.Children.Add(Row("クロスフェードの長さ (秒)", crossfade, 180));
         var auto = new CheckBox { Content = $"自動保存する ({s.AutoSaveMinutes} 分ごと)", IsChecked = s.AutoSave };
         auto.IsCheckedChanged += (_, _) => { s.AutoSave = auto.IsChecked == true; s.Save(); };
-        Body.Children.Add(auto);
+        page.Children.Add(auto);
 
         var wave = new CheckBox { Content = "音声の波形をタイムラインに表示する", IsChecked = s.ShowWaveform };
         wave.IsCheckedChanged += (_, _) => { s.ShowWaveform = wave.IsChecked == true; s.Save(); Svc.Session.NotifyChanged(); };
-        Body.Children.Add(wave);
+        page.Children.Add(wave);
         var thumbs = new CheckBox { Content = "動画・画像のサムネイルをタイムラインに表示する", IsChecked = s.ShowThumbnails };
         thumbs.IsCheckedChanged += (_, _) => { s.ShowThumbnails = thumbs.IsChecked == true; s.Save(); Svc.Session.NotifyChanged(); };
-        Body.Children.Add(thumbs);
+        page.Children.Add(thumbs);
         var keys = new IconButton { Icon = Icons.Get("Tune"), Text = "ショートカットの設定...", HorizontalAlignment = HorizontalAlignment.Left };
         keys.Click += async (_, _) => await new ShortcutDialog().ShowDialog(this);
-        Body.Children.Add(keys);
+        page.Children.Add(keys);
 
-        Body.Children.Add(Heading("テンプレート"));
+        page = AddPage("テンプレート");
         var shared = new TextBox { Text = s.SharedTemplateDir, Watermark = "(使わない)", IsReadOnly = true };
         void SetShared(string dir)
         {
@@ -352,12 +401,13 @@ public sealed class PreferencesDialog : DialogBase
         var sharedRow = new DockPanel();
         DockPanel.SetDock(clearShared, Dock.Right); DockPanel.SetDock(pickShared, Dock.Right);
         sharedRow.Children.Add(clearShared); sharedRow.Children.Add(pickShared); sharedRow.Children.Add(shared);
-        Body.Children.Add(Row("共有フォルダ", sharedRow));
+        page.Children.Add(Row("共有フォルダ", sharedRow));
         var sharedNote = new TextBlock { Text = "チームの共有ドライブなどを指定すると、そこのテンプレートもライブラリに並びます (読むだけ)。", TextWrapping = TextWrapping.Wrap };
         sharedNote.Classes.Add("secondary");
-        Body.Children.Add(sharedNote);
+        page.Children.Add(sharedNote);
 
-        Body.Children.Add(Heading("プラグイン"));
+        page = AddPage("情報");
+        page.Children.Add(Heading("プラグイン"));
         var plugins = VideoBuilder.Rendering.PluginLoader.Loaded;
         var pluginText = new TextBlock
         {
@@ -366,17 +416,19 @@ public sealed class PreferencesDialog : DialogBase
                    + $"\n置き場所: {AppPaths.PluginDir}",
         };
         pluginText.Classes.Add("secondary");
-        Body.Children.Add(pluginText);
+        page.Children.Add(pluginText);
 
-        Body.Children.Add(Heading("FFmpeg"));
+        page.Children.Add(Heading("FFmpeg"));
         var ff = new TextBlock
         {
             TextWrapping = TextWrapping.Wrap,
             Text = FFmpegLoader.EnsureLoaded() ? $"FFmpeg {FFmpegLoader.Version} を使用中" : "FFmpeg が見つかりません。動画・音声の読み込みと出力は使えません。\n" + FFmpegLoader.Error,
         };
         ff.Classes.Add("secondary");
-        Body.Children.Add(ff);
+        page.Children.Add(ff);
 
+        BuildLayout();
+        ShowPage(Math.Clamp(_lastPage, 0, _pages.Count - 1));
         AddButton("閉じる", Close, accent: true);
     }
 }
