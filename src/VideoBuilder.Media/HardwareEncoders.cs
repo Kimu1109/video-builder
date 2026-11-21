@@ -18,7 +18,7 @@ public static class HardwareEncoders
         new("h264_vaapi", "H.264", "VAAPI"), new("hevc_vaapi", "H.265", "VAAPI"), new("av1_vaapi", "AV1", "VAAPI"),
         new("h264_amf", "H.264", "AMF"), new("hevc_amf", "H.265", "AMF"), new("av1_amf", "AV1", "AMF"),
         new("h264_videotoolbox", "H.264", "VideoToolbox"), new("hevc_videotoolbox", "H.265", "VideoToolbox"),
-        new("h264_v4l2m2m", "H.264", "V4L2"),
+        new("h264_v4l2m2m", "H.264", "V4L2"), new("hevc_v4l2m2m", "H.265", "V4L2"),   // ARM の SoC (設計書 22.37)
     };
 
     /// <summary>エンコーダ名から仕組みの種類を返す ("nvenc" など)。ソフトウェアエンコーダなら空文字。</summary>

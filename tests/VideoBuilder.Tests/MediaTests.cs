@@ -342,6 +342,46 @@ public class HardwareDecodingTests : IDisposable
     }
 
     [Fact]
+    public unsafe void V4l2_decoders_are_named_after_the_codec()
+    {
+        Assert.Equal("h264_v4l2m2m", HardwareDecoding.V4l2M2mDecoderName(FFmpeg.AutoGen.AVCodecID.AV_CODEC_ID_H264));
+        Assert.Equal("hevc_v4l2m2m", HardwareDecoding.V4l2M2mDecoderName(FFmpeg.AutoGen.AVCodecID.AV_CODEC_ID_HEVC));
+        Assert.Equal("mpeg2_v4l2m2m", HardwareDecoding.V4l2M2mDecoderName(FFmpeg.AutoGen.AVCodecID.AV_CODEC_ID_MPEG2VIDEO));
+        Assert.Null(HardwareDecoding.V4l2M2mDecoderName(FFmpeg.AutoGen.AVCodecID.AV_CODEC_ID_PRORES));
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        // 名前を間違えていないこと: FFmpeg のデコーダの一覧にある名前か (V4L2 なしで作った FFmpeg では見つからないので、Linux の CI でだけ確かめる)
+        if (OperatingSystem.IsLinux() && Environment.GetEnvironmentVariable("VB_REQUIRE_FFMPEG") == "1")
+            foreach (var id in new[] { FFmpeg.AutoGen.AVCodecID.AV_CODEC_ID_H264, FFmpeg.AutoGen.AVCodecID.AV_CODEC_ID_HEVC, FFmpeg.AutoGen.AVCodecID.AV_CODEC_ID_VP9 })
+                Assert.True(FFmpeg.AutoGen.ffmpeg.avcodec_find_decoder_by_name(HardwareDecoding.V4l2M2mDecoderName(id)) != null, $"{HardwareDecoding.V4l2M2mDecoderName(id)} がありません");
+    }
+
+    [Fact]
+    public void V4l2_decoding_is_tried_on_linux_and_falls_back_to_software_without_a_device()
+    {
+        if (!_ready || !OperatingSystem.IsLinux()) return;
+        var software = ReadAll(HardwareDecodeMode.Off, out var off);
+        off.Dispose();
+        HardwareDecoding.PreferredDevice = HardwareDecoding.V4l2M2mName;
+        Assert.Empty(HardwareDecoding.DeviceOrder());                   // hwaccel (VAAPI など) は試さない
+        Assert.True(HardwareDecoding.TriesV4l2M2m);
+        var frames = ReadAll(HardwareDecodeMode.Auto, out var r);
+        using (r)
+        {
+            Console.WriteLine($"V4L2 here: {r.DecoderName} ({r.HardwareError ?? "-"})");
+            if (r.IsHardware) Assert.Equal("V4L2", r.DecoderName);     // ARM の SoC など、デコードできる装置がある
+            else Assert.Contains("V4L2", r.HardwareError);             // CI など: 装置がないので、ソフトウェアに戻る
+            // H.264 のデコードは結果が決まっているので、どちらでも同じ絵になる
+            for (int i = 0; i < Times.Length; i++) Assert.Equal(software[i], frames[i]);
+        }
+        if (r.IsHardware) return;
+        // 開けなかったことは覚えておき、2 回目はすぐに諦める
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        using (var again = new VideoReader(_clip)) Assert.False(again.IsHardware);
+        Assert.Contains("V4L2", HardwareDecoding.Describe());
+        Console.WriteLine($"2 回目: {sw.ElapsedMilliseconds} ms");
+    }
+
+    [Fact]
     public void Format_choice_prefers_the_gpu_format_and_otherwise_a_software_one()
     {
         if (!FFmpegLoader.EnsureLoaded()) return;
@@ -369,6 +409,7 @@ public class HardwareDecodingTests : IDisposable
         }
         HardwareDecoding.PreferredDevice = "no-such-device";
         Assert.Empty(HardwareDecoding.DeviceOrder());
+        Assert.False(HardwareDecoding.TriesV4l2M2m);                    // ほかの種類に絞ったら V4L2 も試さない
         if (!_ready) return;
         HardwareDecoding.Mode = HardwareDecodeMode.Auto;
         using var r = new VideoReader(_clip);

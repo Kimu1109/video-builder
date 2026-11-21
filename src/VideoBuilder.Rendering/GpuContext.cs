@@ -474,15 +474,49 @@ public sealed unsafe class GpuContext : IDisposable
             string devExt = Str(device, EGL_EXTENSIONS);
             string drm = devExt.Contains("EGL_EXT_device_drm") ? Str(device, EGL_DRM_DEVICE_FILE_EXT) : "";
             string render = devExt.Contains("EGL_EXT_device_drm_render_node") ? Str(device, EGL_DRM_RENDER_NODE_FILE_EXT) : "";
-            if (render.Length == 0 && drm.StartsWith("/dev/dri/card") && int.TryParse(drm["/dev/dri/card".Length..], out int card))
-                render = $"/dev/dri/renderD{128 + card}";   // 古いドライバ: 番号の対応から推測する (多くの環境で card N ↔ renderD(128+N))
+            if (render.Length == 0) render = RenderNodeFor(drm);   // 古いドライバ: sysfs から探す
             // 名前 (GL_RENDERER) は、実際にコンテキストを作って調べる
             using var ctx = OpenDisplay(PlatformDisplayExt(EGL_PLATFORM_DEVICE_EXT, device, null), out _);
             if (ctx == null) continue;
             bool software = ctx.IsSoftware || devExt.Contains("EGL_MESA_device_software");
             result.Add((new GpuAdapter(result.Count, ctx.Renderer, ctx.Vendor, drm, File.Exists(render) ? render : "", software), device));
         }
+        var kept = WithoutDisplayOnlyDuplicates(result.Select(x => x.Adapter).ToList());
+        var devicesOf = result.ToDictionary(x => x.Adapter.Index, x => x.Device);
+        result.Clear();
+        foreach (var a in kept) result.Add((a with { Index = result.Count }, devicesOf[a.Index]));
     }
+
+    /// <summary>
+    /// DRM のデバイスファイル (/dev/dri/cardN) に対応するレンダーノード (/dev/dri/renderD*) を探す。なければ空。
+    /// sysfs の同じ装置の下 (/sys/class/drm/cardN/device/drm/) にあるレンダーノードを使う。
+    /// ARM の SoC では、画面を出す装置 (vc4・rockchip-drm など) と GPU (v3d・panfrost など) が別の DRM デバイスなので、
+    /// 「card N ↔ renderD(128+N)」の番号の対応は当てにならない。sysfs が読めないときだけ、番号の対応で推測する。
+    /// </summary>
+    public static string RenderNodeFor(string drmDevice, string sysClassDrm = "/sys/class/drm")
+    {
+        const string prefix = "/dev/dri/card";
+        if (!drmDevice.StartsWith(prefix, StringComparison.Ordinal) || !int.TryParse(drmDevice[prefix.Length..], out int card)) return "";
+        var dir = Path.Combine(sysClassDrm, $"card{card}", "device", "drm");
+        try
+        {
+            if (Directory.Exists(dir))
+            {
+                var node = Directory.EnumerateFileSystemEntries(dir, "renderD*").Select(Path.GetFileName).OrderBy(n => n, StringComparer.Ordinal).FirstOrDefault();
+                return node == null ? "" : $"/dev/dri/{node}";   // 画面を出すだけの装置にはレンダーノードがない
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        return $"/dev/dri/renderD{128 + card}";   // sysfs が読めない: 多くの PC では card N ↔ renderD(128+N)
+    }
+
+    /// <summary>
+    /// 画面を出すだけの DRM デバイス (レンダーノードがない) で開いたものが、ほかの GPU と同じ GPU で描いていれば一覧から外す。
+    /// ARM の SoC では、画面を出す装置 (例: vc4) の EGL のデバイスも、実際には GPU (例: V3D) で描くので、同じ名前が 2 つ並んでしまうため。
+    /// </summary>
+    public static List<GpuAdapter> WithoutDisplayOnlyDuplicates(List<GpuAdapter> adapters) =>
+        adapters.Where(a => a.RenderNode.Length > 0 || a.DrmDevice.Length == 0 || a.IsSoftware
+                            || !adapters.Any(b => b != a && b.RenderNode.Length > 0 && !b.IsSoftware && SameGpu(a.Name, b.Name))).ToList();
 
     /// <summary>eglGetPlatformDisplayEXT (属性は int)。</summary>
     private static IntPtr PlatformDisplayExt(int platform, IntPtr native, int[]? attribs)

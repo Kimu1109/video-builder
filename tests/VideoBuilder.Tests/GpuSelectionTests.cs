@@ -154,4 +154,45 @@ public class GpuSelectionTests
         }
         finally { GpuContext.PreferredAdapter = old; }
     }
+
+    [Fact]
+    public void Render_node_is_found_under_the_same_device_in_sysfs()
+    {
+        // ARM の SoC (Raspberry Pi 5 など): card0 が GPU (v3d、renderD128)、card1 が画面を出すだけの装置 (vc4、レンダーノードなし)
+        var sys = Path.Combine(Path.GetTempPath(), $"vb-sysfs-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(sys, "card0", "device", "drm", "card0"));
+            Directory.CreateDirectory(Path.Combine(sys, "card0", "device", "drm", "renderD128"));
+            Directory.CreateDirectory(Path.Combine(sys, "card1", "device", "drm", "card1"));
+            Assert.Equal("/dev/dri/renderD128", GpuContext.RenderNodeFor("/dev/dri/card0", sys));
+            Assert.Equal("", GpuContext.RenderNodeFor("/dev/dri/card1", sys));               // 番号から renderD129 と推測しない
+            Assert.Equal("/dev/dri/renderD130", GpuContext.RenderNodeFor("/dev/dri/card2", sys));   // sysfs にない: これまでどおり番号で推測
+            Assert.Equal("", GpuContext.RenderNodeFor("", sys));
+        }
+        finally { Directory.Delete(sys, true); }
+    }
+
+    [Fact]
+    public void A_display_only_device_drawing_with_the_same_gpu_is_not_listed_twice()
+    {
+        var v3d = new GpuAdapter(0, "V3D 7.1.7.0", "Broadcom", "/dev/dri/card0", "/dev/dri/renderD128", false);
+        var vc4 = new GpuAdapter(1, "V3D 7.1.7.0", "Broadcom", "/dev/dri/card1", "", false);
+        Assert.Equal(new[] { v3d }, GpuContext.WithoutDisplayOnlyDuplicates(new List<GpuAdapter> { v3d, vc4 }));
+        // 名前の違う GPU (NVIDIA のプロプライエタリのドライバはレンダーノードを返さないことがある) は残す
+        Assert.Equal(new[] { Intel, Nvidia, Llvmpipe }, GpuContext.WithoutDisplayOnlyDuplicates(new List<GpuAdapter> { Intel, Nvidia, Llvmpipe }));
+        // レンダーノードが分からないものしかなければ、そのまま
+        Assert.Equal(new[] { vc4 }, GpuContext.WithoutDisplayOnlyDuplicates(new List<GpuAdapter> { vc4 }));
+    }
+
+    [Fact]
+    public void Arm_gpus_are_chosen_automatically_over_software_rendering()
+    {
+        foreach (var name in new[] { "V3D 7.1.7.0", "V3D 4.2.14.0", "Mali-G610 (Panfrost)", "FD618", "Mali-G52 r1 (Panfrost)" })
+        {
+            var gpu = new GpuAdapter(0, name, "Mesa", "/dev/dri/card0", "/dev/dri/renderD128", false);
+            Assert.True(gpu.Score > 0, name);
+            Assert.Equal(gpu, GpuContext.ChooseAdapter(new[] { Llvmpipe, gpu }, null));
+        }
+    }
 }
