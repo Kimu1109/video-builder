@@ -1,4 +1,5 @@
-# video-builder の Flatpak マニフェスト。packaging/flatpak/build.sh から使う (先に linux-x64 向けに発行しておく)。
+# video-builder の Flatpak マニフェスト。packaging/flatpak/build.sh から使う
+# (build.sh が linux-x64 か linux-arm64 向けに発行して、artifacts/flatpak/publish に写しておく)。
 #
 # ランタイムは Freedesktop 25.08。video-builder は FFmpeg 9 (libavcodec.so.63) 用のバインディングを使うので、
 # ランタイムの FFmpeg は使わず、FFmpeg 9 を x264・x265 と一緒にソースから作って /app/lib に入れる (設計書 22.33)。
@@ -119,7 +120,7 @@ modules:
       - install -Dm644 -t /app/share/licenses/video-builder LICENSE COPYING COPYING.LESSER THIRD_PARTY_NOTICES.md
     sources:
       - type: dir
-        path: ../../artifacts/publish/linux-x64
+        path: ../../artifacts/flatpak/publish   # 作るアーキテクチャ向けに発行したもの (build.sh が写す)
         dest: publish
       - type: file
         path: ../video-builder.desktop

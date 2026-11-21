@@ -29,6 +29,17 @@ public class PackagingTests
     }
 
     [Fact]
+    public void Flatpak_takes_the_app_from_where_its_build_script_puts_it()
+    {
+        // マニフェストは決まった場所から入れ、build.sh がそこに x64 か arm64 向けに発行したものを写す (設計書 22.36)
+        var buildScript = File.ReadAllText(Path.Combine(Root(), "packaging", "flatpak", "build.sh"));
+        Assert.Matches(@"path: \.\./\.\./artifacts/flatpak/publish\s", Manifest);
+        Assert.Contains("cp -a \"$root/artifacts/publish/linux-$arch\" \"$out/publish\"", buildScript);
+        Assert.Contains("out=\"$root/artifacts/flatpak\"", buildScript);
+        Assert.DoesNotContain("artifacts/publish/linux-", Manifest);   // アーキテクチャを決め打ちしない
+    }
+
+    [Fact]
     public void Flatpak_and_the_build_script_use_the_same_ffmpeg_source()
     {
         var version = Regex.Match(Script, "FFMPEG_VERSION=\"([^\"]+)\"").Groups[1].Value;

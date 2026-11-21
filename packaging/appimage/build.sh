@@ -3,6 +3,8 @@
 #
 #   packaging/appimage/build.sh [x64|arm64]
 #
+# アーキテクチャを省くと、この PC のもの (uname -m) にする。FFmpeg を同梱するので、作れるのはこの PC と同じアーキテクチャだけ。
+#
 # 必要なもの: .NET 10 SDK。appimagetool が PATH にあれば AppImage まで作り、
 # なければ AppDir (展開した状態) を作ったところで止まる。
 #
@@ -12,12 +14,22 @@
 # 配布物全体は GPL-3.0-or-later の条件で配る (THIRD_PARTY_NOTICES.md)。
 set -euo pipefail
 
-arch="${1:-x64}"
+case "$(uname -m)" in
+  x86_64) host=x64 ;;
+  aarch64|arm64) host=arm64 ;;
+  *) host="" ;;
+esac
+arch="${1:-$host}"
 case "$arch" in
   x64) appimage_arch=x86_64 ;;
   arm64) appimage_arch=aarch64 ;;
   *) echo "対応していないアーキテクチャ: $arch" >&2; exit 1 ;;
 esac
+# FFmpeg はこの PC 向けにしか作れないので、ほかのアーキテクチャの AppImage は、そのアーキテクチャの PC で作る
+if [ "$arch" != "$host" ]; then
+  echo "FFmpeg を同梱するため、$appimage_arch の AppImage は $appimage_arch の PC で作ってください (この PC は $(uname -m))" >&2
+  exit 1
+fi
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 out="$root/artifacts/appimage"
@@ -31,11 +43,6 @@ dotnet publish "$root/src/VideoBuilder.App" -c Release -r "linux-$arch" --self-c
   -p:DebugType=none -p:PublishSingleFile=false -p:PublishReadyToRun=true -o "$appdir/usr/bin"
 
 # FFmpeg と、それが使うコーデックのライブラリを同梱する (FFmpegLoader は実行ファイルの隣の ffmpeg フォルダを探す)
-# FFmpeg はこの PC 向けにしか作れないので、ほかのアーキテクチャの AppImage は、そのアーキテクチャの PC で作る
-if [ "$appimage_arch" != "$(uname -m)" ]; then
-  echo "FFmpeg を同梱するため、$appimage_arch の AppImage は $appimage_arch の PC で作ってください" >&2
-  exit 1
-fi
 "$root/packaging/ffmpeg/build.sh" --prefix "$root/artifacts/ffmpeg/linux-$arch" --bundle "$appdir/usr/bin/ffmpeg"
 # ライセンスの文書
 mkdir -p "$appdir/usr/share/licenses/video-builder"

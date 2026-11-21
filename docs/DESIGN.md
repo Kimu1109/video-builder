@@ -1105,6 +1105,7 @@ video-builder/
 - **波形・サムネイル・BPM グリッド**: テスト用の動画で表示を確認した。長時間の素材での速度は未計測。
 - **英語表示**: 主要な画面を確認した。エラーメッセージの一部 (FFmpeg やプラグインの読み込みエラーの詳細) は日本語のまま。
 - **実機での操作感**: 画面は仮想ディスプレイ上のスクリーンショットと UI 自動テストで確認した。Wayland・タイル型 WM・IME での動作は未確認。
+- **Linux の arm64**: CI の arm64 ランナーでテストと配布物の作成を回すだけで、実機 (Raspberry Pi 5 など) では動かしていない。ARM の GPU 描画・GPU でのデコードも未確認 ([22.36](#2236-linux-の-arm64))。
 
 ---
 
@@ -2203,6 +2204,25 @@ Linux (22.28) と同じ方法は使えない。代わりに、Direct3D 11 の共
 - 「使う GPU」に内蔵 GPU と RTX 4070 の両方が出て、どちらでも描画できた。
 - 2K の映像のプレビューが、どちらの GPU でも 60fps で安定した。CPU 描画との差はあまりなかった (プロキシが効いているため)。
 - ハードウェアエンコード (NVENC) での出力ができ、速かった。
+
+### 22.36 Linux の arm64
+
+Linux の arm64 (aarch64) にも、x64 と同じ作り (CPU で描画・デコード、FFmpeg 9 を同梱) で対応する。コードは変えずに、ビルド・テスト・配布物の作り方を arm64 でも回す。
+
+| 項目 | 内容 |
+|---|---|
+| コード | 変更なし。SIMD は `Vector128`/`Vector256` (機種に依存しない API) で書いてあり、arm64 では `Vector256` が速く動かないので `Vector128` (NEON) の処理になる。SkiaSharp・HarfBuzzSharp は linux-arm64 のライブラリが NuGet に入っている。`FFmpegLoader` は `/usr/lib/aarch64-linux-gnu` も探す |
+| CI (`ci.yml`) | `test` の job を `ubuntu-24.04` と `ubuntu-24.04-arm` (GitHub の arm64 ランナー。エミュレーションなし) の 2 つで流す。FFmpeg のキャッシュはアーキテクチャごとに分ける (`runner.arch` をキーに入れる) |
+| 配布物 (`package.yml`) | `linux` の job (x64・arm64): FFmpeg を作って同梱 → 同梱したライブラリが同梱のものを参照していること (`ldd`) → 同梱の FFmpeg だけでテストの一部 → 発行して tar.gz → AppImage。`flatpak` の job (x64・arm64): 発行したものを使って、その CPU のランナーで Flatpak を組み立てる |
+| AppImage | `packaging/appimage/build.sh [x64\|arm64]`。省くとこの PC のアーキテクチャ。FFmpeg を同梱するので、ほかのアーキテクチャを指定したら、発行の前に止める。CI では appimagetool を FUSE なしで動かす (`APPIMAGE_EXTRACT_AND_RUN=1`) |
+| Flatpak | `packaging/flatpak/build.sh [--bundle] [--arch x64\|arm64]`。省くとこの PC のアーキテクチャ。マニフェストには変数を書けないので、発行したものを決まった場所 (`artifacts/flatpak/publish`) に写して、マニフェストはそこから入れる。バンドルの名前は `video-builder-<arch>.flatpak` |
+
+Flatpak の build.sh とマニフェストで、入れるものの場所が食い違わないことを、テスト (`PackagingTests`) で確かめる。
+
+注意すること:
+- arm64 の実機 (Raspberry Pi 5 など) での動作は、まだ確かめていない (22.4)。確かめるのは CI のランナー (Ubuntu 24.04) の上で、テストと、配布物を作れることまで。
+- ARM の GPU 描画 (Mali・Adreno・V3D などの EGL / OpenGL ES) と、GPU でのデコード (V4L2) は、まだ手を付けていない。`HardwareDecoding` は CUDA と VAAPI しか試さないので、ARM の多くの SoC では CPU でデコードする。ARM の SoC は、画面を出す装置と GPU が別の DRM デバイスであることが多く、`GpuContext` の「card N ↔ renderD(128+N)」の推測は外れやすい。
+- GitHub の arm64 ランナーは、公開リポジトリでは無料。非公開にすると、有料のランナーになる。
 
 ---
 

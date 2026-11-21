@@ -6,8 +6,13 @@ on:
   pull_request:
 
 jobs:
+  # Linux の x64 と arm64 (設計書 22.36)。arm64 は GitHub の arm64 ランナーで、エミュレーションなしで動かす
   test:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -16,13 +21,13 @@ jobs:
       - name: Install OpenAL, software OpenGL ES, a Japanese font and FFmpeg's codec libraries
         run: sudo apt-get update && sudo apt-get install -y nasm libx264-dev libx265-dev libvpx-dev libopus-dev libdav1d-dev libffmpeg-nvenc-dev libva-dev libdrm-dev libopenal1 fonts-ipafont-gothic libegl1 libgles2 libgl1-mesa-dri xvfb
       # Ubuntu 24.04 の FFmpeg は 6.1 なので、配布物と同じ FFmpeg 9 (x264・x265 入り) をソースから作る (設計書 22.31)。
-      # 作ったものはキャッシュする (作り方の script が変わったら作り直す)
+      # 作ったものはキャッシュする (作り方の script が変わったら作り直す。x64 と arm64 は別々に持つ)
       - name: Cache FFmpeg
         id: ffmpeg-cache
         uses: actions/cache@v4
         with:
           path: ~/ffmpeg
-          key: ffmpeg-${{ runner.os }}-${{ hashFiles('packaging/ffmpeg/build.sh') }}
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packaging/ffmpeg/build.sh') }}
       - name: Build FFmpeg
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         run: packaging/ffmpeg/build.sh --prefix "$HOME/ffmpeg"
