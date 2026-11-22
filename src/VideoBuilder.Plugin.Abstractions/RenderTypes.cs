@@ -26,6 +26,12 @@ public sealed class RenderContext
     public bool Draft { get; init; }
     /// <summary>GPU で描くときの Skia コンテキスト。null なら CPU で描く。</summary>
     public GRContext? Gpu { get; init; }
+    /// <summary>画像ファイルを読む (キャッシュ付き。返した画像は破棄しない)。効果が別のファイルを使うとき (画像ファイル合成など) に使う。</summary>
+    public Func<string, SKImage?>? LoadImage { get; init; }
+    /// <summary>
+    /// 動画ファイルのフレームを読む (キー, パス, 秒, ループ)。キーはデコーダを使い分けるための文字列。返した画像は破棄しない。
+    /// </summary>
+    public Func<string, string, double, bool, SKImage?>? LoadVideoFrame { get; init; }
 
     /// <summary>作業用の描画先を作る。GPU 描画中は GPU 上に作るので、フィルタも GPU で処理される。</summary>
     public SKSurface? CreateSurface(int width, int height)

@@ -28,6 +28,23 @@ public static class EffectRegistry
     {
         "フェード", "ワイプ (左から)", "ワイプ (右から)", "ワイプ (上から)", "ワイプ (下から)", "円形ワイプ",
         "スライド (左から)", "スライド (右から)", "スライド (上から)", "スライド (下から)", "ズーム",
+        // 番号はプロジェクトファイルに残るので、増やすときは末尾に足す
+        "ぼかし", "回転ズーム", "ポップ", "時計回りワイプ", "ブラインド (横)", "ブラインド (縦)", "ひし形ワイプ",
+        "ランダム方向から", "縮小して登場", "落ちて登場 (ランダムな間隔)", "弾んで登場", "広がって登場", "起き上がって登場",
+        "何処からともなく登場", "点滅して登場",
+    };
+    /// <summary>エフェクト「アニメーション効果」の種類。番号はプロジェクトファイルに残るので、増やすときは末尾に足す。</summary>
+    public static readonly string[] AnimationTypes =
+    {
+        "震える", "点滅", "回転", "鼓動 (拡大縮小)", "揺れ (傾く)", "浮遊 (上下)", "弾む", "横揺れ",
+        "振り子", "反復移動", "回転 (X軸・リール)", "回転 (Y軸)", "立方体の面",
+    };
+    /// <summary>エフェクト「アニメーション効果」の立方体の面。</summary>
+    public static readonly string[] CubeFaces = { "前", "後ろ", "右", "左", "上", "下" };
+    /// <summary>画像ファイル合成・動画ファイル合成の合成モード。</summary>
+    public static readonly string[] FileBlendModes =
+    {
+        "通常", "加算", "乗算", "スクリーン", "オーバーレイ", "比較(明)", "比較(暗)", "輝度", "カラー", "ハードライト", "差分",
     };
 
     public static readonly string[] VideoExtensions = { "mp4", "mkv", "mov", "webm", "avi", "m4v", "ts", "flv", "wmv", "mpg" };
@@ -195,7 +212,7 @@ public static class EffectRegistry
 
         // ---- フィルタ効果 ----
         void F(string id, string name, string icon, params ParamDefinition[] ps) =>
-            Register(new EffectDefinition { Id = id, Name = name, Category = EffectCategory.Filter, Icon = icon, Color = "#7A7A7A", Params = ps });
+            Register(new EffectDefinition { Id = id, Name = name, Category = EffectCategory.Filter, Icon = icon, Color = "#7A7A7A", Params = ps, Group = FilterGroupOf(id) });
 
         F("filter.color", "色調補正", "Icon.Tune",
             T("brightness", "明るさ", 0, 200, 100), T("contrast", "コントラスト", 0, 200, 100),
@@ -219,6 +236,167 @@ public static class EffectRegistry
         F("filter.transition", "トランジション", "Icon.Gradient",
             new ParamDefinition { Key = "type", Name = "種類", Kind = ParamKind.Choice, Choices = TransitionTypes },
             T("in", "イン (秒)", 0, 60, 0.5, 2, 0, 5), T("out", "アウト (秒)", 0, 60, 0, 2, 0, 5), T("feather", "ぼかし", 0, 1000, 20, 0, 0, 200));
+        // ---- ぼかし・光 (重い処理は複数スレッド・縮小計算で速くしている) ----
+        F("filter.glow", "グロー", "Icon.LightMode",
+            T("strength", "強さ", 0, 400, 100, 1, 0, 300), T("radius", "拡散", 0, 1000, 20, 0, 0, 200),
+            T("threshold", "しきい値", 0, 100, 60, 1), Col("color", "光の色 (空欄で元の色)", ""), C("only", "光だけを描く"),
+            new ParamDefinition { Key = "shape", Name = "光の形", Kind = ParamKind.Choice, Choices = new[] { "通常", "十字", "横", "縦" } });
+        F("filter.emit", "発光", "Icon.LightMode",
+            T("strength", "強さ", 0, 400, 100, 1, 0, 300), T("radius", "拡散", 0, 1000, 30, 0, 0, 200),
+            T("threshold", "しきい値", 0, 100, 80, 1), Col("color", "光の色 (空欄で元の色)", ""), C("only", "光だけを描く"));
+        F("filter.diffuse", "拡散光", "Icon.LightMode", T("strength", "強さ", 0, 100, 60, 1), T("radius", "拡散", 0, 1000, 30, 0, 0, 200));
+        F("filter.flash", "閃光", "Icon.LightMode",
+            T("strength", "強さ", 0, 400, 100, 1, 0, 300), T("length", "長さ (%)", 0, 400, 50, 1, 0, 200), T("threshold", "しきい値", 0, 100, 60, 1),
+            T("x", "中心X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "中心Y", -99999.9, 99999.9, 0, 1, -2000, 2000), C("only", "光だけを描く"));
+        F("filter.light", "ライト", "Icon.LightMode",
+            T("strength", "強さ", 0, 800, 100, 1, 0, 300), T("width", "幅", 0, 500, 20, 0, 0, 100),
+            T("angle", "光の向き", -3600, 3600, -45, 1, -360, 360), T("direction", "向きの強さ (%)", 0, 100, 50, 1), Col("color", "光の色", "#FFFFFF"));
+        F("filter.dirblur", "方向ブラー", "Icon.BlurOn",
+            T("length", "長さ", 0, 2000, 30, 0, 0, 300), T("angle", "角度", -3600, 3600, 0, 1, -360, 360), C("fixed", "サイズ固定"));
+        F("filter.radialblur", "放射ブラー", "Icon.BlurOn",
+            T("amount", "強さ", 0, 400, 20, 1, 0, 100),
+            T("x", "中心X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "中心Y", -99999.9, 99999.9, 0, 1, -2000, 2000));
+        F("filter.sharpen", "シャープ", "Icon.Tune", T("amount", "強さ", 0, 500, 100, 1, 0, 300), T("radius", "範囲", 0, 100, 2, 1, 0, 20));
+        F("filter.chromatic", "色ずれ (色収差)", "Icon.Style",
+            T("amount", "ずれ", -500, 500, 6, 1, -50, 50), T("angle", "角度", -3600, 3600, 0, 1, -360, 360), C("radial", "中心から外へずらす"),
+            new ParamDefinition { Key = "type", Name = "ずらす色", Kind = ParamKind.Choice, Choices = new[] { "赤と青", "赤と緑", "緑と青" } });
+        F("filter.raster", "ラスター (波)", "Icon.Gradient",
+            T("amplitude", "振幅", -2000, 2000, 20, 1, -200, 200), T("wavelength", "波長", 1, 10000, 120, 0, 1, 1000),
+            T("speed", "速さ (回/秒)", -100, 100, 1, 2, -10, 10), C("vertical", "縦方向"));
+        F("filter.noise", "ノイズ", "Icon.GridOn",
+            T("amount", "強さ", 0, 100, 20, 1), T("size", "粒の大きさ", 1, 200, 1, 0, 1, 20),
+            C("color", "カラーノイズ"), C("animate", "毎フレーム変える", true), T("seed", "乱数シード", 0, 99999, 0, 0, 0, 100));
+        // ---- 色・形 ----
+        F("filter.vignette", "周辺減光", "Icon.Filter",
+            T("strength", "強さ", 0, 100, 60, 1), T("size", "大きさ (%)", 0, 200, 50, 1), T("softness", "ぼかし (%)", 0, 200, 60, 1),
+            Col("color", "色", "#000000"));
+        F("filter.gradient", "グラデーション", "Icon.Gradient",
+            T("strength", "強さ", 0, 100, 100, 1), T("x", "中心X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "中心Y", -99999.9, 99999.9, 0, 1, -2000, 2000),
+            T("angle", "角度", -3600, 3600, 0, 1, -360, 360), T("width", "幅", 0, 16384, 200, 0, 0, 2000),
+            Col("color1", "色 1", "#FFFFFF"), Col("color2", "色 2", "#000000"));
+        F("filter.diagclip", "斜めクリッピング", "Icon.Crop",
+            T("x", "中心X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "中心Y", -99999.9, 99999.9, 0, 1, -2000, 2000),
+            T("angle", "角度", -3600, 3600, 0, 1, -360, 360), T("feather", "ぼかし", 0, 1000, 0, 0, 0, 200));
+        F("filter.levels", "レベル補正", "Icon.Tune",
+            T("inBlack", "入力の黒", 0, 255, 0, 0), T("inWhite", "入力の白", 0, 255, 255, 0), T("gamma", "ガンマ", 0.1, 10, 1, 2, 0.1, 3),
+            T("outBlack", "出力の黒", 0, 255, 0, 0), T("outWhite", "出力の白", 0, 255, 255, 0));
+        F("filter.posterize", "ポスタリゼーション", "Icon.Palette", T("levels", "段階数", 2, 256, 6, 0, 2, 32));
+        F("filter.extcolor", "拡張色設定", "Icon.Palette",
+            T("r", "赤 (R)", -255, 255, 0, 0), T("g", "緑 (G)", -255, 255, 0, 0), T("b", "青 (B)", -255, 255, 0, 0));
+        F("filter.hueconvert", "特定色域変換", "Icon.Palette",
+            Col("from", "変える色", "#FF0000"), Col("to", "変えた後の色", "#0000FF"), T("hue", "色相のずらし", -360, 360, 0, 1),
+            T("range", "色相の範囲", 0, 180, 20, 1), T("edge", "境界補正", 0, 180, 15, 1),
+            T("saturation", "彩度 (%)", 0, 400, 100, 1, 0, 200), T("value", "明るさ (%)", 0, 400, 100, 1, 0, 200));
+        // ---- キー ----
+        F("filter.colorkey", "カラーキー", "Icon.Colorize",
+            Col("color", "キー色", "#FFFFFF"), T("luma", "輝度範囲", 0, 255, 16, 0), T("chroma", "色差範囲", 0, 255, 16, 0), T("edge", "境界補正", 0, 100, 10, 0));
+        F("filter.lumakey", "ルミナンスキー", "Icon.Colorize",
+            T("level", "基準輝度", 0, 255, 64, 0), T("soft", "ぼかし", 0, 255, 32, 0),
+            new ParamDefinition { Key = "type", Name = "透明にする所", Kind = ParamKind.Choice, Choices = new[] { "暗い部分", "明るい部分" } });
+        // ---- 縁・輪郭 ----
+        F("filter.bevel", "凸エッジ", "Icon.BorderStyle",
+            T("width", "幅", 0, 500, 8, 0, 0, 100), T("height", "高さ", 0, 400, 100, 1, 0, 300), T("angle", "光の向き", -3600, 3600, -45, 1, -360, 360));
+        F("filter.edge", "エッジ抽出", "Icon.BorderStyle",
+            T("strength", "強さ", 0, 1000, 100, 1, 0, 400), T("threshold", "しきい値", 0, 100, 10, 1),
+            new ParamDefinition { Key = "type", Name = "種類", Kind = ParamKind.Choice, Choices = new[] { "明るさのエッジ", "透明度のエッジ" } },
+            Col("color", "線の色", "#FFFFFF"), C("overlay", "元の絵に重ねる"));
+        F("filter.edgeblur", "境界ぼかし", "Icon.BlurOn", T("radius", "範囲", 0, 1000, 10, 0, 0, 200));
+        // ---- ぼかし (追加) ----
+        F("filter.lensblur", "レンズブラー", "Icon.BlurOn",
+            T("radius", "範囲", 0, 1000, 10, 1, 0, 100), T("boost", "光の強さ", 0, 100, 0, 1), C("fixed", "サイズ固定"));
+        F("filter.motionblur", "モーションブラー", "Icon.BlurOn", T("shutter", "間隔 (%)", 0, 1000, 100, 1, 0, 400));
+        // ---- 変形 ----
+        F("filter.ripple", "波紋", "Icon.Gradient",
+            T("amplitude", "振幅", -1000, 1000, 10, 1, -100, 100), T("wavelength", "波長", 1, 10000, 60, 0, 1, 500),
+            T("speed", "速さ (回/秒)", -100, 100, 1, 2, -10, 10), T("decay", "減衰 (0 でなし)", 0, 10000, 0, 0, 0, 1000),
+            T("x", "中心X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "中心Y", -99999.9, 99999.9, 0, 1, -2000, 2000));
+        F("filter.polar", "極座標変換", "Icon.Gradient",
+            T("zoom", "拡大率", 1, 1000, 100, 1, 1, 300), T("hole", "中心の穴", 0, 4000, 0, 0, 0, 500),
+            T("rotation", "回転", -3600, 3600, 0, 1, -360, 360), T("swirl", "渦巻", -1000, 1000, 0, 1, -300, 300));
+        {
+            static ParamDefinition DS(ParamDefinition d, params int[] shapes) => new()
+            {
+                Key = d.Key, Name = d.Name, Min = d.Min, Max = d.Max, Default = d.Default, Decimals = d.Decimals, SoftMin = d.SoftMin, SoftMax = d.SoftMax,
+                ShowWhenKey = "shape", ShowWhenValues = shapes,
+            };
+            F("filter.displace", "ディスプレイスメントマップ", "Icon.Gradient",
+                new ParamDefinition { Key = "shape", Name = "形", Kind = ParamKind.Choice, Choices = new[] { "円", "四角形", "画像ファイル" } },
+                new ParamDefinition { Key = "mode", Name = "変形方法", Kind = ParamKind.Choice, Choices = new[] { "移動", "拡大", "回転" }, ShowWhenKey = "shape", ShowWhenValues = new[] { 0, 1 } },
+                T("param1", "変形量 (移動 X・拡大 %・角度)", -10000, 10000, 50, 1, -500, 500),
+                T("param2", "変形量 (移動 Y)", -10000, 10000, 0, 1, -500, 500),
+                DS(T("x", "中心X", -99999.9, 99999.9, 0, 1, -2000, 2000), 0, 1), DS(T("y", "中心Y", -99999.9, 99999.9, 0, 1, -2000, 2000), 0, 1),
+                DS(T("size", "サイズ", 1, 16384, 200, 0, 1, 2000), 0, 1), DS(T("aspect", "縦横比", -100, 100, 0, 1), 0, 1),
+                DS(T("feather", "ぼかし (%)", 0, 100, 50, 1), 0, 1),
+                new ParamDefinition { Key = "file", Name = "画像ファイル", Kind = ParamKind.File, FileExtensions = ImageExtensions, ShowWhenKey = "shape", ShowWhenValues = new[] { 2 } });
+        }
+        F("filter.mirror", "ミラー", "Icon.Flip",
+            new ParamDefinition { Key = "direction", Name = "向き", Kind = ParamKind.Choice, Choices = new[] { "下", "上", "右", "左" } },
+            T("alpha", "透明度", 0, 100, 50, 1), T("fade", "減衰 (%)", 0, 100, 60, 1), T("gap", "境目の間隔", -2000, 2000, 0, 0, -100, 200));
+        F("filter.kaleido", "万華鏡", "Icon.Category",
+            T("count", "分割数", 1, 180, 4, 0, 1, 24), T("rotation", "回転", -3600, 3600, 0, 1, -360, 360),
+            T("x", "中心X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "中心Y", -99999.9, 99999.9, 0, 1, -2000, 2000), C("clamp", "端を伸ばす"));
+        F("filter.sphere", "球体", "Icon.Category",
+            T("size", "大きさ (0 で自動)", 0, 8192, 0, 0, 0, 2000), T("rx", "X軸回転", -3600, 3600, 0, 1, -360, 360),
+            T("ry", "Y軸回転", -3600, 3600, 0, 1, -360, 360), T("rz", "Z軸回転", -3600, 3600, 0, 1, -360, 360),
+            T("spin", "自転の速さ (回/秒)", -100, 100, 0, 2, -5, 5), T("shade", "陰影", 0, 100, 40, 1));
+        F("filter.freeform", "簡易変形", "Icon.Transform",
+            T("x1", "左上X", -99999.9, 99999.9, 0, 1, -1000, 1000), T("y1", "左上Y", -99999.9, 99999.9, 0, 1, -1000, 1000),
+            T("x2", "右上X", -99999.9, 99999.9, 0, 1, -1000, 1000), T("y2", "右上Y", -99999.9, 99999.9, 0, 1, -1000, 1000),
+            T("x3", "右下X", -99999.9, 99999.9, 0, 1, -1000, 1000), T("y3", "右下Y", -99999.9, 99999.9, 0, 1, -1000, 1000),
+            T("x4", "左下X", -99999.9, 99999.9, 0, 1, -1000, 1000), T("y4", "左下Y", -99999.9, 99999.9, 0, 1, -1000, 1000));
+        // ---- その他 ----
+        F("filter.basic", "基本効果", "Icon.Transform",
+            T("x", "X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "Y", -99999.9, 99999.9, 0, 1, -2000, 2000),
+            T("rotation", "回転", -3600, 3600, 0, 2, -360, 360), T("scale", "拡大率", 0, 5000, 100, 2, 0, 800),
+            T("alpha", "透明度", 0, 100, 0), T("aspect", "縦横比", -100, 100, 0, 1));
+        F("filter.shake", "振動", "Icon.Transform",
+            T("x", "X", 0, 4000, 10, 1, 0, 200), T("y", "Y", 0, 4000, 10, 1, 0, 200), T("z", "Z", 0, 4000, 0, 1, 0, 200),
+            T("rotation", "回転", 0, 360, 0, 1, 0, 90), T("period", "周期 (フレーム)", 1, 1000, 1, 0, 1, 30),
+            T("seed", "乱数シード", 0, 99999, 0, 0, 0, 100), C("smooth", "なめらかに揺らす"), C("perObject", "オブジェクトごとに揺れ方を変える", true));
+        F("filter.loop", "画像ループ", "Icon.GridOn",
+            T("countX", "横の数", 1, 100, 2, 0, 1, 20), T("countY", "縦の数", 1, 100, 2, 0, 1, 20),
+            T("speedX", "横の速さ (px/秒)", -100000, 100000, 0, 1, -2000, 2000), T("speedY", "縦の速さ (px/秒)", -100000, 100000, 0, 1, -2000, 2000));
+        F("filter.imageblend", "画像ファイル合成", "Icon.Image",
+            new ParamDefinition { Key = "file", Name = "ファイル", Kind = ParamKind.File, FileExtensions = ImageExtensions },
+            T("x", "X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "Y", -99999.9, 99999.9, 0, 1, -2000, 2000),
+            T("scale", "拡大率", 0, 5000, 100, 2, 0, 800), T("alpha", "透明度", 0, 100, 0),
+            new ParamDefinition { Key = "blend", Name = "合成モード", Kind = ParamKind.Choice, Choices = FileBlendModes }, C("tile", "ループ画像 (敷き詰める)"));
+        F("filter.videoblend", "動画ファイル合成", "Icon.Movie",
+            new ParamDefinition { Key = "file", Name = "ファイル", Kind = ParamKind.File, FileExtensions = VideoExtensions.Concat(AnimatedImageFiles.Extensions).ToArray() },
+            T("position", "開始位置", 0, 36000, 0, 2, 0, 600), T("speed", "再生速度", 0, 2000, 100, 1, 0, 400), C("loopVideo", "ループ再生", true),
+            T("x", "X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "Y", -99999.9, 99999.9, 0, 1, -2000, 2000),
+            T("scale", "拡大率", 0, 5000, 100, 2, 0, 800), T("alpha", "透明度", 0, 100, 0),
+            new ParamDefinition { Key = "blend", Name = "合成モード", Kind = ParamKind.Choice, Choices = FileBlendModes }, C("tile", "ループ画像 (敷き詰める)"));
+        F("filter.deinterlace", "インターレース解除", "Icon.Tune",
+            new ParamDefinition { Key = "mode", Name = "方式", Kind = ParamKind.Choice, Choices = new[] { "奇数の行", "偶数の行", "二重化", "平均" } });
+        // ---- 配置・動き ----
+        F("filter.shatter", "砕け散る", "Icon.Category",
+            T("start", "開始 (秒)", 0, 3600, 0, 2, 0, 10), T("speed", "速さ", 0, 10000, 400, 0, 0, 2000), T("gravity", "重力", -10000, 10000, 600, 0, -2000, 3000),
+            T("spin", "回転の速さ", 0, 3600, 360, 0, 0, 1080), T("size", "破片の大きさ", 2, 1000, 40, 0, 2, 200),
+            T("x", "中心X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "中心Y", -99999.9, 99999.9, 0, 1, -2000, 2000),
+            T("fade", "消えるまで (秒, 0 で消えない)", 0, 3600, 1.5, 2, 0, 10), T("seed", "乱数シード", 0, 99999, 0, 0, 0, 100));
+        F("filter.circle", "円形配置", "Icon.Category",
+            T("count", "個数", 1, 1000, 6, 0, 1, 36), T("radius", "半径", -10000, 10000, 200, 1, 0, 1000),
+            T("rotation", "回転", -3600, 3600, 0, 1, -360, 360), T("spin", "回る速さ (回/秒)", -100, 100, 0, 2, -5, 5),
+            T("scale", "拡大率", 0, 5000, 100, 1, 0, 400), C("face", "外側に向ける"));
+        F("filter.random", "ランダム配置", "Icon.Category",
+            T("count", "個数", 1, 2000, 10, 0, 1, 200), T("width", "範囲の幅", 0, 20000, 1000, 0, 0, 4000), T("height", "範囲の高さ", 0, 20000, 600, 0, 0, 4000),
+            T("sizeVar", "大きさのばらつき (%)", 0, 100, 0, 1), T("rotVar", "回転のばらつき", 0, 360, 0, 1), T("seed", "乱数シード", 0, 99999, 0, 0, 0, 100));
+        // ---- 動き (キーフレームを打たずに動かす) ----
+        static ParamDefinition AT(string key, string name, double min, double max, double def, int dec, double? softMin, double? softMax, params int[] types) =>
+            new() { Key = key, Name = name, Min = min, Max = max, Default = def, Decimals = dec, SoftMin = softMin, SoftMax = softMax, ShowWhenKey = "type", ShowWhenValues = types };
+        F("filter.anim", "アニメーション効果", "Icon.Play",
+            new ParamDefinition { Key = "type", Name = "種類", Kind = ParamKind.Choice, Choices = AnimationTypes },
+            AT("strength", "強さ", -99999, 99999, 20, 1, 0, 200, 0, 3, 4, 5, 6, 7, 8),
+            AT("speed", "速さ (回/秒)", -100, 100, 1, 2, -10, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+            AT("dx", "移動量X", -99999, 99999, 200, 1, -2000, 2000, 9), AT("dy", "移動量Y", -99999, 99999, 0, 1, -2000, 2000, 9),
+            new ParamDefinition { Key = "face", Name = "面", Kind = ParamKind.Choice, Choices = CubeFaces, ShowWhenKey = "type", ShowWhenValues = new[] { 12 } },
+            AT("cube", "立方体の大きさ (0 で幅)", 0, 99999, 0, 0, 0, 2000, 12),
+            AT("rate", "揺れる回数 (回/秒)", 0.1, 240, 30, 1, 0.1, 60, 0),
+            AT("rotation", "回転の揺れ", 0, 360, 0, 1, 0, 45, 0),
+            AT("seed", "乱数シード", 0, 99999, 0, 0, 0, 100, 0),
+            AT("depth", "消える濃さ (%)", 0, 100, 100, 1, null, null, 1),
+            new ParamDefinition { Key = "smooth", Name = "なめらかに揺らす", Kind = ParamKind.Check, ShowWhenKey = "type", ShowWhenValues = new[] { 0 } });
         F("filter.script", "スクリプト制御", "Icon.Code",
             new ParamDefinition { Key = "code", Name = "Lua スクリプト", Kind = ParamKind.MultilineText, DefaultText = "-- obj.ox, obj.oy : 位置のずれ   obj.zoom : 拡大率 (1 = 等倍)\n-- obj.rz : 回転   obj.alpha : 不透明度 (1 = そのまま)\nobj.oy = math.sin(obj.time * 4) * 20" });
 
@@ -282,6 +460,28 @@ public static class EffectRegistry
         yield return new() { Key = "dashOffset", Name = "破線のずらし", Min = -100000, Max = 100000, Default = 0, Decimals = 1, SoftMin = -200, SoftMax = 200, ShowWhenKey = "dash", ShowWhenValues = new[] { 1, 2 } };
         yield return new ParamDefinition { Key = "join", Name = "角の形", Kind = ParamKind.Choice, Choices = LineJoins, Default = 0 };
     }
+
+    /// <summary>エフェクトを追加するメニューの分類 (この順に並べる)。</summary>
+    public static readonly string[] FilterGroups =
+    {
+        "色", "ぼかし", "光", "縁・輪郭", "キー (透過)", "変形", "切り抜き・マスク", "動き・配置", "切り替え・その他",
+    };
+
+    private static string FilterGroupOf(string id) => id switch
+    {
+        "filter.color" or "filter.mono" or "filter.flip" or "filter.levels" or "filter.posterize" or "filter.extcolor" or "filter.hueconvert"
+            or "filter.gradient" or "filter.vignette" or "filter.noise" or "filter.chromatic" => "色",
+        "filter.blur" or "filter.dirblur" or "filter.radialblur" or "filter.lensblur" or "filter.motionblur" or "filter.edgeblur"
+            or "filter.mosaic" or "filter.sharpen" => "ぼかし",
+        "filter.glow" or "filter.emit" or "filter.diffuse" or "filter.flash" or "filter.light" or "filter.shadow" => "光",
+        "filter.border" or "filter.bevel" or "filter.edge" => "縁・輪郭",
+        "filter.chromakey" or "filter.colorkey" or "filter.lumakey" => "キー (透過)",
+        "filter.raster" or "filter.ripple" or "filter.polar" or "filter.displace" or "filter.mirror" or "filter.kaleido" or "filter.sphere"
+            or "filter.freeform" => "変形",
+        "filter.clip" or "filter.diagclip" or "filter.mask" => "切り抜き・マスク",
+        "filter.anim" or "filter.basic" or "filter.shake" or "filter.loop" or "filter.shatter" or "filter.circle" or "filter.random" => "動き・配置",
+        _ => "切り替え・その他",
+    };
 
     // 組み込みのエフェクトの ID (ここに入っていないものはプラグインが追加したもの)
     private static readonly HashSet<string> Builtin;

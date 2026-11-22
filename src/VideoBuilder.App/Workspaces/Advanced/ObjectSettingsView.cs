@@ -318,8 +318,8 @@ public sealed class ObjectSettingsView : UserControl
         add.Click += (_, _) =>
         {
             var menu = new ContextMenu();
-            foreach (var f in EffectRegistry.FiltersFor(o))
-                menu.Items.Add(Menus.Item(f.Name, f.Icon, () => { var t = Target; if (t != null) _session.AddFilter(t, f.Id); }));
+            foreach (var item in Menus.Effects(EffectRegistry.FiltersFor(o), f => { var t = Target; if (t != null) _session.AddFilter(t, f.Id); }))
+                menu.Items.Add(item);
             menu.Open(add);
         };
         DockPanel.SetDock(add, Dock.Right);

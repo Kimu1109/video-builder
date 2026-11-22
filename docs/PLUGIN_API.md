@@ -29,6 +29,7 @@ video-builder のプラグインは .NET のクラスライブラリです。見
 
 定義 (`EffectDefinition`) の `Category` は、映像エフェクトなら `Filter`、音声エフェクトなら `AudioFilter`、メディアオブジェクトなら `VideoSource`。
 `definition.Id` と実装の `Id` は同じにします。
+`Group` を付けると、「エフェクトの追加」メニューのその分類 (`EffectRegistry.FilterGroups` の「色」「ぼかし」など、または新しい名前) に入ります。付けなければ「プラグイン」に入ります。
 
 ## 速く動かすための選び方
 
@@ -98,6 +99,7 @@ void Process(AudioBlock block, ref object? state);
 | `IsDraft` | プレビューの軽い描画中 (再生中など)。品質を落として速くしてよい |
 | `IsFrameBuffer` | 画面全体にかけている (調整レイヤー) |
 | `Context` | 描画先の作成・画像の持ち主の登録・プロジェクト |
+| `Context.LoadImage(パス)` / `Context.LoadVideoFrame(キー, パス, 秒, ループ)` | 別のファイルの絵を読む (キャッシュ付き。返った画像は破棄しない)。エンジンの外で作った `RenderContext` では null |
 
 ## スレッド
 

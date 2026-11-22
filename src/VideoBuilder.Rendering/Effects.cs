@@ -5,7 +5,7 @@ using VideoBuilder.Plugins;
 namespace VideoBuilder.Rendering;
 
 /// <summary>組み込みのフィルタ効果。</summary>
-public static class Effects
+public static partial class Effects
 {
     private static readonly Dictionary<string, IVideoEffect> Map = new();
 
@@ -17,6 +17,8 @@ public static class Effects
         Register(new Clip()); Register(new Mosaic()); Register(new ChromaKey()); Register(new Mono());
         Register(new Flip()); Register(new Fade()); Register(new ScriptEffect());
         Register(new Mask()); Register(new Transition());
+        RegisterMore();
+        RegisterExtra();
     }
 
     private static readonly Dictionary<string, VideoBuilder.Plugins.IVideoSource> Sources = new();
@@ -36,6 +38,10 @@ public static class Effects
     private static readonly HashSet<string> BuiltInDeterministic = new()
     {
         "filter.color", "filter.blur", "filter.border", "filter.shadow", "filter.clip", "filter.mosaic", "filter.chromakey", "filter.mono", "filter.flip", "filter.mask",
+        "filter.glow", "filter.dirblur", "filter.radialblur", "filter.sharpen", "filter.chromatic", "filter.vignette", "filter.gradient", "filter.diagclip",
+        "filter.levels", "filter.posterize",
+        "filter.emit", "filter.diffuse", "filter.flash", "filter.edge", "filter.polar", "filter.mirror", "filter.kaleido", "filter.freeform",
+        "filter.lensblur", "filter.deinterlace", "filter.random",
     };
 
     /// <summary>結果を使い回してよい効果か (EffectFlags.Deterministic)。</summary>
@@ -83,12 +89,19 @@ public static class Effects
                 pendingArgs = args;
                 continue;
             }
-            if (pending != null) { sprite = ApplyMatrix(sprite, pendingArgs, pending); pending = null; }
-            sprite = fx.Apply(sprite, args);
+            if (pending != null) { sprite = KeepScale(ApplyMatrix(sprite, pendingArgs, pending), sprite); pending = null; }
+            sprite = KeepScale(fx.Apply(sprite, args), sprite);
         }
-        if (pending != null) sprite = ApplyMatrix(sprite, pendingArgs, pending);
+        if (pending != null) sprite = KeepScale(ApplyMatrix(sprite, pendingArgs, pending), sprite);
         return sprite;
     }
+
+    /// <summary>
+    /// 小さく作った絵 (Scale が 1 でない) にかけた効果が倍率 1 の絵を返したら、元の倍率に戻す。
+    /// 小さいままかけるのは、大きさによらない効果 (色の変換など) だけなので、倍率はそのまま引き継いでよい。
+    /// </summary>
+    private static Sprite KeepScale(Sprite result, Sprite input) =>
+        input.Scale != 1 && result.Scale == 1 ? result with { Scale = input.Scale } : result;
 
 
     internal static SKImageInfo Info(int w, int h) => new(Math.Max(1, w), Math.Max(1, h), SKColorType.Bgra8888, SKAlphaType.Premul);
@@ -699,11 +712,125 @@ public static class Effects
                 case 7: a.Context.Modifiers.Ox += W * (1 - e); return s;   // スライド (右から)
                 case 8: a.Context.Modifiers.Oy -= H * (1 - e); return s;   // スライド (上から)
                 case 9: a.Context.Modifiers.Oy += H * (1 - e); return s;   // スライド (下から)
-                default:  // ズーム
+                case 10:  // ズーム
                     a.Context.Modifiers.Zoom *= e;
                     return s;
+                case 11:  // ぼかし: ぼかしながら現れる (ぼかしの幅の 2 倍から 0 へ)
+                {
+                    a.Context.Modifiers.Alpha *= e;
+                    float radius = Math.Max(1, feather) * 2 * (1 - e);
+                    return radius < 0.5f ? s : Gaussian(s, a, radius, a.IsFrameBuffer);
+                }
+                case 12:  // 回転ズーム
+                    a.Context.Modifiers.Zoom *= e;
+                    a.Context.Modifiers.Rz -= 360 * (1 - e);
+                    return s;
+                case 13:  // ポップ: 少し大きくなってから戻る (加減速ではなく、行き過ぎて戻る動き)
+                {
+                    const double c1 = 1.70158, c3 = c1 + 1;
+                    double q = progress - 1;
+                    a.Context.Modifiers.Zoom *= (float)Math.Max(0, 1 + c3 * q * q * q + c1 * q * q);
+                    a.Context.Modifiers.Alpha *= (float)Math.Min(1, progress * 3);
+                    return s;
+                }
+                case 14:  // 時計回りワイプ: 真上から時計回りに扇形を広げる
+                {
+                    float r = MathF.Sqrt(s.Width * s.Width + s.Height * s.Height) + feather * 2;
+                    using var path = new SKPath();
+                    path.MoveTo(s.Cx, s.Cy);
+                    path.ArcTo(SKRect.Create(s.Cx - r, s.Cy - r, r * 2, r * 2), -90, 360 * e, false);
+                    path.Close();
+                    return Masked(s, a, path, feather, false);
+                }
+                case 15 or 16:  // ブラインド (横・縦): 帯ごとに少しずつ開く
+                {
+                    const int Slats = 8;
+                    bool horizontal = a.Effect.GetInt("type") == 15;
+                    float m = feather * 2 + 1;
+                    using var path = new SKPath();
+                    if (horizontal)
+                    {
+                        float hs = s.Height / (float)Slats;
+                        for (int i = 0; i < Slats; i++) path.AddRect(new SKRect(-m, i * hs, s.Width + m, i * hs + hs * e));
+                    }
+                    else
+                    {
+                        float ws = s.Width / (float)Slats;
+                        for (int i = 0; i < Slats; i++) path.AddRect(new SKRect(i * ws, -m, i * ws + ws * e, s.Height + m));
+                    }
+                    return Masked(s, a, path, Math.Min(feather, 4), false);
+                }
+                case 18:  // ランダム方向から: オブジェクトごとに決まった向きの、画面の外から入る
+                {
+                    float ang = Rand01(0, StableSeed(a.Object), 21) * 2 * MathF.PI, dist = MathF.Sqrt(W * W + H * H);
+                    a.Context.Modifiers.Ox += MathF.Cos(ang) * dist * (1 - e);
+                    a.Context.Modifiers.Oy += MathF.Sin(ang) * dist * (1 - e);
+                    return s;
+                }
+                case 19:  // 縮小して登場: 大きい所から縮んで現れる
+                    a.Context.Modifiers.Zoom *= 1 + 3 * (1 - e);
+                    a.Context.Modifiers.Alpha *= e;
+                    return s;
+                case 20:  // 落ちて登場: オブジェクトごとにランダムに遅れて、上から落ちてくる
+                {
+                    float delay = Rand01(0, StableSeed(a.Object), 22) * 0.6f;
+                    float q = (float)Math.Clamp((progress - delay) / (1 - delay), 0, 1);
+                    float k = 1 - (1 - q) * (1 - q);   // 落ちるにつれて減速
+                    a.Context.Modifiers.Oy -= H * (1 - k);
+                    a.Context.Modifiers.Alpha *= MathF.Min(1, q * 4);
+                    return s;
+                }
+                case 21:  // 弾んで登場: 上から落ちて、何度か弾んで止まる
+                    a.Context.Modifiers.Oy -= H * 0.6f * (1 - BounceOut((float)progress));
+                    return s;
+                case 22:  // 広がって登場: 横に広がって現れる
+                {
+                    float sx = MathF.Max(0.001f, e);
+                    int w = Math.Max(1, (int)MathF.Round(s.Width * sx));
+                    return new Sprite(Resized(s, a, w, s.Height), s.Cx * w / s.Width, s.Cy, s.Scale);
+                }
+                case 23:  // 起き上がって登場: 下の端を支点に、奥に倒れた状態から起き上がる
+                {
+                    float deg = -90 * (1 - e), rad = deg * MathF.PI / 180f, half = s.Height * s.Scale / 2;
+                    a.Context.Modifiers.Rx += deg;
+                    a.Context.Modifiers.Oy += half * (1 - MathF.Cos(rad));
+                    a.Context.Modifiers.Oz += -half * MathF.Sin(rad);
+                    return s;
+                }
+                case 24:  // 何処からともなく登場: ランダムな位置・回転から、薄く現れながら集まる
+                {
+                    uint seed = StableSeed(a.Object);
+                    a.Context.Modifiers.Ox += (Rand01(0, seed, 23) - 0.5f) * W * (1 - e);
+                    a.Context.Modifiers.Oy += (Rand01(0, seed, 24) - 0.5f) * H * (1 - e);
+                    a.Context.Modifiers.Rz += (Rand01(0, seed, 25) * 2 - 1) * 360 * (1 - e);
+                    a.Context.Modifiers.Zoom *= 0.3f + 0.7f * e;
+                    a.Context.Modifiers.Alpha *= e;
+                    return s;
+                }
+                case 25:  // 点滅して登場: 点滅しながら現れる
+                    if (((int)(progress * 8) & 1) == 0) a.Context.Modifiers.Alpha = 0;
+                    return s;
+                default:  // ひし形ワイプ: 中心からひし形を広げる
+                {
+                    float r = (s.Width + s.Height) / 2f * 1.05f * e + feather * 2 * e;
+                    using var path = new SKPath();
+                    path.MoveTo(s.Cx, s.Cy - r); path.LineTo(s.Cx + r, s.Cy); path.LineTo(s.Cx, s.Cy + r); path.LineTo(s.Cx - r, s.Cy);
+                    path.Close();
+                    return Masked(s, a, path, feather, false);
+                }
             }
         }
+    }
+
+    /// <summary>弾む動き (0〜1 → 0〜1。最後に 3 回弾んで止まる)。</summary>
+    internal static float BounceOut(float t)
+    {
+        const float n1 = 7.5625f, d1 = 2.75f;
+        if (t < 1 / d1) return n1 * t * t;
+        if (t < 2 / d1) { t -= 1.5f / d1; return n1 * t * t + 0.75f; }
+        if (t < 2.5f / d1) { t -= 2.25f / d1; return n1 * t * t + 0.9375f; }
+        t -= 2.625f / d1;
+        return n1 * t * t + 0.984375f;
     }
 
     private sealed class Fade : IVideoEffect

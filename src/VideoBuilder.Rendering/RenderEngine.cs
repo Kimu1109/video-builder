@@ -98,7 +98,7 @@ public sealed class RenderEngine : IDisposable
     public void Render(Project project, Scene scene, int frame, SKSurface surface)
     {
         bool onGpu = (_gpuSurface != null && ReferenceEquals(surface, _gpuSurface)) || (_externalGpuSurface != null && ReferenceEquals(surface, _externalGpuSurface));
-        var ctx = new RenderContext { Project = project, Frame = frame, Draft = Draft, Gpu = onGpu ? Gpu?.Context : null };
+        var ctx = new RenderContext { Project = project, Frame = frame, Draft = Draft, Gpu = onGpu ? Gpu?.Context : null, LoadImage = Media.GetImage, LoadVideoFrame = Media.GetVideoFrame };
         try
         {
             var canvas = surface.Canvas;
@@ -170,7 +170,7 @@ public sealed class RenderEngine : IDisposable
     private void RenderScene(RenderContext root, Scene scene, int frame, SKSurface surface, int depth)
     {
         var project = root.Project;
-        var ctx = depth == 0 ? root : new RenderContext { Project = project, Frame = frame, Draft = root.Draft, Gpu = root.Gpu };
+        var ctx = depth == 0 ? root : new RenderContext { Project = project, Frame = frame, Draft = root.Draft, Gpu = root.Gpu, LoadImage = root.LoadImage, LoadVideoFrame = root.LoadVideoFrame };
         var canvas = surface.Canvas;
         int W = project.Settings.Width, H = project.Settings.Height;
         var groups = new List<GroupState>();
@@ -660,8 +660,11 @@ public sealed class RenderEngine : IDisposable
             if (!e.Enabled || e.Definition.Category != EffectCategory.Filter) continue;
             bool independent = e.DefinitionId switch
             {
-                "filter.color" or "filter.mono" or "filter.fade" => true,
-                "filter.transition" => e.GetInt("type") is 0 or >= 6,   // フェード・スライド・ズーム (ワイプはぼかしの幅がピクセル単位)
+                // 色だけを変えるもの・描く位置だけを変えるもの・絵の大きさに対する割合で決まるもの
+                "filter.color" or "filter.mono" or "filter.fade" or "filter.levels" or "filter.posterize" or "filter.vignette" or "filter.anim"
+                    or "filter.extcolor" or "filter.hueconvert" or "filter.colorkey" or "filter.lumakey" or "filter.basic" or "filter.shake" => true,
+                // フェード・スライド・ズーム・回転ズーム・ポップ (ワイプ・ぼかしはぼかしの幅がピクセル単位)
+                "filter.transition" => e.GetInt("type") is 0 or (>= 6 and <= 10) or 12 or 13 or >= 18,
                 _ => false,
             };
             if (!independent) return true;
@@ -1163,7 +1166,7 @@ public sealed class RenderEngine : IDisposable
             var cat = e.Definition.Category;
             if (cat is EffectCategory.AudioPlay or EffectCategory.AudioFilter) continue;
             // フェード・トランジションは時刻で変わる。結果が入力だけで決まらないもの (スクリプトなど) も変わりうる
-            if (cat == EffectCategory.Filter && (e.DefinitionId is "filter.fade" or "filter.transition"
+            if (cat == EffectCategory.Filter && (e.DefinitionId is "filter.fade" or "filter.transition" or "filter.anim"
                 || !Effects.IsDeterministic(e.DefinitionId, Effects.Find(e.DefinitionId)))) return false;
             foreach (var v in e.Tracks.Values)
             {
