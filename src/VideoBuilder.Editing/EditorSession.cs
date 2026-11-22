@@ -578,30 +578,67 @@ public sealed class EditorSession
         {
             foreach (var r in ranges)
             {
-                TimelineObject o;
-                if (style != null && style.Main.DefinitionId == EffectRegistry.Text)
-                {
-                    o = style.Clone(newId: true);
-                    o.GroupId = null;
-                    while (o.KeyFrames.Count > 0) o.RemoveKeyFrameAt(o.KeyFrames.Count - 1);
-                    o.Start = r.Start; o.End = r.End;
-                }
-                else
-                {
-                    o = ObjectFactory.Create(EffectRegistry.Text, target, r.Start, r.End - r.Start + 1);
-                    o.Main.Tracks["size"] = new AnimatedValue(48);
-                    o.Draw!.Tracks["y"] = new AnimatedValue(Math.Round(Project.Settings.Height * 0.4));
-                    var border = ObjectFactory.AddFilter(o, "filter.border");
-                    border.Tracks["size"] = new AnimatedValue(3);
-                }
-                o.Layer = target;
-                o.Main.Values["text"] = r.Cue.Text;
+                var o = CreateSubtitleText(r.Cue.Text, target, r.Start, r.End, style);
                 Scene.Objects.Add(o);
                 added.Add(o.Id);
             }
         });
         SelectMany(added);
         return target;
+    }
+
+    /// <summary>
+    /// 字幕用のテキストオブジェクトを作る (シーンにはまだ入れない)。style (テキストオブジェクト) があれば、その見た目をひな形にする。
+    /// なければ、画面の下寄りに縁取り付きの文字を置く。
+    /// </summary>
+    public TimelineObject CreateSubtitleText(string text, int layer, int start, int end, TimelineObject? style = null)
+    {
+        TimelineObject o;
+        if (style != null && style.Main.DefinitionId == EffectRegistry.Text)
+        {
+            o = style.Clone(newId: true);
+            o.GroupId = null;
+            o.PluginData = null;
+            while (o.KeyFrames.Count > 0) o.RemoveKeyFrameAt(o.KeyFrames.Count - 1);
+            o.Start = start; o.End = end;
+        }
+        else
+        {
+            o = ObjectFactory.Create(EffectRegistry.Text, layer, start, end - start + 1);
+            o.Main.Tracks["size"] = new AnimatedValue(48);
+            o.Draw!.Tracks["y"] = new AnimatedValue(Math.Round(Project.Settings.Height * 0.4));
+            var border = ObjectFactory.AddFilter(o, "filter.border");
+            border.Tracks["size"] = new AnimatedValue(3);
+        }
+        o.Layer = layer;
+        o.Main.Values["text"] = text;
+        return o;
+    }
+
+    /// <summary>
+    /// layer から下で、start〜end がすべて空いている最初のレイヤー (なければ -1)。
+    /// </summary>
+    public int FindFreeLayer(int layer, int start, int end)
+    {
+        for (int l = Math.Max(0, layer); l < Scene.LayerCount; l++)
+            if (Scene.IsFree(l, start, end)) return l;
+        return -1;
+    }
+
+    /// <summary>
+    /// 長さを削らずにオブジェクトを置く。layer から下で、start から length フレームがすべて空いている最初のレイヤーに置く。
+    /// 置けなければ null。Edit の中で呼ぶ (取り消しの単位は呼び出し側の Edit)。
+    /// </summary>
+    public TimelineObject? PlaceObject(string definitionId, int layer, int start, int length, Action<TimelineObject>? init = null)
+    {
+        start = Math.Max(0, start);
+        int end = start + Math.Max(1, length) - 1;
+        int target = FindFreeLayer(layer, start, end);
+        if (target < 0) return null;
+        var o = ObjectFactory.Create(definitionId, target, start, end - start + 1);
+        init?.Invoke(o);
+        Scene.Objects.Add(o);
+        return o;
     }
 
     /// <summary>レイヤーのテキストオブジェクトを、時間順に字幕にする。</summary>

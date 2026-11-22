@@ -663,6 +663,10 @@ public class ScriptAndPluginTests
             Assert.Equal("サンプルプラグイン", info.Name);
         }
         Assert.Contains(EffectRegistry.Filters, f => f.Id == "sample.vignette");
+        // API バージョン 3 のコマンドも登録される
+        var command = Assert.Single(PluginCommands.All, c => c.Command.Id == "sample.insertCaption");
+        Assert.Equal("sample.plugin", command.PluginId);
+        Assert.Equal("サンプル", command.Command.Group);
 
         // メディアオブジェクト: 市松模様 (左上のマスは塗られ、その隣は透明 = 黒)
         var p = Small();

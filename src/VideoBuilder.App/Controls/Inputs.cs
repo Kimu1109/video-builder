@@ -91,7 +91,8 @@ public sealed class NumberBox : TextBox
         Apply(_value + direction * step);
     }
 
-    private void Commit()
+    /// <summary>入力途中の文字を値として確定する (ダイアログの OK を押したときなど)。</summary>
+    public void Commit()
     {
         var text = (Text ?? "").Trim();
         if (text.Length == 0 || text == Format(_value)) return;

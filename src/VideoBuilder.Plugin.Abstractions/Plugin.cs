@@ -36,6 +36,9 @@ public interface IPluginHost
     /// <summary>トラックバーの移動方法を追加する。</summary>
     void RegisterInterpolator(IInterpolator interpolator);
 
+    /// <summary>「プラグイン」メニューにコマンドを追加する (API バージョン 3 から)。</summary>
+    void RegisterCommand(IPluginCommand command);
+
     /// <summary>ログに書く (プラグインの名前が付く)。</summary>
     void Log(string message);
 }
@@ -101,7 +104,7 @@ public readonly ref struct AudioBlock
 public static class PluginApi
 {
     /// <summary>このアプリのプラグイン API のバージョン。</summary>
-    public const int Version = 2;
+    public const int Version = 3;
     /// <summary>読み込めるいちばん古いバージョン (1 で作ったプラグインもそのまま動く)。</summary>
     public const int MinimumVersion = 1;
 }

@@ -13,7 +13,7 @@ public sealed record PluginInfo(string Id, string Name, string Version, string D
 
 /// <summary>
 /// プラグインの読み込み。plugins フォルダの下の各フォルダに plugin.json とアセンブリを置く。
-/// plugin.json: { "id": "...", "name": "...", "version": "1.0.0", "apiVersion": 2, "assembly": "MyPlugin.dll" }
+/// plugin.json: { "id": "...", "name": "...", "version": "1.0.0", "apiVersion": 3, "assembly": "MyPlugin.dll" }
 /// apiVersion は PluginApi.MinimumVersion 〜 PluginApi.Version の範囲なら読み込む (古いプラグインもそのまま動く)。
 /// </summary>
 public static class PluginLoader
@@ -96,6 +96,8 @@ public static class PluginLoader
         }
 
         public void RegisterInterpolator(IInterpolator interpolator) => Interpolators.Register(interpolator);
+
+        public void RegisterCommand(IPluginCommand command) => PluginCommands.Register(pluginId, command);
     }
 
     private static readonly List<PluginInfo> LoadedList = new();
@@ -104,7 +106,8 @@ public static class PluginLoader
     /// <summary>プラグインが IPluginHost.Log で書いたもの (新しい 500 行まで)。</summary>
     public static IReadOnlyList<string> LogMessages { get { lock (LogLines) return LogLines.ToList(); } }
 
-    internal static void Log(string pluginId, string message)
+    /// <summary>プラグインのログに書く (画面側がプラグインのコマンドのエラーを残すときにも使う)。</summary>
+    public static void Log(string pluginId, string message)
     {
         string line = $"[{pluginId}] {message}";
         lock (LogLines)

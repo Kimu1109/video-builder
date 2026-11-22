@@ -8,7 +8,7 @@ namespace SamplePlugin;
 /// <summary>
 /// プラグインの書き方の見本。速い順に:
 /// 色の変換 (IColorMatrixEffect) → ピクセルの書き換え (IPixelEffect) → 自由な描画 (IVideoEffect)。
-/// ほかに、メディアオブジェクト・音声のエフェクト・移動方法を 1 つずつ追加する。
+/// ほかに、メディアオブジェクト・音声のエフェクト・移動方法・メニューのコマンドを 1 つずつ追加する。
 /// </summary>
 public sealed class Plugin : IPlugin
 {
@@ -49,6 +49,8 @@ public sealed class Plugin : IPlugin
         }, new LowPass());
 
         host.RegisterInterpolator(new Bounce());
+        // メニューのコマンドは API バージョン 3 から
+        if (host.ApiVersion >= 3) host.RegisterCommand(new InsertCaption());
         if (host.ApiVersion >= 2) host.Log("読み込みました");
     }
 }
@@ -203,5 +205,40 @@ public sealed class LowPass : IAudioEffect
             r += (s[i + 1] - r) * k; s[i + 1] = r;
         }
         st.L = l; st.R = r;
+    }
+}
+
+/// <summary>
+/// 「プラグイン」メニューのコマンドの見本: フォームで文字と長さを聞き、再生位置にテキストを置く。
+/// </summary>
+public sealed class InsertCaption : IPluginCommand
+{
+    public string Id => "sample.insertCaption";
+    public string Name => "再生位置にテキストを置く...";
+    public string? Group => "サンプル";
+
+    public async Task RunAsync(IPluginCommandContext context)
+    {
+        var form = new PluginForm
+        {
+            Title = "テキストを置く",
+            OkText = "置く",
+            Fields =
+            {
+                new PluginTextField { Key = "text", Label = "文字", Value = "こんにちは", Required = true },
+                new PluginNumberField { Key = "seconds", Label = "長さ (秒)", Value = 3, Minimum = 0.1, Maximum = 600, Decimals = 1 },
+            },
+        };
+        if (!await context.ShowFormAsync(form)) return;
+        string text = form.Get<PluginTextField>("text").Value;
+        int length = Math.Max(1, context.Project.SecondsToFrames(form.Get<PluginNumberField>("seconds").Value));
+
+        TimelineObject? placed = null;
+        context.Edit("テキストを置く", editor =>
+        {
+            placed = editor.AddText(text, context.TargetLayer, context.CurrentFrame, length);
+            if (placed != null) editor.Select(new[] { placed });
+        });
+        if (placed == null) await context.ShowMessageAsync("テキストを置く", "空いているレイヤーがありません。");
     }
 }

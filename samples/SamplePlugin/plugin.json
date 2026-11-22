@@ -2,6 +2,6 @@
   "id": "sample.plugin",
   "name": "サンプルプラグイン",
   "version": "1.0.0",
-  "apiVersion": 2,
+  "apiVersion": 3,
   "assembly": "SamplePlugin.dll"
 }

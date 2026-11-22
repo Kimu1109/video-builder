@@ -1,4 +1,4 @@
-# プラグイン API (バージョン 2)
+# プラグイン API (バージョン 3)
 
 video-builder のプラグインは .NET のクラスライブラリです。見本は `samples/SamplePlugin`。
 
@@ -8,10 +8,11 @@ video-builder のプラグインは .NET のクラスライブラリです。見
 - `plugin.json`:
 
   ```json
-  { "id": "my.plugin", "name": "わたしのプラグイン", "version": "1.0.0", "apiVersion": 2, "assembly": "MyPlugin.dll" }
+  { "id": "my.plugin", "name": "わたしのプラグイン", "version": "1.0.0", "apiVersion": 3, "assembly": "MyPlugin.dll" }
   ```
 
-  `apiVersion` は `PluginApi.MinimumVersion` (1) 〜 `PluginApi.Version` (2) なら読み込みます。バージョン 1 で作ったプラグインは作り直さずにそのまま動きます。
+  `apiVersion` は `PluginApi.MinimumVersion` (1) 〜 `PluginApi.Version` (3) なら読み込みます。バージョン 1・2 で作ったプラグインは作り直さずにそのまま動きます。
+  メニューのコマンド (`RegisterCommand`) を使うときは 3 にします。古いアプリでも動かしたいなら、`host.ApiVersion >= 3` のときだけ登録します。
 
 ## 登録できるもの
 
@@ -25,6 +26,7 @@ video-builder のプラグインは .NET のクラスライブラリです。見
 | `RegisterMediaObject(定義, IVideoSource)` | 絵を作るメディアオブジェクト | `CacheKey` を返せば使い回し |
 | `RegisterAudioEffect(定義, IAudioEffect)` | 音声エフェクト | ブロック単位でその場で処理 |
 | `RegisterInterpolator(IInterpolator)` | トラックバーの移動方法 | – |
+| `RegisterCommand(IPluginCommand)` | 「プラグイン」メニューのコマンド (バージョン 3 から。[下記](#メニューのコマンド-バージョン-3)) | – |
 | `Log(文字列)` | ログに書く (標準エラーと `PluginLoader.LogMessages`) | – |
 
 定義 (`EffectDefinition`) の `Category` は、映像エフェクトなら `Filter`、音声エフェクトなら `AudioFilter`、メディアオブジェクトなら `VideoSource`。
@@ -104,3 +106,72 @@ void Process(AudioBlock block, ref object? state);
 ## スレッド
 
 映像のエフェクトは描画のスレッドから呼ばれます。プレビューと出力が同時に動くこともあるので、実装のクラスにフレームごとの値を持たせないでください (状態が必要なら音声エフェクトの `state` のように、呼び出しごとの値を使う)。
+
+## メニューのコマンド (バージョン 3)
+
+`RegisterCommand` で登録したコマンドは、メニューバーの「プラグイン」に並びます (1 つもなければメニューは出ません)。
+外のアプリと通信して素材を作り、タイムラインに置く、といったプラグインに使います。見本は `samples/SamplePlugin` の `InsertCaption`。
+
+```csharp
+public sealed class InsertCaption : IPluginCommand
+{
+    public string Id => "my.plugin.insertCaption";     // プラグインの ID を頭に付ける
+    public string Name => "再生位置にテキストを置く...";
+    public string? Group => null;                       // 同じ Group はサブメニューにまとまる
+    public bool CanRun(IPluginCommandContext c) => true; // メニューを開くたびに呼ばれる
+
+    public async Task RunAsync(IPluginCommandContext context)
+    {
+        var form = new PluginForm { Title = "テキストを置く", Fields = { new PluginTextField { Key = "text", Label = "文字", Required = true } } };
+        if (!await context.ShowFormAsync(form)) return;
+        context.Edit("テキストを置く", e => e.AddText(form.Get<PluginTextField>("text").Value, context.TargetLayer, context.CurrentFrame, 90));
+    }
+}
+```
+
+- `RunAsync` は UI のスレッドで呼ばれます。通信などの待ちは `await` してください (画面は止まりません)。重い計算は `Task.Run` に出します。
+- 例外を投げると、エンジンが内容をメッセージで表示し、ログに残します。`OperationCanceledException` は何も表示しません。
+
+### IPluginCommandContext
+
+| メンバー | 内容 |
+|---|---|
+| `Project` / `Scene` / `SelectedObjects` | 今のプロジェクト・シーン・選んでいるオブジェクト (選んだ順)。**読むだけ**にする |
+| `CurrentFrame` / `TargetLayer` | 再生位置 / 新しく置くときの目安のレイヤー (選んでいるオブジェクトのレイヤー、なければ 0) |
+| `ProjectDirectory` | プロジェクトのファイルがあるフォルダ (保存前は null)。作った素材はここに置くと、プロジェクトと一緒に持ち運べる |
+| `DataDirectory` | このプラグイン専用の設定などの置き場所 (`$XDG_DATA_HOME/video-builder/plugin-data/<ID>/`、作成済み) |
+| `MediaDuration(パス)` | 音声・動画ファイルの長さ (秒)。読めなければ null |
+| `Edit(説明, e => ...)` | プロジェクトを書き換える。中の変更は 1 回で取り消せ、例外が出たらすべて元に戻る |
+| `ShowFormAsync(PluginForm)` | 入力フォーム。OK なら true を返し、入力を各項目の `Value` に書き戻す |
+| `ShowMessageAsync(題, 文)` | メッセージ |
+| `RunWithProgressAsync(題, (progress, ct) => ...)` | 進み具合のダイアログを出しながら実行する。中止を押すと `ct` が取り消される |
+
+### IPluginEditor (Edit の中で使う)
+
+| メンバー | 内容 |
+|---|---|
+| `AddAudioFile(パス, レイヤー, フレーム, 長さ?)` | 音声ファイルを置く。長さを省くとファイルの長さ (端数は切り上げ) |
+| `AddText(文字, レイヤー, フレーム, 長さ, style?)` | 字幕向けのテキストを置く。`style` (テキストオブジェクト) があれば、その見た目をひな形にする |
+| `AddObject(定義の ID, レイヤー, フレーム, 長さ, init?)` | 組み込みやプラグインのオブジェクトを置く |
+| `FindFreeLayer(レイヤー, 開始, 終了)` | そこから下で、範囲がすべて空いている最初のレイヤー (なければ -1) |
+| `Group(オブジェクト)` / `Select(オブジェクト)` | グループにする / Edit のあとで選ぶ |
+| `Scene` | 直接書き換えてもよい (Edit の中なら取り消せる) |
+
+置くものはどれも、指定したレイヤーから下で**範囲がすべて空いている**最初のレイヤーに、長さを削らずに置きます。置けなければ null を返します。
+
+### フォーム (PluginForm)
+
+| 項目 | 入力 |
+|---|---|
+| `PluginTextField` | 文字。`Multiline` で複数行、`Required` で空のままでは OK できない |
+| `PluginNumberField` | 数値。`Minimum` / `Maximum` / `Decimals` |
+| `PluginChoiceField` | 一覧から 1 つ。`Options` は `PluginChoice(値, 表示名)`、`Value` は選んだものの値 |
+| `PluginCheckField` | チェックボックス |
+
+フォームの画面は本体が作るので、プラグインは UI のライブラリに依存しません。文字はプラグインが付けたまま表示します (英語表示でも訳しません)。
+
+### オブジェクトに情報を残す (TimelineObject.PluginData)
+
+`TimelineObject.PluginData` (文字列の辞書) に書いたものは、プロジェクトと一緒に保存され、複製・取り消しにも含まれます。
+「作ったときのセリフや話者を残し、あとで作り直す」といった使い方ができます。キーは `"プラグインの ID.名前"` にしてください。
+

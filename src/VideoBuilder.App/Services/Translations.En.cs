@@ -1018,5 +1018,10 @@ internal static class TranslationsEn
         ("飛び散る", "Scatter"),
         ("パラメータ名で絞り込む", "Filter by parameter name"),
         ("置いたあとに、プロパティの「テンプレートの項目」に出す項目です (まとめて置いたときはシーンオブジェクト、展開して置いたときは置いたどのオブジェクトを選んでも出ます)。あとから、パラメータ名を右クリックして変えることもできます。", "These items appear under \"Template items\" in the properties after inserting (on the scene object when inserted as one, or on any of the inserted objects when expanded). You can also change them later by right-clicking a parameter name."),
+        ("プラグイン(_P)", "_Plugins"),
+        ("プラグインのエラー", "Plugin error"),
+        ("{0} を実行できませんでした。\n{1}", "Could not run {0}.\n{1}"),
+        ("処理しています...", "Working..."),
+        ("中止しています...", "Cancelling..."),
     };
 }

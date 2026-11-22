@@ -22,6 +22,19 @@ public static class EditorCommands
 
     private static readonly FilePickerFileType ProjectType = new("video-builder プロジェクト") { Patterns = new[] { "*" + ProjectSerializer.Extension } };
 
+    // ---------------- プラグイン ----------------
+
+    /// <summary>プラグインのコマンドに渡す窓口を作る。</summary>
+    public static PluginCommandContext PluginContext(VideoBuilder.Rendering.PluginCommandEntry entry) =>
+        new(Session, Main, entry.PluginId, AppPaths.PluginDataDir);
+
+    /// <summary>プラグインのコマンドを実行する (「プラグイン」メニューから)。</summary>
+    public static Task RunPluginCommandAsync(VideoBuilder.Rendering.PluginCommandEntry entry)
+    {
+        if (Session.IsEditing) return Task.CompletedTask;
+        return PluginMenu.RunAsync(entry, PluginContext(entry), Main);
+    }
+
     // ---------------- ファイル ----------------
 
     /// <summary>未保存の変更があれば確認する。続けてよければ true。</summary>

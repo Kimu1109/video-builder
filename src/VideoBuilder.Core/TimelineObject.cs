@@ -18,6 +18,11 @@ public sealed class TimelineObject
     /// <summary>「複数のオブジェクトとして置いた」テンプレートのどれか (Scene.TemplateGroups の Id)。ないときは null。</summary>
     public string? TemplateGroup { get; set; }
     public bool Enabled { get; set; } = true;
+    /// <summary>
+    /// プラグインがオブジェクトに残す情報 (キーは "プラグインの ID.名前" にする)。プロジェクトと一緒に保存され、複製にも引き継がれる。
+    /// 使わないときは null (保存されない)。
+    /// </summary>
+    public Dictionary<string, string>? PluginData { get; set; }
 
     [JsonIgnore] public int Length => End - Start + 1;
     [JsonIgnore] public int Sections => KeyFrames.Count + 1;
@@ -64,6 +69,7 @@ public sealed class TimelineObject
             Layer = Layer, Start = Start, End = End, GroupId = GroupId, Enabled = Enabled, TemplateGroup = TemplateGroup,
             SourceOffsetFrames = SourceOffsetFrames,
             KeyFrames = new List<int>(KeyFrames),
+            PluginData = PluginData != null ? new Dictionary<string, string>(PluginData) : null,
         };
         foreach (var e in Effects) o.Effects.Add(e.Clone());
         return o;
@@ -78,6 +84,16 @@ public sealed class TimelineObject
             || a.KeyFrames.Count != b.KeyFrames.Count || a.Effects.Count != b.Effects.Count) return false;
         for (int i = 0; i < a.KeyFrames.Count; i++) if (a.KeyFrames[i] != b.KeyFrames[i]) return false;
         for (int i = 0; i < a.Effects.Count; i++) if (!Effect.SameContent(a.Effects[i], b.Effects[i])) return false;
+        return SamePluginData(a.PluginData, b.PluginData);
+    }
+
+    private static bool SamePluginData(Dictionary<string, string>? a, Dictionary<string, string>? b)
+    {
+        if (ReferenceEquals(a, b)) return true;
+        int na = a?.Count ?? 0, nb = b?.Count ?? 0;
+        if (na != nb) return false;
+        if (na == 0) return true;
+        foreach (var (k, v) in a!) if (!b!.TryGetValue(k, out var w) || w != v) return false;
         return true;
     }
 
@@ -88,6 +104,7 @@ public sealed class TimelineObject
         SourceOffsetFrames = src.SourceOffsetFrames;
         KeyFrames = new List<int>(src.KeyFrames);
         Effects = src.Effects.Select(e => e.Clone()).ToList();
+        PluginData = src.PluginData != null ? new Dictionary<string, string>(src.PluginData) : null;
     }
 
     /// <summary>位置と長さを変える。中間点は相対位置を保ったまま移動し、範囲外になったものは消す。</summary>

@@ -1,5 +1,6 @@
 using SkiaSharp;
 using VideoBuilder.Core;
+using VideoBuilder.Editing;
 using VideoBuilder.Media;
 using VideoBuilder.Plugins;
 using VideoBuilder.Rendering;
@@ -305,5 +306,81 @@ public class PluginApiTests
             Assert.Contains("API", result[3].Error);
         }
         finally { try { Directory.Delete(root, true); } catch { } }
+    }
+
+    // ---------------- API バージョン 3 ----------------
+
+    [Fact]
+    public void Plugin_data_is_saved_copied_and_undoable()
+    {
+        var p = Small();
+        var o = Square(p, "#FFFFFF");
+        o.PluginData = new Dictionary<string, string> { ["my.plugin.text"] = "こんにちは" };
+
+        // 保存して読み直しても残る。使っていないオブジェクトには書かれない
+        var q = ProjectSerializer.FromJson(ProjectSerializer.ToJson(p));
+        Assert.Equal("こんにちは", q.Root.Objects[0].PluginData!["my.plugin.text"]);
+        var plain = Square(p, "#000000");
+        Assert.DoesNotContain("pluginData", ProjectSerializer.ObjectsToJson(new[] { plain }));
+
+        // 複製は別の入れ物を持ち、内容の比較にも使われる
+        var copy = o.Clone();
+        Assert.True(TimelineObject.SameContent(o, copy));
+        copy.PluginData!["my.plugin.text"] = "さようなら";
+        Assert.Equal("こんにちは", o.PluginData["my.plugin.text"]);
+        Assert.False(TimelineObject.SameContent(o, copy));
+
+        // PluginData だけを書き換えても、取り消せる
+        var session = new EditorSession();
+        session.Edit("追加", () => session.Scene.Objects.Add(o.Clone(newId: true)));
+        var target = session.Scene.Objects[0];
+        session.Edit("書き換え", () => target.PluginData!["my.plugin.text"] = "変更");
+        Assert.Equal("変更", session.Scene.Objects[0].PluginData!["my.plugin.text"]);
+        session.Undo();
+        Assert.Equal("こんにちは", session.Scene.Objects[0].PluginData!["my.plugin.text"]);
+    }
+
+    [Fact]
+    public void Placing_objects_for_plugins_keeps_the_length_and_finds_a_free_layer()
+    {
+        var session = new EditorSession();
+        // レイヤー 0 の 30 フレーム目から先はふさがっている
+        session.Edit("準備", () => session.Scene.Objects.Add(ObjectFactory.Create(EffectRegistry.Shape, 0, 30, 30)));
+        TimelineObject? placed = null;
+        session.Edit("置く", () => placed = session.PlaceObject(EffectRegistry.Shape, 0, 10, 40));
+        // 削らずに、空いている下のレイヤーへ
+        Assert.NotNull(placed);
+        Assert.Equal(1, placed!.Layer);
+        Assert.Equal(40, placed.Length);
+        Assert.Equal(0, session.FindFreeLayer(0, 0, 29));
+        Assert.Equal(2, session.FindFreeLayer(1, 10, 49));
+
+        var text = session.CreateSubtitleText("字幕", 3, 5, 14);
+        Assert.Equal(EffectRegistry.Text, text.Main.DefinitionId);
+        Assert.Equal("字幕", text.Main.Values["text"]);
+        Assert.Equal((3, 5, 14), (text.Layer, text.Start, text.End));
+        Assert.DoesNotContain(text, session.Scene.Objects);   // シーンにはまだ入れない
+    }
+
+    private sealed class NamedCommand(string id, string name) : IPluginCommand
+    {
+        public string Id => id;
+        public string Name => name;
+        public Task RunAsync(IPluginCommandContext context) => Task.CompletedTask;
+    }
+
+    [Fact]
+    public void Commands_need_an_id_and_a_name_and_ids_must_be_unique()
+    {
+        try
+        {
+            PluginCommands.Register("test.plugin", new NamedCommand("test.cmd.unique", "コマンド"));
+            Assert.Contains(PluginCommands.All, e => e.Command.Id == "test.cmd.unique" && e.PluginId == "test.plugin");
+            Assert.Throws<ArgumentException>(() => PluginCommands.Register("other.plugin", new NamedCommand("test.cmd.unique", "別")));
+            Assert.Throws<ArgumentException>(() => PluginCommands.Register("test.plugin", new NamedCommand("", "名前")));
+            Assert.Throws<ArgumentException>(() => PluginCommands.Register("test.plugin", new NamedCommand("test.cmd.noname", " ")));
+        }
+        finally { PluginCommands.Unregister("test.cmd.unique"); }
+        Assert.DoesNotContain(PluginCommands.All, e => e.Command.Id == "test.cmd.unique");
     }
 }

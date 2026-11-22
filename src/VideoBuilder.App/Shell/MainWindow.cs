@@ -282,7 +282,10 @@ public sealed class MainWindow : Window, IShell
         var help = Menus.Sub("ヘルプ(_H)", null, new object[] { Menus.Item("バージョン情報...", "Info", () => _ = EditorCommands.AboutAsync()) });
 
         var menu = new Menu();
-        foreach (var m in new[] { file, edit, view, settings, help }) menu.Items.Add(m);
+        foreach (var m in new[] { file, edit, view, settings }) menu.Items.Add(m);
+        // プラグインがコマンドを登録していれば「プラグイン」メニューを出す
+        if (PluginMenu.Build(EditorCommands.PluginContext, EditorCommands.RunPluginCommandAsync) is { } plugins) menu.Items.Add(plugins);
+        menu.Items.Add(help);
         return menu;
     }
 

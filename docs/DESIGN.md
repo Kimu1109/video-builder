@@ -1136,6 +1136,7 @@ video-builder/
    - `host.RegisterAudioEffect(定義, IAudioEffect)` … 音声のエフェクト
    - `host.RegisterMediaObject(定義, IVideoSource)` … メディアオブジェクト
    - `host.RegisterInterpolator(IInterpolator)` … トラックバーの移動方法
+   - `host.RegisterCommand(IPluginCommand)` … 「プラグイン」メニューのコマンド (API バージョン 3 から)
 3. `plugin.json` (id / name / version / apiVersion / assembly) と DLL を、`$XDG_DATA_HOME/video-builder/plugins/<名前>/` に置く。
 
 詳しくは [PLUGIN_API.md](PLUGIN_API.md)。
@@ -1432,7 +1433,7 @@ AviUtl の操作感の中心 (レイヤーとオブジェクト、キーフレ�
 
 ### 22.17 プラグイン API (バージョン 2)
 
-速く動くプラグインを書きやすくするために、API を整理した ([PLUGIN_API.md](PLUGIN_API.md))。バージョン 1 のプラグインはそのまま読み込める (`apiVersion` 1〜2 を受け付ける)。
+速く動くプラグインを書きやすくするために、API を整理した ([PLUGIN_API.md](PLUGIN_API.md))。バージョン 1 のプラグインはそのまま読み込める (バージョン 2 の時点では `apiVersion` 1〜2 を受け付けた。今は 1〜3。22.40)。
 
 | 追加したもの | 内容 | 速くなる理由 |
 |---|---|---|
@@ -2380,3 +2381,21 @@ Linux の arm64 ([22.36](#2236-linux-の-arm64)) で、ARM の SoC の GPU (V3D�
 ---
 
 *以上*
+
+### 22.40 プラグイン API (バージョン 3): メニューのコマンド
+
+VOICEVOX との連携のように、外のアプリと通信して素材を作り、タイムラインに置くプラグインを書けるようにした ([PLUGIN_API.md](PLUGIN_API.md))。
+バージョン 1・2 のプラグインはそのまま読み込める (`apiVersion` 1〜3 を受け付ける)。
+
+| 追加したもの | 内容 |
+|---|---|
+| `IPluginHost.RegisterCommand` / `IPluginCommand` | 「プラグイン」メニューに項目を足す (コマンドがあるときだけメニューが出る)。`Group` で同じサブメニューにまとめ、`CanRun` はメニューを開くたびに確かめる |
+| `IPluginCommandContext` | コマンドから本体を操作する窓口。再生位置・選択・プロジェクトのフォルダ・プラグイン専用の設定フォルダ・音声の長さを読み、フォーム・メッセージ・進み具合のダイアログを出す |
+| `IPluginCommandContext.Edit` / `IPluginEditor` | プロジェクトの書き換え。中の変更は 1 回で取り消せ、例外が出たらすべて元に戻る。音声ファイル・字幕向けのテキスト・任意のオブジェクトを、長さを削らずに空いているレイヤーへ置く |
+| `PluginForm` | 文字 (1 行・複数行)・数値・選択・チェックの入力フォーム。画面は本体が作るので、プラグインは Avalonia に依存しない。文字はプラグインが付けたものなので訳さない |
+| `TimelineObject.PluginData` | オブジェクトに残すプラグインの情報 (キーは "プラグインの ID.名前")。プロジェクトと一緒に保存し、複製・取り消しにも含める (「セリフを直して作り直す」などに使う) |
+
+- コマンドは UI のスレッドで呼ぶ。ネットワークの待ちは await するので画面は止まらない。`RunWithProgressAsync` の中止は `CancellationToken` で伝える。
+- コマンドが投げた例外は、メッセージで知らせてプラグインのログに残す。
+- 設定の置き場所は `$XDG_DATA_HOME/video-builder/plugin-data/<プラグインの ID>/`。
+- サンプルプラグインには、フォームで文字と長さを聞いて再生位置にテキストを置くコマンドを追加した。
