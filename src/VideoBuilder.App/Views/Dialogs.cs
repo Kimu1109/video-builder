@@ -20,6 +20,7 @@ public class DialogBase : Window
     public DialogBase(string title, double width)
     {
         Title = title;
+        Icon = VideoBuilder.App.Shell.AppIcon.Get();
         Width = width;
         SizeToContent = SizeToContent.Height;
         CanResize = false;

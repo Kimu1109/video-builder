@@ -10,6 +10,7 @@ public sealed class ToolWindow : Window
     public ToolWindow(string title, double width, double height)
     {
         Title = title; Width = width; Height = height;
+        Icon = AppIcon.Get();
         ShowInTaskbar = false;
         KeyDown += (_, e) => { if (EditorCommands.HandleKey(e, this)) e.Handled = true; };
     }

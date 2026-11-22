@@ -66,6 +66,7 @@ public sealed class PerformanceWindow : Window
     public PerformanceWindow()
     {
         Title = "パフォーマンス - video-builder";
+        Icon = VideoBuilder.App.Shell.AppIcon.Get();
         Width = 440; Height = 720; MinWidth = 360;
         ShowInTaskbar = false;
         KeyDown += (_, e) => { if (EditorCommands.HandleKey(e, this)) e.Handled = true; };

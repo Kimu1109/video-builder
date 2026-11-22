@@ -54,6 +54,7 @@ public sealed class MainWindow : Window, IShell
     {
         EditorCommands.Main = this;
         EditorCommands.RegisterCommands();
+        Icon = AppIcon.Get();
         Width = 1360; Height = 860; MinWidth = 640; MinHeight = 360;
         _themeButton = new IconButton("ThemeAuto", "テーマの切替", CycleTheme);
 
