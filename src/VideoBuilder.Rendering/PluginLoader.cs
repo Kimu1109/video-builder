@@ -119,17 +119,32 @@ public static class PluginLoader
     }
     public static IReadOnlyList<PluginInfo> Loaded { get { lock (LoadedList) return LoadedList.ToList(); } }
 
-    /// <summary>root の下の各フォルダからプラグインを読み込む。失敗したものは Error に理由を入れて返す。</summary>
-    public static List<PluginInfo> LoadAll(string root)
+    /// <summary>
+    /// root の下の各フォルダからプラグインを読み込む。失敗したものは Error に理由を入れて返す。
+    /// skipLoaded なら、同じ ID のプラグインがすでに読み込まれているものは、何も言わずに飛ばす
+    /// (アプリに同梱したプラグインより、利用者が入れたものを優先するため)。
+    /// </summary>
+    public static List<PluginInfo> LoadAll(string root, bool skipLoaded = false)
     {
         var result = new List<PluginInfo>();
         if (!Directory.Exists(root)) return result;
         foreach (var dir in Directory.GetDirectories(root).OrderBy(d => d, StringComparer.Ordinal))
         {
             var manifestPath = Path.Combine(dir, "plugin.json");
-            if (File.Exists(manifestPath)) result.Add(Load(dir, manifestPath));
+            if (!File.Exists(manifestPath)) continue;
+            if (skipLoaded && ManifestId(manifestPath) is { } id && Loaded.Any(p => p.Id == id && p.Loaded)) continue;
+            result.Add(Load(dir, manifestPath));
         }
         return result;
+    }
+
+    private static string? ManifestId(string manifestPath)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<Manifest>(File.ReadAllText(manifestPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true })?.Id;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException) { return null; }
     }
 
     public static PluginInfo Load(string dir, string manifestPath)

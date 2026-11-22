@@ -47,7 +47,13 @@ public static class Svc
         VideoBuilder.Media.ProxyStore.Divisor = Settings.ProxyDivisor is 4 ? 4 : 2;
         L.Initialize(LanguageOverride ?? Settings.Language);
         RegisterBundledFonts();
-        if (!_pluginsLoaded) { _pluginsLoaded = true; VideoBuilder.Rendering.PluginLoader.LoadAll(AppPaths.PluginDir); }
+        if (!_pluginsLoaded)
+        {
+            _pluginsLoaded = true;
+            // 利用者が入れたものを先に読み、同梱のもの (VOICEVOX 連携など) は同じ ID がなければ読む
+            VideoBuilder.Rendering.PluginLoader.LoadAll(AppPaths.PluginDir);
+            VideoBuilder.Rendering.PluginLoader.LoadAll(AppPaths.BundledPluginDir, skipLoaded: true);
+        }
         Session.History.Limit = Settings.UndoLimit;
         Theme = new ThemeService(app, Settings);
         Theme.Apply();

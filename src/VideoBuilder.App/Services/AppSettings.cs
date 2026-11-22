@@ -119,6 +119,8 @@ public static class AppPaths
     public static string DataDir => Xdg("XDG_DATA_HOME", Environment.SpecialFolder.LocalApplicationData, ".local", "share");
     public static string CacheDir => Xdg("XDG_CACHE_HOME", Environment.SpecialFolder.LocalApplicationData, ".cache");
     public static string PluginDir => Path.Combine(DataDir, "plugins");
+    /// <summary>アプリに同梱したプラグイン (実行ファイルの隣の plugins)。</summary>
+    public static string BundledPluginDir => Path.Combine(AppContext.BaseDirectory, "plugins");
     /// <summary>プラグインごとの設定などの置き場所 (plugin-data の下の、プラグインの ID のフォルダ)。</summary>
     public static string PluginDataDir => Path.Combine(DataDir, "plugin-data");
     public static string AliasDir => Path.Combine(DataDir, "aliases");
