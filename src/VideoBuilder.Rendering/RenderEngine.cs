@@ -660,8 +660,10 @@ public sealed class RenderEngine : IDisposable
             if (!e.Enabled || e.Definition.Category != EffectCategory.Filter) continue;
             bool independent = e.DefinitionId switch
             {
-                "filter.color" or "filter.mono" or "filter.fade" => true,
-                "filter.transition" => e.GetInt("type") is 0 or >= 6,   // フェード・スライド・ズーム (ワイプはぼかしの幅がピクセル単位)
+                // 色だけを変えるもの・描く位置だけを変えるもの・絵の大きさに対する割合で決まるもの
+                "filter.color" or "filter.mono" or "filter.fade" or "filter.levels" or "filter.posterize" or "filter.vignette" or "filter.anim" => true,
+                // フェード・スライド・ズーム・回転ズーム・ポップ (ワイプ・ぼかしはぼかしの幅がピクセル単位)
+                "filter.transition" => e.GetInt("type") is 0 or (>= 6 and <= 10) or 12 or 13,
                 _ => false,
             };
             if (!independent) return true;
@@ -1163,7 +1165,7 @@ public sealed class RenderEngine : IDisposable
             var cat = e.Definition.Category;
             if (cat is EffectCategory.AudioPlay or EffectCategory.AudioFilter) continue;
             // フェード・トランジションは時刻で変わる。結果が入力だけで決まらないもの (スクリプトなど) も変わりうる
-            if (cat == EffectCategory.Filter && (e.DefinitionId is "filter.fade" or "filter.transition"
+            if (cat == EffectCategory.Filter && (e.DefinitionId is "filter.fade" or "filter.transition" or "filter.anim"
                 || !Effects.IsDeterministic(e.DefinitionId, Effects.Find(e.DefinitionId)))) return false;
             foreach (var v in e.Tracks.Values)
             {

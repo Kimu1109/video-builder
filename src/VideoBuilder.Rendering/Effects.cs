@@ -5,7 +5,7 @@ using VideoBuilder.Plugins;
 namespace VideoBuilder.Rendering;
 
 /// <summary>組み込みのフィルタ効果。</summary>
-public static class Effects
+public static partial class Effects
 {
     private static readonly Dictionary<string, IVideoEffect> Map = new();
 
@@ -17,6 +17,7 @@ public static class Effects
         Register(new Clip()); Register(new Mosaic()); Register(new ChromaKey()); Register(new Mono());
         Register(new Flip()); Register(new Fade()); Register(new ScriptEffect());
         Register(new Mask()); Register(new Transition());
+        RegisterMore();
     }
 
     private static readonly Dictionary<string, VideoBuilder.Plugins.IVideoSource> Sources = new();
@@ -36,6 +37,8 @@ public static class Effects
     private static readonly HashSet<string> BuiltInDeterministic = new()
     {
         "filter.color", "filter.blur", "filter.border", "filter.shadow", "filter.clip", "filter.mosaic", "filter.chromakey", "filter.mono", "filter.flip", "filter.mask",
+        "filter.glow", "filter.dirblur", "filter.radialblur", "filter.sharpen", "filter.chromatic", "filter.vignette", "filter.gradient", "filter.diagclip",
+        "filter.levels", "filter.posterize",
     };
 
     /// <summary>結果を使い回してよい効果か (EffectFlags.Deterministic)。</summary>
@@ -83,12 +86,19 @@ public static class Effects
                 pendingArgs = args;
                 continue;
             }
-            if (pending != null) { sprite = ApplyMatrix(sprite, pendingArgs, pending); pending = null; }
-            sprite = fx.Apply(sprite, args);
+            if (pending != null) { sprite = KeepScale(ApplyMatrix(sprite, pendingArgs, pending), sprite); pending = null; }
+            sprite = KeepScale(fx.Apply(sprite, args), sprite);
         }
-        if (pending != null) sprite = ApplyMatrix(sprite, pendingArgs, pending);
+        if (pending != null) sprite = KeepScale(ApplyMatrix(sprite, pendingArgs, pending), sprite);
         return sprite;
     }
+
+    /// <summary>
+    /// 小さく作った絵 (Scale が 1 でない) にかけた効果が倍率 1 の絵を返したら、元の倍率に戻す。
+    /// 小さいままかけるのは、大きさによらない効果 (色の変換など) だけなので、倍率はそのまま引き継いでよい。
+    /// </summary>
+    private static Sprite KeepScale(Sprite result, Sprite input) =>
+        input.Scale != 1 && result.Scale == 1 ? result with { Scale = input.Scale } : result;
 
 
     internal static SKImageInfo Info(int w, int h) => new(Math.Max(1, w), Math.Max(1, h), SKColorType.Bgra8888, SKAlphaType.Premul);
@@ -699,9 +709,62 @@ public static class Effects
                 case 7: a.Context.Modifiers.Ox += W * (1 - e); return s;   // スライド (右から)
                 case 8: a.Context.Modifiers.Oy -= H * (1 - e); return s;   // スライド (上から)
                 case 9: a.Context.Modifiers.Oy += H * (1 - e); return s;   // スライド (下から)
-                default:  // ズーム
+                case 10:  // ズーム
                     a.Context.Modifiers.Zoom *= e;
                     return s;
+                case 11:  // ぼかし: ぼかしながら現れる (ぼかしの幅の 2 倍から 0 へ)
+                {
+                    a.Context.Modifiers.Alpha *= e;
+                    float radius = Math.Max(1, feather) * 2 * (1 - e);
+                    return radius < 0.5f ? s : Gaussian(s, a, radius, a.IsFrameBuffer);
+                }
+                case 12:  // 回転ズーム
+                    a.Context.Modifiers.Zoom *= e;
+                    a.Context.Modifiers.Rz -= 360 * (1 - e);
+                    return s;
+                case 13:  // ポップ: 少し大きくなってから戻る (加減速ではなく、行き過ぎて戻る動き)
+                {
+                    const double c1 = 1.70158, c3 = c1 + 1;
+                    double q = progress - 1;
+                    a.Context.Modifiers.Zoom *= (float)Math.Max(0, 1 + c3 * q * q * q + c1 * q * q);
+                    a.Context.Modifiers.Alpha *= (float)Math.Min(1, progress * 3);
+                    return s;
+                }
+                case 14:  // 時計回りワイプ: 真上から時計回りに扇形を広げる
+                {
+                    float r = MathF.Sqrt(s.Width * s.Width + s.Height * s.Height) + feather * 2;
+                    using var path = new SKPath();
+                    path.MoveTo(s.Cx, s.Cy);
+                    path.ArcTo(SKRect.Create(s.Cx - r, s.Cy - r, r * 2, r * 2), -90, 360 * e, false);
+                    path.Close();
+                    return Masked(s, a, path, feather, false);
+                }
+                case 15 or 16:  // ブラインド (横・縦): 帯ごとに少しずつ開く
+                {
+                    const int Slats = 8;
+                    bool horizontal = a.Effect.GetInt("type") == 15;
+                    float m = feather * 2 + 1;
+                    using var path = new SKPath();
+                    if (horizontal)
+                    {
+                        float hs = s.Height / (float)Slats;
+                        for (int i = 0; i < Slats; i++) path.AddRect(new SKRect(-m, i * hs, s.Width + m, i * hs + hs * e));
+                    }
+                    else
+                    {
+                        float ws = s.Width / (float)Slats;
+                        for (int i = 0; i < Slats; i++) path.AddRect(new SKRect(i * ws, -m, i * ws + ws * e, s.Height + m));
+                    }
+                    return Masked(s, a, path, Math.Min(feather, 4), false);
+                }
+                default:  // ひし形ワイプ: 中心からひし形を広げる
+                {
+                    float r = (s.Width + s.Height) / 2f * 1.05f * e + feather * 2 * e;
+                    using var path = new SKPath();
+                    path.MoveTo(s.Cx, s.Cy - r); path.LineTo(s.Cx + r, s.Cy); path.LineTo(s.Cx, s.Cy + r); path.LineTo(s.Cx - r, s.Cy);
+                    path.Close();
+                    return Masked(s, a, path, feather, false);
+                }
             }
         }
     }
