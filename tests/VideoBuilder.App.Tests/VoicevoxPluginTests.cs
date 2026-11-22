@@ -70,7 +70,8 @@ public class VoicevoxPluginTests
                 else if (path == "/speakers")
                     reply = Encoding.UTF8.GetBytes("""
                         [{"name":"四国めたん","speaker_uuid":"a","styles":[{"name":"ノーマル","id":2,"type":"talk"}]},
-                         {"name":"ずんだもん","speaker_uuid":"b","styles":[{"name":"ノーマル","id":3,"type":"talk"},{"name":"あまあま","id":1},{"name":"ハミング","id":3000,"type":"sing"}]}]
+                         {"name":"ずんだもん","speaker_uuid":"b","styles":[{"name":"ノーマル","id":3,"type":"talk"},{"name":"あまあま","id":1},{"name":"ハミング","id":3000,"type":"sing"},{"name":"ささやき","id":22,"type":"streaming_talk"}]},
+                         {"name":"波音リツ","speaker_uuid":"c","styles":[{"name":"ノーマル","id":6000,"type":"singing_teacher"},{"name":"クイーン","id":6001,"type":"frame_decode"}]}]
                         """);
                 else if (path.StartsWith("/audio_query"))
                     reply = Encoding.UTF8.GetBytes("""{"accent_phrases":[],"speedScale":1.0,"pitchScale":0.0,"intonationScale":1.0,"volumeScale":1.0,"prePhonemeLength":0.1,"postPhonemeLength":0.1,"outputSamplingRate":24000,"outputStereo":false,"kana":""}""");
@@ -200,9 +201,9 @@ public class VoicevoxPluginTests
         var client = new VoicevoxClient(engine.Url);
         Assert.Equal("0.21.1", await client.GetVersionAsync(default));
 
-        // 歌う用のスタイルは除く
+        // 歌う用のスタイル (sing・singing_teacher・frame_decode) は除く。streaming_talk (エンジン 0.26 から) はしゃべる用なので残す
         var styles = await client.GetStylesAsync(default);
-        Assert.Equal(new[] { 2, 3, 1 }, styles.Select(s => s.Id));
+        Assert.Equal(new[] { 2, 3, 1, 22 }, styles.Select(s => s.Id));
         Assert.Equal("ずんだもん (あまあま)", styles[2].Label);
 
         var wav = await client.SynthesizeAsync("こんにちは & さようなら", 1, new VoiceParams { Speed = 1.3 }, default);

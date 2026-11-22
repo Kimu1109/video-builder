@@ -89,6 +89,9 @@ public sealed class VoicevoxClient
         catch (JsonException) { return text; }
     }
 
+    /// <summary>歌う用のスタイルの種類 (VOICEVOX Engine の StyleType)。</summary>
+    private static readonly HashSet<string> SingingTypes = new(StringComparer.Ordinal) { "singing_teacher", "frame_decode", "sing" };
+
     /// <summary>しゃべる用のスタイルの一覧 (歌う用のスタイルは除く)。</summary>
     public async Task<List<VoiceStyle>> GetStylesAsync(CancellationToken ct)
     {
@@ -102,9 +105,10 @@ public sealed class VoicevoxClient
                 string name = speaker?["name"]?.GetValue<string>() ?? "";
                 foreach (var style in speaker?["styles"]?.AsArray() ?? new JsonArray())
                 {
-                    // type がない (古いエンジン) か "talk" のものだけ。歌う用 ("sing" など) は audio_query で使えない
+                    // 歌う用のスタイルは audio_query で使えないので除く。しゃべる用は "talk" のほか、
+                    // エンジン 0.26 から "streaming_talk" もある (これから増えても使えるよう、歌う用だけを除く)。type がないのは古いエンジン
                     var type = style?["type"]?.GetValue<string>();
-                    if (type != null && type != "talk") continue;
+                    if (type != null && SingingTypes.Contains(type)) continue;
                     var id = style?["id"]?.GetValue<int>();
                     if (id == null) continue;
                     result.Add(new VoiceStyle(id.Value, name, style?["name"]?.GetValue<string>() ?? ""));
