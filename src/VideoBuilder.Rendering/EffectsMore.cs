@@ -378,6 +378,36 @@ public static partial class Effects
     }
 
     /// <summary>
+    /// リール回転: スロットマシンのリールのように、オブジェクトの長さの間に「回転数」だけ回って、元の向きで止まる
+    /// (ゆっくり回り始めて速くなり、また遅くなって止まる)。速く回っている間は、回る向きにぼかす (ブラー)。
+    /// 横回転なら Y 軸 (左右) で回す。
+    /// </summary>
+    private static Sprite Reel(Sprite s, EffectArgs a, double t)
+    {
+        double total = a.Object == null ? 0 : a.Context.Project.FrameToSeconds(a.Object.Length);
+        float turns = a.Track("turns");
+        if (total <= 0 || turns == 0) return s;
+        double q = Math.Clamp(t / total, 0, 1);
+        // 加速して減速する動き (3 次のイーズ) と、その速さ
+        double ease = q < 0.5 ? 4 * q * q * q : 1 - Math.Pow(-2 * q + 2, 3) / 2;
+        double rate = q < 0.5 ? 12 * q * q : 3 * Math.Pow(-2 * q + 2, 2);   // d(ease)/dq
+        bool horizontal = a.Check("reelHorizontal");
+        float angle = (float)(360 * turns * ease);
+        ref var m = ref a.Context.Modifiers;
+        if (horizontal) m.Ry += angle; else m.Rx += angle;
+        // 1 フレームで回る角度 × 半径 = 端が動く距離。これにブラーの割合をかけた長さで、回る向きにぼかす
+        double perFrame = 2 * Math.PI * Math.Abs(turns) * rate / Math.Max(1, a.Object!.Length);
+        float half = (horizontal ? s.Width : s.Height) / 2f;
+        float length = (float)(perFrame * half * a.Track("reelBlur") / 100);
+        if (length < 1.5f) return s;
+        length = MathF.Min(length, half * 2);
+        float dx = horizontal ? 1 : 0, dy = horizontal ? 0 : 1;
+        int pad = (int)MathF.Ceiling(length / 2) + 1;
+        int passes = a.IsDraft ? 8 : 10;
+        return Resample(s, a, horizontal ? pad : 0, horizontal ? 0 : pad, (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, dx, dy, length, false, passes)) ?? s;
+    }
+
+    /// <summary>
     /// アニメーション効果: 振動・点滅・回転・鼓動・揺れ・浮遊・弾む・横揺れを、キーフレームなしで付ける。
     /// 絵は変えず、描く位置 (DrawModifiers) だけを変えるので軽い。時間はオブジェクトの先頭から数える。
     /// </summary>
@@ -441,8 +471,9 @@ public static partial class Effects
                     m.Ox += a.Track("dx") * k; m.Oy += a.Track("dy") * k;
                     break;
                 }
-                case 10: m.Rx += (float)(360 * speed * t); break;   // 回転 (X 軸・リール)
+                case 10: m.Rx += (float)(360 * speed * t); break;   // 回転 (X 軸)
                 case 11: m.Ry += (float)(360 * speed * t); break;   // 回転 (Y 軸)
+                case 13: return Reel(s, a, t);
                 default:  // 立方体の面: 6 つのオブジェクトに 1〜6 の面を割り当てると立方体になる (カメラ制御と使う)
                 {
                     float size = a.Track("cube");

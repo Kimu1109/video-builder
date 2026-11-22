@@ -661,10 +661,11 @@ public sealed class RenderEngine : IDisposable
             bool independent = e.DefinitionId switch
             {
                 // 色だけを変えるもの・描く位置だけを変えるもの・絵の大きさに対する割合で決まるもの
-                "filter.color" or "filter.mono" or "filter.fade" or "filter.levels" or "filter.posterize" or "filter.vignette" or "filter.anim"
+                "filter.color" or "filter.mono" or "filter.fade" or "filter.levels" or "filter.posterize" or "filter.vignette"
                     or "filter.extcolor" or "filter.hueconvert" or "filter.colorkey" or "filter.lumakey" or "filter.basic" or "filter.shake" => true,
                 // フェード・スライド・ズーム・回転ズーム・ポップ (ワイプ・ぼかしはぼかしの幅がピクセル単位)
-                "filter.transition" => e.GetInt("type") is 0 or (>= 6 and <= 10) or 12 or 13 or >= 18,
+                "filter.transition" => e.GetInt("type") is 0 or (>= 6 and <= 10) or 12 or 13 or (>= 18 and <= 26),
+                "filter.anim" => e.GetInt("type") != 13,   // リール回転はぼかしの長さがピクセル単位
                 _ => false,
             };
             if (!independent) return true;

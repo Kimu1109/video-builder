@@ -30,14 +30,14 @@ public static class EffectRegistry
         "スライド (左から)", "スライド (右から)", "スライド (上から)", "スライド (下から)", "ズーム",
         // 番号はプロジェクトファイルに残るので、増やすときは末尾に足す
         "ぼかし", "回転ズーム", "ポップ", "時計回りワイプ", "ブラインド (横)", "ブラインド (縦)", "ひし形ワイプ",
-        "ランダム方向から", "縮小して登場", "落ちて登場 (ランダムな間隔)", "弾んで登場", "広がって登場", "起き上がって登場",
-        "何処からともなく登場", "点滅して登場",
+        "ランダム方向から", "縮小して登場", "落ちて登場 (ランダムな間隔)", "落ちて弾む", "広がって登場", "起き上がって登場",
+        "集まって登場", "点滅して登場", "弾んで登場", "何処からともなく登場",
     };
     /// <summary>エフェクト「アニメーション効果」の種類。番号はプロジェクトファイルに残るので、増やすときは末尾に足す。</summary>
     public static readonly string[] AnimationTypes =
     {
         "震える", "点滅", "回転", "鼓動 (拡大縮小)", "揺れ (傾く)", "浮遊 (上下)", "弾む", "横揺れ",
-        "振り子", "反復移動", "回転 (X軸・リール)", "回転 (Y軸)", "立方体の面",
+        "振り子", "反復移動", "回転 (X軸)", "回転 (Y軸)", "立方体の面", "リール回転",
     };
     /// <summary>エフェクト「アニメーション効果」の立方体の面。</summary>
     public static readonly string[] CubeFaces = { "前", "後ろ", "右", "左", "上", "下" };
@@ -235,7 +235,13 @@ public static class EffectRegistry
             T("feather", "ぼかし", 0, 1000, 0, 0, 0, 200), C("invert", "反転 (図形の外側を残す)"));
         F("filter.transition", "トランジション", "Icon.Gradient",
             new ParamDefinition { Key = "type", Name = "種類", Kind = ParamKind.Choice, Choices = TransitionTypes },
-            T("in", "イン (秒)", 0, 60, 0.5, 2, 0, 5), T("out", "アウト (秒)", 0, 60, 0, 2, 0, 5), T("feather", "ぼかし", 0, 1000, 20, 0, 0, 200));
+            T("in", "イン (秒)", 0, 60, 0.5, 2, 0, 5), T("out", "アウト (秒)", 0, 60, 0, 2, 0, 5), T("feather", "ぼかし", 0, 1000, 20, 0, 0, 200),
+            // 弾んで登場 (26)
+            new() { Key = "height", Name = "高さ", Min = -1000, Max = 1000, Default = 200, Decimals = 0, ShowWhenKey = "type", ShowWhenValues = new[] { 26 } },
+            new() { Key = "bounces", Name = "回数", Min = 1, Max = 20, Default = 4, Decimals = 1, ShowWhenKey = "type", ShowWhenValues = new[] { 26 } },
+            // 何処からともなく登場 (27)
+            new() { Key = "range", Name = "位置", Min = 0, Max = 5, Default = 1.5, Decimals = 2, ShowWhenKey = "type", ShowWhenValues = new[] { 27 } },
+            new() { Key = "jumpBlur", Name = "移動のぼかし", Min = 0, Max = 5, Default = 1, Decimals = 2, ShowWhenKey = "type", ShowWhenValues = new[] { 27 } });
         // ---- ぼかし・光 (重い処理は複数スレッド・縮小計算で速くしている) ----
         F("filter.glow", "グロー", "Icon.LightMode",
             T("strength", "強さ", 0, 400, 100, 1, 0, 300), T("radius", "拡散", 0, 1000, 20, 0, 0, 200),
@@ -371,6 +377,15 @@ public static class EffectRegistry
             new ParamDefinition { Key = "mode", Name = "方式", Kind = ParamKind.Choice, Choices = new[] { "奇数の行", "偶数の行", "二重化", "平均" } });
         // ---- 配置・動き ----
         F("filter.shatter", "砕け散る", "Icon.Category",
+            T("start", "開始時間 (秒)", -100, 100, 0, 2, -5, 10),
+            T("x", "中心X", -1000, 1000, 0, 1), T("y", "中心Y", -1000, 1000, 0, 1),
+            T("size", "破片サイズ", 10, 1000, 50, 0, 10, 300), T("speed", "速度", 0, 10000, 100, 0, 0, 1000),
+            T("gravity", "重力", -10000, 10000, 100, 0, -500, 1000), T("delay", "時間差", 0, 10000, 100, 0, 0, 500),
+            T("distance", "距離影響", 0, 10000, 100, 0, 0, 500), T("rotation", "ランダム回転", 0, 10000, 100, 0, 0, 500),
+            T("direction", "ランダム方向", 0, 10000, 100, 0, 0, 500), T("playback", "再生速度", -10, 10, 1, 2, -4, 4),
+            T("seed", "乱数シード", 0, 99999, 0, 0, 0, 100));
+        // 以前の「砕け散る」(四角い破片が一度に飛び散って消える)
+        F("filter.scatter", "飛び散る", "Icon.Category",
             T("start", "開始 (秒)", 0, 3600, 0, 2, 0, 10), T("speed", "速さ", 0, 10000, 400, 0, 0, 2000), T("gravity", "重力", -10000, 10000, 600, 0, -2000, 3000),
             T("spin", "回転の速さ", 0, 3600, 360, 0, 0, 1080), T("size", "破片の大きさ", 2, 1000, 40, 0, 2, 200),
             T("x", "中心X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "中心Y", -99999.9, 99999.9, 0, 1, -2000, 2000),
@@ -392,6 +407,8 @@ public static class EffectRegistry
             AT("dx", "移動量X", -99999, 99999, 200, 1, -2000, 2000, 9), AT("dy", "移動量Y", -99999, 99999, 0, 1, -2000, 2000, 9),
             new ParamDefinition { Key = "face", Name = "面", Kind = ParamKind.Choice, Choices = CubeFaces, ShowWhenKey = "type", ShowWhenValues = new[] { 12 } },
             AT("cube", "立方体の大きさ (0 で幅)", 0, 99999, 0, 0, 0, 2000, 12),
+            AT("turns", "回転数", -50, 50, 1, 1, -10, 10, 13), AT("reelBlur", "ブラー", 0, 200, 100, 0, null, null, 13),
+            new ParamDefinition { Key = "reelHorizontal", Name = "横回転", Kind = ParamKind.Check, ShowWhenKey = "type", ShowWhenValues = new[] { 13 } },
             AT("rate", "揺れる回数 (回/秒)", 0.1, 240, 30, 1, 0.1, 60, 0),
             AT("rotation", "回転の揺れ", 0, 360, 0, 1, 0, 45, 0),
             AT("seed", "乱数シード", 0, 99999, 0, 0, 0, 100, 0),
@@ -479,7 +496,7 @@ public static class EffectRegistry
         "filter.raster" or "filter.ripple" or "filter.polar" or "filter.displace" or "filter.mirror" or "filter.kaleido" or "filter.sphere"
             or "filter.freeform" => "変形",
         "filter.clip" or "filter.diagclip" or "filter.mask" => "切り抜き・マスク",
-        "filter.anim" or "filter.basic" or "filter.shake" or "filter.loop" or "filter.shatter" or "filter.circle" or "filter.random" => "動き・配置",
+        "filter.anim" or "filter.basic" or "filter.shake" or "filter.loop" or "filter.shatter" or "filter.scatter" or "filter.circle" or "filter.random" => "動き・配置",
         _ => "切り替え・その他",
     };
 

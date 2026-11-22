@@ -780,7 +780,7 @@ public static partial class Effects
                     a.Context.Modifiers.Alpha *= MathF.Min(1, q * 4);
                     return s;
                 }
-                case 21:  // 弾んで登場: 上から落ちて、何度か弾んで止まる
+                case 21:  // 落ちて弾む (以前の「弾んで登場」): 上から落ちて、何度か弾んで止まる
                     a.Context.Modifiers.Oy -= H * 0.6f * (1 - BounceOut((float)progress));
                     return s;
                 case 22:  // 広がって登場: 横に広がって現れる
@@ -797,7 +797,7 @@ public static partial class Effects
                     a.Context.Modifiers.Oz += -half * MathF.Sin(rad);
                     return s;
                 }
-                case 24:  // 何処からともなく登場: ランダムな位置・回転から、薄く現れながら集まる
+                case 24:  // 集まって登場 (以前の「何処からともなく登場」): ランダムな位置・回転から、薄く現れながら集まる
                 {
                     uint seed = StableSeed(a.Object);
                     a.Context.Modifiers.Ox += (Rand01(0, seed, 23) - 0.5f) * W * (1 - e);
@@ -810,6 +810,42 @@ public static partial class Effects
                 case 25:  // 点滅して登場: 点滅しながら現れる
                     if (((int)(progress * 8) & 1) == 0) a.Context.Modifiers.Alpha = 0;
                     return s;
+                case 26:  // 弾んで登場: 右から、ぴょんぴょん跳ねながら入ってくる (アウトでは左へ跳ねながら出ていく)
+                {
+                    var (q, leaving) = Phase(a);
+                    float height = a.Track("height"), bounces = Math.Max(1, a.Track("bounces"));
+                    float dist = W / 2f + s.Width * s.Scale / 2f;
+                    a.Context.Modifiers.Ox += (leaving ? -dist : dist) * (float)(1 - q);
+                    // 跳ねる高さは、着くにつれて低くなる
+                    a.Context.Modifiers.Oy -= height * (float)(Math.Abs(Math.Sin(Math.PI * bounces * q)) * (1 - q * 0.6));
+                    return s;
+                }
+                case 27:  // 何処からともなく登場: 忍者のように、あちこちへ高速で移動してから止まる (移動中はぼかす)
+                {
+                    var (q, _) = Phase(a);
+                    const int Jumps = 4;
+                    uint seed = StableSeed(a.Object);
+                    float range = a.Track("range") * Math.Max(s.Width, s.Height) * s.Scale;
+                    (float X, float Y) P(int k) => k >= Jumps ? (0, 0) : ((Rand01((uint)k, seed, 41) * 2 - 1) * range, (Rand01((uint)k, seed, 42) * 2 - 1) * range);
+                    double f = q * Jumps;
+                    int k = Math.Min(Jumps - 1, (int)f);
+                    // 1 回の移動は、区間の始めの 35% ですばやく動き、残りは止まって見せる
+                    float u = (float)Math.Clamp((f - k) / 0.35, 0, 1);
+                    float ease = 1 - (1 - u) * (1 - u);
+                    var (ax, ay) = P(k); var (bx, by) = P(k + 1);
+                    a.Context.Modifiers.Ox += ax + (bx - ax) * ease;
+                    a.Context.Modifiers.Oy += ay + (by - ay) * ease;
+                    a.Context.Modifiers.Alpha *= (float)Math.Min(1, f * 4);   // 最初に現れる所だけ、すっと出す
+                    float blur = a.Track("jumpBlur");
+                    if (u >= 1 || blur <= 0) return s;
+                    // 動いている向きにぼかす (速いほど長く)
+                    float mx = (bx - ax) / Math.Max(0.01f, s.Scale), my = (by - ay) / Math.Max(0.01f, s.Scale);
+                    float len = MathF.Min(MathF.Sqrt(mx * mx + my * my) * 0.35f * blur * (1 - u), 2000);
+                    if (len < 1.5f) return s;
+                    int padX = (int)MathF.Ceiling(MathF.Abs(mx) / MathF.Max(1, MathF.Sqrt(mx * mx + my * my)) * len / 2) + 1;
+                    int padY = (int)MathF.Ceiling(MathF.Abs(my) / MathF.Max(1, MathF.Sqrt(mx * mx + my * my)) * len / 2) + 1;
+                    return Resample(s, a, padX, padY, (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, mx, my, len, false, a.IsDraft ? 8 : 10)) ?? s;
+                }
                 default:  // ひし形ワイプ: 中心からひし形を広げる
                 {
                     float r = (s.Width + s.Height) / 2f * 1.05f * e + feather * 2 * e;
@@ -820,6 +856,19 @@ public static partial class Effects
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// トランジションの進み具合 (0〜1、1 で効果なし) と、出ていく (アウト) 側か。入りと出が重なるときは、進みの小さい方。
+    /// </summary>
+    private static (double Progress, bool Leaving) Phase(EffectArgs a)
+    {
+        var p = a.Context.Project;
+        double t = p.FrameToSeconds(a.Context.Frame - a.Object.Start);
+        double rest = p.FrameToSeconds(a.Object.End + 1 - a.Context.Frame);
+        double fin = a.Track("in"), fout = a.Track("out");
+        double qi = fin > 0 ? Math.Clamp(t / fin, 0, 1) : 1, qo = fout > 0 ? Math.Clamp(rest / fout, 0, 1) : 1;
+        return qo < qi ? (qo, true) : (qi, false);
     }
 
     /// <summary>弾む動き (0〜1 → 0〜1。最後に 3 回弾んで止まる)。</summary>

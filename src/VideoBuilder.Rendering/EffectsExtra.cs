@@ -25,7 +25,7 @@ public static partial class Effects
         Register(new BasicEffect()); Register(new Shake()); Register(new ImageLoop()); Register(new FileBlend("filter.imageblend"));
         Register(new FileBlend("filter.videoblend")); Register(new Deinterlace());
         // 配置・動き
-        Register(new Shatter()); Register(new CircleArrange()); Register(new RandomArrange());
+        Register(new Shatter()); Register(new Scatter()); Register(new CircleArrange()); Register(new RandomArrange());
     }
 
     /// <summary>オブジェクトごとに決まる乱数の種 (同じオブジェクトなら、いつ描いても同じ)。</summary>
@@ -662,11 +662,11 @@ public static partial class Effects
     // ================= 配置・動き =================
 
     /// <summary>
-    /// 砕け散る: 開始時刻から、絵を小さな破片に分けて飛び散らせる (中心から外へ・重力で落ちる・回る・消える)。
+    /// 飛び散る (以前の「砕け散る」): 開始時刻から、絵を四角い破片に分けて一度に飛び散らせる (中心から外へ・重力で落ちる・回る・消える)。
     /// </summary>
-    private sealed class Shatter : IVideoEffect
+    private sealed class Scatter : IVideoEffect
     {
-        public string Id => "filter.shatter";
+        public string Id => "filter.scatter";
         public Sprite Apply(Sprite s, EffectArgs a)
         {
             float t = (float)(a.Time - a.Track("start"));
@@ -703,6 +703,103 @@ public static partial class Effects
                     c.Restore();
                 }
             });
+        }
+    }
+
+    /// <summary>
+    /// 砕け散る: 割れたガラスのように、ふぞろいな三角形の破片に割れて落ちる。
+    /// 中心から割れ始めて外へ広がり (時間差)、破片は外へ飛びながら重力で落ち、ばらばらに回る (奥行きの回転は縦横の縮みで表す)。
+    /// </summary>
+    private sealed class Shatter : IVideoEffect
+    {
+        public string Id => "filter.shatter";
+
+        public Sprite Apply(Sprite s, EffectArgs a)
+        {
+            float t = (float)((a.Time - a.Track("start")) * a.Track("playback"));
+            if (t <= 0) return s;
+            int piece = Math.Max(10, (int)MathF.Round(a.Track("size")));
+            float speed = a.Track("speed") / 100f, gravity = a.Track("gravity") / 100f * 980f;
+            float delay = Math.Max(0, a.Track("delay") / 100f), distance = Math.Max(0, a.Track("distance") / 100f);
+            float spin = Math.Max(0, a.Track("rotation") / 100f), randDir = Math.Max(0, a.Track("direction") / 100f);
+            float ecx = s.Cx + a.Track("x"), ecy = s.Cy + a.Track("y");
+            uint seed = (uint)(int)a.Track("seed") ^ StableSeed(a.Object);
+            int w = s.Width, h = s.Height;
+            int cols = Math.Max(1, (w + piece - 1) / piece), rows = Math.Max(1, (h + piece - 1) / piece);
+            float cw = w / (float)cols, ch = h / (float)rows;
+            // 格子の点 (内側の点だけをずらすので、破片どうしはすき間なく並ぶ)
+            var vx = new float[(cols + 1) * (rows + 1)]; var vy = new float[vx.Length];
+            for (int j = 0; j <= rows; j++)
+            for (int i = 0; i <= cols; i++)
+            {
+                int k = j * (cols + 1) + i;
+                bool inner = i > 0 && i < cols && j > 0 && j < rows;
+                vx[k] = i * cw + (inner ? (Rand01((uint)k, seed, 31) - 0.5f) * cw * 0.7f : 0);
+                vy[k] = j * ch + (inner ? (Rand01((uint)k, seed, 32) - 0.5f) * ch * 0.7f : 0);
+            }
+            float maxD = MathF.Max(1, MathF.Sqrt(MathF.Max(ecx * ecx, (w - ecx) * (w - ecx)) + MathF.Max(ecy * ecy, (h - ecy) * (h - ecy))));
+            var still = new SKPath();
+            var moving = new List<(SKPath Path, float Cx, float Cy, float Px, float Py, float Rz, float Sx, float Sy)>();
+            float reach = 0;
+            for (int j = 0; j < rows; j++)
+            for (int i = 0; i < cols; i++)
+            {
+                int k00 = j * (cols + 1) + i, k10 = k00 + 1, k01 = k00 + cols + 1, k11 = k01 + 1;
+                bool flip = Rand01((uint)k00, seed, 33) < 0.5f;
+                var tris = flip
+                    ? new[] { (k00, k10, k11), (k00, k11, k01) }
+                    : new[] { (k00, k10, k01), (k10, k11, k01) };
+                for (int n = 0; n < 2; n++)
+                {
+                    var (p0, p1, p2) = tris[n];
+                    float gx = (vx[p0] + vx[p1] + vx[p2]) / 3, gy = (vy[p0] + vy[p1] + vy[p2]) / 3;
+                    uint id = (uint)((j * cols + i) * 2 + n);
+                    float dx = gx - ecx, dy = gy - ecy, d = MathF.Sqrt(dx * dx + dy * dy);
+                    // 中心から遠い破片ほど遅れて割れる
+                    float tt = t - d / maxD * delay * 0.6f;
+                    var path = new SKPath();
+                    path.MoveTo(vx[p0], vy[p0]); path.LineTo(vx[p1], vy[p1]); path.LineTo(vx[p2], vy[p2]); path.Close();
+                    if (tt <= 0) { still.AddPath(path); path.Dispose(); continue; }
+                    float ang = (d < 1e-3f ? Rand01(id, seed, 34) * 2 * MathF.PI : MathF.Atan2(dy, dx)) + (Rand01(id, seed, 35) - 0.5f) * MathF.PI * randDir;
+                    // 中心に近い破片ほど強く飛ぶ (距離影響)
+                    float v = speed * 120 * (0.5f + Rand01(id, seed, 36)) * (1 + distance * (1 - d / maxD));
+                    float px = gx + MathF.Cos(ang) * v * tt, py = gy + MathF.Sin(ang) * v * tt + 0.5f * gravity * tt * tt;
+                    float rz = (Rand01(id, seed, 37) * 2 - 1) * 540 * spin * tt;
+                    float rx = (Rand01(id, seed, 38) * 2 - 1) * 9.4f * spin * tt, ry = (Rand01(id, seed, 39) * 2 - 1) * 9.4f * spin * tt;
+                    moving.Add((path, gx, gy, px, py, rz, MathF.Cos(ry), MathF.Cos(rx)));
+                    reach = MathF.Max(reach, MathF.Max(MathF.Abs(px - gx), MathF.Abs(py - gy)) + piece);
+                }
+            }
+            int W = a.Context.Project.Settings.Width, H = a.Context.Project.Settings.Height;
+            int pad = a.IsFrameBuffer ? 0 : (int)Math.Min(MathF.Ceiling(reach), Math.Max(W, H));
+            using var paint = new SKPaint { FilterQuality = SKFilterQuality.Low };
+            try
+            {
+                return Redraw(s, a, pad, pad, pad, pad, (c, x, y) =>
+                {
+                    // まだ割れていない部分は、まとめて 1 回で描く (破片の境目に線が出ない)
+                    if (!still.IsEmpty)
+                    {
+                        c.Save(); c.Translate(x, y); c.ClipPath(still, SKClipOperation.Intersect, true); c.DrawImage(s.Image, 0, 0, paint); c.Restore();
+                    }
+                    foreach (var m in moving)
+                    {
+                        c.Save();
+                        c.Translate(x + m.Px, y + m.Py);
+                        if (m.Rz != 0) c.RotateDegrees(m.Rz);
+                        c.Scale(m.Sx, m.Sy);
+                        c.Translate(-m.Cx, -m.Cy);
+                        c.ClipPath(m.Path, SKClipOperation.Intersect, true);
+                        c.DrawImage(s.Image, 0, 0, paint);
+                        c.Restore();
+                    }
+                });
+            }
+            finally
+            {
+                still.Dispose();
+                foreach (var m in moving) m.Path.Dispose();
+            }
         }
     }
 

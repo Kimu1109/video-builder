@@ -47,7 +47,7 @@ public class EffectTests
         "filter.extcolor", "filter.hueconvert", "filter.colorkey", "filter.lumakey", "filter.lensblur", "filter.motionblur",
         "filter.ripple", "filter.polar", "filter.displace", "filter.mirror", "filter.kaleido", "filter.sphere", "filter.freeform",
         "filter.basic", "filter.shake", "filter.loop", "filter.imageblend", "filter.videoblend", "filter.deinterlace",
-        "filter.shatter", "filter.circle", "filter.random",
+        "filter.shatter", "filter.scatter", "filter.circle", "filter.random",
     };
 
     [Fact]
@@ -445,13 +445,79 @@ public class EffectTests
 
         var q = Small();
         var s = AddShape(q, 0, "#FFFFFF", 100);
-        Filter(s, "filter.shatter", ("start", 0.5), ("fade", 0), ("speed", 60), ("gravity", 0), ("size", 20));
+        Filter(s, "filter.scatter", ("start", 0.5), ("fade", 0), ("speed", 60), ("gravity", 0), ("size", 20));
         using (var before = Render(q, 10)) Assert.Equal(SKColors.White, before.GetPixel(160 - 45, 120 - 45));
         using var after = Render(q, 50);
         int white = 0;
         for (int y = 0; y < 240; y += 2) for (int x = 0; x < 320; x += 2) if (after.GetPixel(x, y).Red > 200) white++;
         Assert.InRange(white, 50, 2400);                              // 破片は残っているが、元の四角形からは散っている
         Assert.NotEqual(SKColors.White, after.GetPixel(160 - 45, 120 - 45));
+    }
+
+    [Fact]
+    public void Shatter_breaks_from_the_center_outward_and_pieces_fall()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FFFFFF", 160);
+        Filter(o, "filter.shatter", ("start", 0.5), ("speed", 40), ("delay", 300), ("size", 20));
+        using (var before = Render(p, 10)) Assert.Equal(SKColors.White, before.GetPixel(160, 120));
+        // 割れ始めてすぐ: 中心の近くは割れて動き出しているが、外側 (角) はまだそのまま
+        using (var early = Render(p, 18))
+            Assert.Equal(SKColors.White, early.GetPixel(160 - 78, 120 - 78));
+        // しばらくすると重力で落ちて、上の方には何も残らない
+        using var late = Render(p, 59);
+        Assert.NotEqual(SKColors.White, late.GetPixel(160, 120 - 70));
+        int white = 0;
+        for (int y = 0; y < 240; y += 2) for (int x = 0; x < 320; x += 2) if (late.GetPixel(x, y).Red > 200) white++;
+        Assert.True(white > 20, "破片が描かれていない");
+    }
+
+    [Fact]
+    public void Bounce_in_comes_from_the_right_and_ninja_in_lands_in_place()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FFFFFF", 30);
+        var e = ObjectFactory.AddFilter(o, "filter.transition"); e.Values["type"] = "26"; e.Tracks["in"] = new AnimatedValue(1);
+        int frames = (int)Math.Round(p.Settings.Fps.Value);
+        // 入りの途中は右側にいる
+        using (var mid = Render(p, frames / 4))
+        {
+            int rightmost = -1, leftmost = 999;
+            for (int x = 0; x < 320; x++) for (int y = 0; y < 240; y += 2) if (mid.GetPixel(x, y).Red > 200) { rightmost = Math.Max(rightmost, x); leftmost = Math.Min(leftmost, x); }
+            Assert.True(leftmost > 160, "右から入ってこない: " + leftmost);
+        }
+        using (var done = Render(p, frames + 2)) Assert.Equal(SKColors.White, done.GetPixel(160, 120));
+
+        var q = Small();
+        var n = AddShape(q, 0, "#FFFFFF", 30);
+        var f = ObjectFactory.AddFilter(n, "filter.transition"); f.Values["type"] = "27"; f.Tracks["in"] = new AnimatedValue(1);
+        // 移動の途中: 中心から離れた所にいる。入り終わると元の位置
+        var positions = new HashSet<(int, int)>();
+        for (int fr = 1; fr < frames; fr += 3)
+        {
+            using var bmp = Render(q, fr);
+            long sx = 0, sy = 0, cnt = 0;
+            for (int y = 0; y < 240; y += 2) for (int x = 0; x < 320; x += 2) if (bmp.GetPixel(x, y).Red > 100) { sx += x; sy += y; cnt++; }
+            if (cnt > 0) positions.Add(((int)(sx / cnt) / 10, (int)(sy / cnt) / 10));
+        }
+        Assert.True(positions.Count >= 3, "あちこちへ移動していない: " + positions.Count);
+        using (var done = Render(q, frames + 2)) Assert.Equal(SKColors.White, done.GetPixel(160, 120));
+    }
+
+    [Fact]
+    public void Reel_spin_turns_with_blur_and_stops_upright()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FFFFFF", 100);
+        var e = ObjectFactory.AddFilter(o, "filter.anim");
+        e.Values["type"] = "13"; e.Tracks["turns"] = new AnimatedValue(3);
+        using (var start = Render(p, 0)) Assert.Equal(SKColors.White, start.GetPixel(160, 120 - 45));
+        using (var end = Render(p, 59)) Assert.Equal(SKColors.White, end.GetPixel(160, 120 - 45));   // 最後は元の向き
+        // 速く回っている途中は、縦にぼけて (縁がなだらか) いる
+        using var mid = Render(p, 30);
+        bool soft = false;
+        for (int y = 0; y < 240; y++) { var c = mid.GetPixel(160, y); if (c.Red > 30 && c.Red < 220) soft = true; }
+        Assert.True(soft, "回転中にぼけていない");
     }
 
     [Fact]
