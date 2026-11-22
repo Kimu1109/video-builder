@@ -1,5 +1,7 @@
 using Avalonia.Controls;
+using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.LogicalTree;
 using Avalonia.Threading;
@@ -302,5 +304,114 @@ public class PluginCommandTests
         Assert.Equal("あ\nい", ExposedValues.Get(objects, text));
         Assert.True(ExposedValues.IsText(ExposedValues.Resolve(objects, text)!.Value.Param));
         Assert.Null(ExposedValues.Get(objects, new ExposedParam { ObjectId = "nothing", Key = "text" }));
+    }
+
+    // ---------------- 入力パネル (API バージョン 5) ----------------
+
+    [AvaloniaFact]
+    public void Panel_stays_open_and_enter_presses_the_default_button()
+    {
+        var owner = new Window();
+        owner.Show();
+        var ctx = new PluginCommandContext(new EditorSession(), owner, "test.plugin", TempDir());
+        var pressed = new List<(string Text, double Number, bool Check)>();
+        var spec = new PluginPanel
+        {
+            Id = "test.panel", Title = "パネル", FocusKey = "text",
+            Fields =
+            {
+                new PluginTextField { Key = "text", Label = "文字", Required = true },
+                new PluginNumberField { Key = "n", Label = "数", Value = 1, Minimum = 0, Maximum = 10, Decimals = 1 },
+                new PluginCheckField { Key = "c", Label = "チェック", Value = true },
+                new PluginChoiceField { Key = "k", Label = "選ぶ", Value = "a", Options = { new("a", "A"), new("b", "B") } },
+            },
+        };
+        spec.Buttons.Add(new PluginPanelButton
+        {
+            Text = "置く", IsDefault = true,
+            OnClick = p =>
+            {
+                pressed.Add((spec.Get<PluginTextField>("text").Value, spec.Get<PluginNumberField>("n").Value, spec.Get<PluginCheckField>("c").Value));
+                p.SetValue("text", "");
+                p.SetStatus($"{pressed.Count} 回");
+                return Task.CompletedTask;
+            },
+        });
+        spec.Buttons.Add(new PluginPanelButton { Text = "失敗", CheckRequired = false, OnClick = _ => throw new InvalidOperationException("だめでした") });
+        try
+        {
+            var panel = ctx.ShowPanel(spec);
+            Dispatcher.UIThread.RunJobs();
+            var window = Assert.IsType<PluginPanelWindow>(Assert.Single(owner.OwnedWindows));
+            Assert.Same(window, panel);
+            var box = window.GetLogicalDescendants().OfType<TextBox>().First(t => t is not NumberBox);
+            Assert.True(box.IsFocused);   // FocusKey
+
+            // 空のままでは押せない
+            window.KeyPressQwerty(PhysicalKey.Enter, RawInputModifiers.None);
+            Assert.Empty(pressed);
+
+            // 入れて Enter → 押される。パネルは開いたまま、入力欄は空になる
+            box.Text = "いち";
+            window.KeyPressQwerty(PhysicalKey.Enter, RawInputModifiers.None);
+            Dispatcher.UIThread.RunJobs();
+            Assert.Equal(new[] { ("いち", 1.0, true) }, pressed);
+            Assert.True(panel.IsOpen);
+            Assert.Equal("", box.Text);
+            Assert.Equal("1 回", window.Status);
+
+            panel.SetValue("n", 2.5);
+            panel.SetValue("c", false);
+            panel.SetValue("k", "b");
+            Assert.Equal(1, window.GetLogicalDescendants().OfType<ComboBox>().Single().SelectedIndex);
+            box.Text = "に";
+            window.Click("置く");
+            Dispatcher.UIThread.RunJobs();
+            Assert.Equal(("に", 2.5, false), pressed[1]);
+
+            // 例外は状態の欄に出す (パネルは閉じない)
+            window.Click("失敗");
+            Dispatcher.UIThread.RunJobs();
+            Assert.Contains("だめでした", window.Status);
+            Assert.True(panel.IsOpen);
+
+            // 同じ Id なら、新しく開かずに同じものを返す
+            Assert.Same(panel, ctx.ShowPanel(spec));
+            Assert.Single(owner.OwnedWindows);
+
+            // 閉じると知らせが来て、次はまた新しく開く
+            bool closed = false;
+            panel.Closed += () => closed = true;
+            panel.Close();
+            Dispatcher.UIThread.RunJobs();
+            Assert.True(closed);
+            Assert.False(panel.IsOpen);
+            var again = ctx.ShowPanel(spec);
+            Assert.NotSame(panel, again);
+            again.Close();
+
+            // 画面がなければ、閉じたパネルが返る
+            Assert.False(new PluginCommandContext(new EditorSession(), null, "test.plugin", TempDir()).ShowPanel(spec).IsOpen);
+        }
+        finally { owner.Close(); }
+    }
+
+    [AvaloniaFact]
+    public void Seek_moves_the_playhead_and_edits_wait_for_the_users_drag()
+    {
+        var session = new EditorSession();
+        var ctx = new PluginCommandContext(session, null, "test.plugin", TempDir());
+        ctx.Seek(120);
+        Assert.Equal(120, session.CurrentFrame);
+        ctx.Seek(-5);
+        Assert.Equal(0, session.CurrentFrame);
+
+        Assert.True(ctx.CanEdit);
+        session.BeginEdit("ドラッグ");
+        Assert.False(ctx.CanEdit);
+        Assert.Throws<InvalidOperationException>(() => ctx.Edit("割り込み", e => e.AddText("x", 0, 0, 10)));
+        session.CommitEdit();
+        Assert.True(ctx.CanEdit);
+        Assert.Empty(session.Scene.Objects);
     }
 }

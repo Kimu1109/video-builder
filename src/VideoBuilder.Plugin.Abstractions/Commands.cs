@@ -75,6 +75,24 @@ public interface IPluginCommandContext
     /// </summary>
     Task<T> RunWithProgressAsync<T>(string title, Func<IProgress<PluginProgress>, CancellationToken, Task<T>> work);
 
+    // ---------------- 入力パネル・再生位置 (API バージョン 5 から) ----------------
+
+    /// <summary>
+    /// 開いたままの入力パネルを出す (すぐに戻る)。ボタンを押すたびに、そのボタンの OnClick が呼ばれる。
+    /// panel.Id が同じパネルがもう開いていれば、新しく出さずにそれを前に出して返す。
+    /// パネルが開いている間は、この context をボタンの処理で使ってよい。
+    /// </summary>
+    IPluginPanel ShowPanel(PluginPanel panel);
+
+    /// <summary>再生位置を動かす (シーンの中のフレーム)。</summary>
+    void Seek(int frame);
+
+    /// <summary>
+    /// 今プロジェクトを書き換えてよいか。利用者がドラッグなどで編集している途中なら false
+    /// (パネルの処理など、利用者の操作と並んで動く処理は、true になるまで待ってから Edit を呼ぶ)。
+    /// </summary>
+    bool CanEdit { get; }
+
     // ---------------- テンプレート (API バージョン 4 から) ----------------
 
     /// <summary>テンプレートのライブラリ (自分のものと共有フォルダのもの) の一覧。同じテンプレートの古い版は含めない。</summary>
@@ -91,6 +109,57 @@ public interface IPluginCommandContext
     /// テンプレートから置いたものでなければ空。
     /// </summary>
     IReadOnlyList<PluginTemplateField> TemplateFields(TimelineObject placed);
+}
+
+/// <summary>
+/// 開いたままの入力パネル (API バージョン 5 から)。項目は PluginForm と同じ。ボタンを押すと、入力された値を各項目の Value に書き戻してから
+/// OnClick を呼ぶ。パネルは閉じない (「閉じる」ボタンはパネルが付ける)。Enter キーは IsDefault のボタンを押す (1 行の文字の項目で)。
+/// </summary>
+public sealed class PluginPanel
+{
+    /// <summary>同じパネルを 2 つ開かないための目印 (プラグインの ID を頭に付ける)。</summary>
+    public string Id { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string? Message { get; set; }
+    public List<PluginField> Fields { get; set; } = new();
+    public List<PluginPanelButton> Buttons { get; set; } = new();
+    public double Width { get; set; } = 440;
+    /// <summary>開いたときにフォーカスを置く項目の Key。</summary>
+    public string? FocusKey { get; set; }
+
+    public T Get<T>(string key) where T : PluginField =>
+        Fields.OfType<T>().FirstOrDefault(f => f.Key == key) ?? throw new KeyNotFoundException(key);
+}
+
+public sealed class PluginPanelButton
+{
+    public string Text { get; set; } = "";
+    /// <summary>Enter キーで押されるボタン。</summary>
+    public bool IsDefault { get; set; }
+    /// <summary>true なら、必須の項目 (Required) が空のときは押せない。</summary>
+    public bool CheckRequired { get; set; } = true;
+    /// <summary>
+    /// 押されたときの処理。UI のスレッドで呼ばれる。時間のかかる処理は await し、終わるのを待たずに次の入力を受けたいなら、
+    /// 処理を自分の待ち行列に入れてすぐ戻る。例外はパネルの状態の欄に出る。
+    /// </summary>
+    public Func<IPluginPanel, Task>? OnClick { get; set; }
+}
+
+/// <summary>開いている入力パネルを操作する (UI のスレッドから呼ぶ)。</summary>
+public interface IPluginPanel
+{
+    bool IsOpen { get; }
+    /// <summary>パネルが閉じられた。</summary>
+    event Action? Closed;
+    /// <summary>パネルの下端に出す状態の文字 (null で消す)。</summary>
+    void SetStatus(string? text);
+    /// <summary>文字・選択 (選択肢の Value) の項目の値を変える。</summary>
+    void SetValue(string key, string value);
+    void SetValue(string key, double value);
+    void SetValue(string key, bool value);
+    /// <summary>項目にフォーカスを移す (文字の項目なら、カーソルを末尾に)。</summary>
+    void Focus(string key);
+    void Close();
 }
 
 /// <summary>ライブラリのテンプレート 1 つ。Id は版が変わっても同じ。</summary>

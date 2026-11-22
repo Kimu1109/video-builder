@@ -104,7 +104,7 @@ public readonly ref struct AudioBlock
 public static class PluginApi
 {
     /// <summary>このアプリのプラグイン API のバージョン。</summary>
-    public const int Version = 4;
+    public const int Version = 5;
     /// <summary>読み込めるいちばん古いバージョン (1 で作ったプラグインもそのまま動く)。</summary>
     public const int MinimumVersion = 1;
 }

@@ -14,10 +14,11 @@ public sealed class Plugin : IPlugin
 
     public void Initialize(IPluginHost host)
     {
-        // コマンドは API バージョン 3 から、テンプレートは 4 から (古いアプリでは何も登録しない)
-        if (host.ApiVersion < 4) { host.Log("このアプリのプラグイン API が古いため、使えません (4 以上が必要)"); return; }
+        // コマンドは API バージョン 3 から、テンプレートは 4 から、入力パネルは 5 から (古いアプリでは何も登録しない)
+        if (host.ApiVersion < 5) { host.Log("このアプリのプラグイン API が古いため、使えません (5 以上が必要)"); return; }
         host.RegisterCommand(new SynthesizeCommand());
         host.RegisterCommand(new ScriptCommand());
+        host.RegisterCommand(new QuickCommand());
         host.RegisterCommand(new RegenerateCommand());
         host.RegisterCommand(new SubtitleTemplateCommand());
         host.RegisterCommand(new SettingsCommand());
@@ -108,7 +109,11 @@ public sealed class Plugin : IPlugin
 
     /// <summary>選んだスタイル。値が数字でないとき (「今のまま」など) は null。</summary>
     internal static VoiceStyle? ReadStyle(PluginForm form, string key, IReadOnlyList<VoiceStyle> styles) =>
-        int.TryParse(form.Get<PluginChoiceField>(key).Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id)
+        ReadStyle(form.Get<PluginChoiceField>(key).Value, styles);
+
+    /// <summary>選択肢の値 (スタイルの ID) のスタイル。数字でないとき (「今のまま」など) は null。</summary>
+    internal static VoiceStyle? ReadStyle(string value, IReadOnlyList<VoiceStyle> styles) =>
+        int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id)
             ? styles.FirstOrDefault(s => s.Id == id)
             : null;
 }

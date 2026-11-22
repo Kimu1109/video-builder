@@ -82,7 +82,8 @@ public static class VoicePlacer
     /// 字幕は、plan で話者にテンプレートが決まっていればそのテンプレート (シーンオブジェクト 1 つ)、なければ文字だけのテキスト。
     /// 置く場所がなければ null (何も変えない)。まとめて 1 回で取り消せる。
     /// </summary>
-    public static List<Placed>? PlaceMany(IPluginCommandContext context, IReadOnlyList<VoiceClip> clips, int gapFrames, bool subtitle, string description, SubtitlePlan? plan = null)
+    /// <param name="layer">探し始めるレイヤー。null なら目安のレイヤー (選んでいるオブジェクトのレイヤー)。</param>
+    public static List<Placed>? PlaceMany(IPluginCommandContext context, IReadOnlyList<VoiceClip> clips, int gapFrames, bool subtitle, string description, SubtitlePlan? plan = null, int? layer = null)
     {
         if (clips.Count == 0) return new List<Placed>();
         var ranges = new List<(int Start, int End)>();
@@ -98,7 +99,7 @@ public static class VoicePlacer
         var scene = context.Scene;
         int needed = subtitle ? 2 : 1;
         int top = -1;
-        for (int l = Math.Max(0, context.TargetLayer); l + needed <= Scene.LayerCount && top < 0; l++)
+        for (int l = Math.Max(0, layer ?? context.TargetLayer); l + needed <= Scene.LayerCount && top < 0; l++)
             if (Enumerable.Range(l, needed).All(x => ranges.All(r => scene.IsFree(x, r.Start, r.End)))) top = l;
         if (top < 0) return null;
 

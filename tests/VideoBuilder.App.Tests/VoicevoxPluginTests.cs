@@ -3,7 +3,9 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Nodes;
 using Avalonia.Controls;
+using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.LogicalTree;
 using Avalonia.Threading;
@@ -978,5 +980,102 @@ public class VoicevoxPluginTests
             Assert.Equal(SkiaSharp.SKColors.Red, At(3.0));    // 声が終わったら閉じる
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    // ---------------- ポンポン置くモード ----------------
+
+    [AvaloniaFact]
+    public async Task Quick_mode_keeps_the_panel_open_and_places_lines_one_after_another()
+    {
+        using var engine = new FakeEngine { Seconds = 0.5 };
+        var owner = new Window();
+        owner.Show();
+        var session = new EditorSession();
+        session.CurrentFrame = 30;
+        var dataRoot = TempDir();
+        var ctx = new PluginCommandContext(session, owner, "voicevox", dataRoot);
+        new VoiceSettings { EngineUrl = engine.Url, StyleId = 3, ScriptGap = 0.2 }.Save(ctx.DataDirectory);
+        double fps = session.Project.Settings.Fps.Value;
+        int F(double sec) => (int)Math.Ceiling(sec * fps - 1e-6);
+        int gap = (int)Math.Round(0.2 * fps);
+        try
+        {
+            await new QuickCommand().RunAsync(ctx);   // パネルを出したらすぐ戻る
+            Dispatcher.UIThread.RunJobs();
+            var panel = Assert.IsType<PluginPanelWindow>(Assert.Single(owner.OwnedWindows));
+            var box = panel.GetLogicalDescendants().OfType<TextBox>().First(t => t is not NumberBox);
+            Assert.True(box.IsFocused);
+
+            // 続けて 3 つ入れる (1 つ目を作り終える前に、2 つ目・3 つ目を入れる)
+            foreach (var line in new[] { "いち", "四国めたん: に", "さん" })
+            {
+                box.Text = line;
+                panel.KeyPressQwerty(PhysicalKey.Enter, RawInputModifiers.None);
+                Assert.Equal("", box.Text);   // すぐ次を入れられる
+                Assert.True(box.IsFocused);
+            }
+            Assert.True(panel.IsOpen);
+            await Until(() => session.Scene.Objects.Count(o => o.Main.DefinitionId == EffectRegistry.Audio) == 3 && panel.Status?.StartsWith("置きました") == true);
+
+            // 入れた順に、再生位置から間を空けて並ぶ。字幕と音声のレイヤーはずっと同じ
+            var audios = session.Scene.Objects.Where(o => o.Main.DefinitionId == EffectRegistry.Audio).OrderBy(o => o.Start).ToList();
+            Assert.Equal(new[] { 30, 30 + F(0.5) + gap, 30 + 2 * (F(0.5) + gap) }, audios.Select(a => a.Start));
+            Assert.All(audios, a => Assert.Equal(1, a.Layer));
+            Assert.All(session.Scene.Objects.Where(o => o.Main.DefinitionId == EffectRegistry.Text), t => Assert.Equal(0, t.Layer));
+            Assert.Equal(new[] { "3", "2", "3" }, audios.Select(a => a.PluginData![VoiceInfo.KeyStyleId]));
+            Assert.Equal(audios[2].End + 1 + gap, session.CurrentFrame);   // 再生位置は最後のセリフの後ろ
+            Assert.Contains("さん", panel.Status);
+
+            // 1 つずつ取り消せる
+            session.Undo();
+            Assert.Equal(2, session.Scene.Objects.Count(o => o.Main.DefinitionId == EffectRegistry.Audio));
+        }
+        finally
+        {
+            owner.Close();
+            try { Directory.Delete(dataRoot, true); } catch { }
+        }
+    }
+
+    [AvaloniaFact]
+    public async Task Quick_mode_can_cancel_waiting_lines_and_waits_for_the_users_drag()
+    {
+        using var engine = new FakeEngine { Seconds = 0.5 };
+        var session = new EditorSession();
+        var dataRoot = TempDir();
+        var ctx = new PluginCommandContext(session, null, "voicevox", dataRoot);
+        new VoiceSettings { EngineUrl = engine.Url, StyleId = 3 }.Save(ctx.DataDirectory);
+        var styles = await new VoicevoxClient(engine.Url).GetStylesAsync(default);
+        var quick = new QuickSession(ctx, new VoicevoxClient(engine.Url), styles, VoiceSettings.Load(ctx.DataDirectory));
+        var panel = quick.Open();   // 画面がないので閉じたパネル (状態は Last で見る)
+        try
+        {
+            void Enter(string text) { quick.Spec.Get<PluginTextField>("text").Value = text; quick.Submit(panel); }
+
+            // 利用者がドラッグしている間は置かずに待つ
+            session.BeginEdit("ドラッグ");
+            Enter("いち");
+            Enter("に");
+            Enter("さん");
+            Assert.Equal(3, quick.Pending);
+            quick.CancelPending();       // 作っている途中の 1 つ目だけ残す
+            Assert.Equal(1, quick.Pending);
+            Assert.Contains("2 件を取り消しました", quick.Last);
+            await Task.Delay(300);
+            Dispatcher.UIThread.RunJobs();
+            Assert.Empty(session.Scene.Objects);   // まだ置いていない
+            session.CommitEdit();
+            await Until(() => quick.Running.IsCompleted);
+            Assert.Equal(1, quick.Placed);
+            Assert.Equal("いち", Assert.Single(session.Scene.Objects, o => o.Main.DefinitionId == EffectRegistry.Audio).PluginData![VoiceInfo.KeyText]);
+
+            // エンジンが止まっていても、パネルは使い続けられる (状態に出す)
+            engine.Dispose();
+            Enter("よん");
+            await Until(() => quick.Running.IsCompleted);
+            Assert.Contains("つながりません", quick.Last);
+            Assert.Equal(0, quick.Pending);
+        }
+        finally { try { Directory.Delete(dataRoot, true); } catch { } }
     }
 }

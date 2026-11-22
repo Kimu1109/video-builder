@@ -419,6 +419,7 @@ public class PluginApiTests
         Assert.Contains(("voicevox.script", "VOICEVOX"), commands);
         Assert.Contains(("voicevox.regenerate", "VOICEVOX"), commands);
         Assert.Contains(("voicevox.subtitleTemplate", "VOICEVOX"), commands);
+        Assert.Contains(("voicevox.quick", "VOICEVOX"), commands);
         // 口パク立ち絵 (メディアオブジェクト)
         Assert.Equal(EffectCategory.VideoSource, EffectRegistry.Get("voicevox.mouth").Category);
 

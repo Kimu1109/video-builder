@@ -66,6 +66,8 @@ public sealed class PluginCommandContext : IPluginCommandContext
     public void Edit(string description, Action<IPluginEditor> edit)
     {
         ArgumentNullException.ThrowIfNull(edit);
+        // 利用者のドラッグなどの途中に混ぜると、その操作と 1 回の取り消しにまとまってしまう
+        if (_session.IsEditing) throw new InvalidOperationException("編集の操作の途中のため、プロジェクトを書き換えられません。");
         var editor = new Editor(_session, this);
         _session.Edit(description, () => edit(editor));
         var ids = editor.ToSelect.Where(id => _session.Scene.Find(id) != null).ToList();
@@ -106,6 +108,60 @@ public sealed class PluginCommandContext : IPluginCommandContext
         }
         return await task;
     }
+
+    // ---------------- 入力パネル・再生位置 ----------------
+
+    // 開いている入力パネル (PluginPanel.Id ごとに 1 つ)
+    private static readonly Dictionary<string, PluginPanelWindow> OpenPanels = new();
+
+    /// <summary>開いている入力パネル (テスト用)。</summary>
+    public static PluginPanelWindow? FindPanel(string id) => OpenPanels.GetValueOrDefault(id);
+
+    public IPluginPanel ShowPanel(PluginPanel panel)
+    {
+        ArgumentNullException.ThrowIfNull(panel);
+        string key = PluginId + "|" + panel.Id;
+        if (OpenPanels.TryGetValue(key, out var open) && open.IsOpen)
+        {
+            open.Activate();
+            return open;
+        }
+        if (_owner == null) return new ClosedPanel();
+        var window = new PluginPanelWindow(panel, (w, b) => _ = PressAsync(w, b));
+        OpenPanels[key] = window;
+        window.PanelClosed += () => { if (OpenPanels.GetValueOrDefault(key) == window) OpenPanels.Remove(key); };
+        window.Show(_owner);
+        return window;
+    }
+
+    private async Task PressAsync(PluginPanelWindow window, PluginPanelButton button)
+    {
+        if (button.OnClick == null) return;
+        try { await button.OnClick(window); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            PluginLoader.Log(PluginId, $"{window.Spec.Id}: {ex}");
+            if (window.IsOpen) window.SetStatus("エラー: " + ex.Message);
+        }
+    }
+
+    /// <summary>画面のないとき (テストなど) に返す、閉じたパネル。</summary>
+    private sealed class ClosedPanel : IPluginPanel
+    {
+        public bool IsOpen => false;
+        public event Action? Closed { add { } remove { } }
+        public void SetStatus(string? text) { }
+        public void SetValue(string key, string value) { }
+        public void SetValue(string key, double value) { }
+        public void SetValue(string key, bool value) { }
+        public void Focus(string key) { }
+        public void Close() { }
+    }
+
+    public void Seek(int frame) => _session.CurrentFrame = Math.Max(0, frame);
+
+    public bool CanEdit => !_session.IsEditing;
 
     // ---------------- テンプレート ----------------
 

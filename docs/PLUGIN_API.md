@@ -1,4 +1,4 @@
-# プラグイン API (バージョン 4)
+# プラグイン API (バージョン 5)
 
 video-builder のプラグインは .NET のクラスライブラリです。見本は `samples/SamplePlugin`。
 
@@ -8,11 +8,11 @@ video-builder のプラグインは .NET のクラスライブラリです。見
 - `plugin.json`:
 
   ```json
-  { "id": "my.plugin", "name": "わたしのプラグイン", "version": "1.0.0", "apiVersion": 4, "assembly": "MyPlugin.dll" }
+  { "id": "my.plugin", "name": "わたしのプラグイン", "version": "1.0.0", "apiVersion": 5, "assembly": "MyPlugin.dll" }
   ```
 
-  `apiVersion` は `PluginApi.MinimumVersion` (1) 〜 `PluginApi.Version` (4) なら読み込みます。古いバージョンで作ったプラグインは作り直さずにそのまま動きます。
-  メニューのコマンド (`RegisterCommand`) を使うときは 3 以上、テンプレート (`ListTemplates` など) を使うときは 4 にします。
+  `apiVersion` は `PluginApi.MinimumVersion` (1) 〜 `PluginApi.Version` (5) なら読み込みます。古いバージョンで作ったプラグインは作り直さずにそのまま動きます。
+  メニューのコマンド (`RegisterCommand`) を使うときは 3 以上、テンプレート (`ListTemplates` など) は 4 以上、入力パネル (`ShowPanel`) は 5 にします。
   古いアプリでも動かしたいなら、`host.ApiVersion` を見て、使える機能だけを登録します。
 
 ## 登録できるもの
@@ -170,6 +170,43 @@ public sealed class InsertCaption : IPluginCommand
 | `PluginCheckField` | チェックボックス |
 
 フォームの画面は本体が作るので、プラグインは UI のライブラリに依存しません。文字はプラグインが付けたまま表示します (英語表示でも訳しません)。
+
+### 入力パネル (バージョン 5)
+
+`context.ShowPanel(PluginPanel)` は、閉じずに開いたままの入力パネルを出します (モーダルでないので、編集の画面も操作できます)。
+「入れて Enter → 裏で処理 → すぐ次を入れる」のような、続けて使う道具に向いています。
+
+```csharp
+var spec = new PluginPanel
+{
+    Id = "my.plugin.quick", Title = "続けて置く", FocusKey = "text",
+    Fields = { new PluginTextField { Key = "text", Label = "文字", Required = true } },
+};
+spec.Buttons.Add(new PluginPanelButton
+{
+    Text = "置く", IsDefault = true,   // 1 行の文字の項目で Enter を押すと、このボタンが押される
+    OnClick = panel =>
+    {
+        var text = spec.Get<PluginTextField>("text").Value;   // 押す前に書き戻されている
+        context.Edit("置く", e => e.AddText(text, 0, context.CurrentFrame, 60));
+        context.Seek(context.CurrentFrame + 60);
+        panel.SetValue("text", "");
+        panel.SetStatus($"置きました: {text}");
+        return Task.CompletedTask;
+    },
+});
+context.ShowPanel(spec);   // すぐ戻る。RunAsync も終わってよい
+```
+
+- ボタンを押すと、入力された値を各項目の `Value` に書き戻してから `OnClick` を呼びます。`CheckRequired` (既定 true) なら、必須の項目が空のときは呼びません。
+- `OnClick` の例外は、パネルの下端の状態の欄に出ます (パネルは閉じません)。「閉じる」ボタンはパネルが付けます。
+- `Id` が同じパネルがもう開いていれば、新しく出さずにそれを前に出します。
+- パネルが開いている間は、`ShowPanel` を呼んだときの `context` をボタンの処理で使ってかまいません。
+- 時間のかかる処理 (通信など) を待たずに次の入力を受けたいなら、処理を自分の待ち行列に入れてすぐ戻ります。
+  利用者の操作と並んで動く処理は、`context.CanEdit` が true になる (利用者のドラッグなどが終わる) のを待ってから `Edit` を呼びます
+  (編集の途中に `Edit` を呼ぶと例外になります)。
+- `context.Seek(frame)` で再生位置を動かせます。
+- `IPluginPanel` で、状態の文字 (`SetStatus`)・項目の値 (`SetValue`)・フォーカス (`Focus`) を変えたり、閉じたり (`Close`、`Closed` イベント) できます。
 
 ### テンプレート (バージョン 4)
 
