@@ -14,7 +14,7 @@ public static partial class Effects
 {
     private static void RegisterMore()
     {
-        Register(new Glow()); Register(new DirectionalBlur()); Register(new RadialBlur()); Register(new Sharpen());
+        Register(new Glow("filter.glow")); Register(new Glow("filter.emit")); Register(new DirectionalBlur()); Register(new RadialBlur()); Register(new Sharpen());
         Register(new ChromaticAberration()); Register(new Raster()); Register(new Noise()); Register(new Vignette());
         Register(new GradientOverlay()); Register(new DiagonalClip()); Register(new Levels()); Register(new Posterize());
         Register(new Animation());
@@ -79,9 +79,9 @@ public static partial class Effects
     /// グロー: 明るい部分 (しきい値より明るいところ) をぼかして、元の絵に足す (加算)。
     /// ぼかしは「ぼかし」と同じく、大きいときは縮小してから計算する。
     /// </summary>
-    private sealed class Glow : IVideoEffect
+    private sealed class Glow(string id) : IVideoEffect
     {
-        public string Id => "filter.glow";
+        public string Id => id;
         public Sprite Apply(Sprite s, EffectArgs a)
         {
             float strength = Math.Clamp(a.Track("strength") / 100f, 0, 4);
@@ -91,8 +91,29 @@ public static partial class Effects
             if (strength <= 0) return only ? Redraw(s, a, 0, 0, 0, 0, (_, _, _) => { }) : s;
 
             var bright = threshold > 0 ? WithPixels(s, a, (px, w, h, rb) => PixelFx.BrightPass(px, w, h, rb, threshold), alsoOnGpu: true) ?? s : s;
-            var glow = radius > 0 ? Gaussian(bright, a, radius, a.IsFrameBuffer) : bright;
-            float gx = glow.Cx - s.Cx, gy = glow.Cy - s.Cy;
+            // 形: 0 = 通常 (まわりに広がる)、1 = 十字、2 = 横、3 = 縦 (光の筋を方向ブラーで作る)
+            int shape = a.Effect.GetInt("shape");
+            var glows = new List<Sprite>();
+            if (shape == 0) glows.Add(radius > 0 ? Gaussian(bright, a, radius, a.IsFrameBuffer) : bright);
+            else
+            {
+                float len = MathF.Max(2, radius * 6);
+                foreach (float angle in shape == 1 ? new[] { 0f, 90f } : shape == 2 ? new[] { 0f } : new[] { 90f })
+                {
+                    bool vertical = angle != 0;
+                    int pp = a.IsFrameBuffer ? 0 : (int)MathF.Ceiling(len / 2) + 1;
+                    // 同じぼかしを 2 回かけて、筋の先を細く消えるようにする (箱形のままだと端がはっきり切れる)
+                    var streak = Resample(bright, a, vertical ? 0 : pp, vertical ? pp : 0, (src, tmp, w, h, rb) =>
+                    {
+                        var r1 = PixelFx.DirectionalBlur(src, tmp, w, h, rb, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
+                        return PixelFx.DirectionalBlur(r1, r1 == src ? tmp : src, w, h, rb, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
+                    });
+                    if (streak is { } st) glows.Add(st);
+                }
+                // 筋は細く伸ばすぶん暗くなるので、明るさを足す
+                strength = Math.Min(8, strength * 2);
+            }
+            float gx = glows.Count == 0 ? 0 : glows.Max(g => g.Cx - s.Cx), gy = glows.Count == 0 ? 0 : glows.Max(g => g.Cy - s.Cy);
             int pad = a.IsFrameBuffer ? 0 : Math.Max(0, (int)MathF.Ceiling(Math.Max(gx, gy)));
 
             SKColorFilter? tint = null;
@@ -122,7 +143,8 @@ public static partial class Effects
                 return Redraw(s, a, pad, pad, pad, pad, (cv, x, y) =>
                 {
                     if (!only) cv.DrawImage(s.Image, x, y);
-                    for (int i = 0; i < times; i++) cv.DrawImage(glow.Image, x - gx, y - gy, paint);
+                    foreach (var g in glows)
+                        for (int i = 0; i < times; i++) cv.DrawImage(g.Image, x - (g.Cx - s.Cx), y - (g.Cy - s.Cy), paint);
                 });
             }
         }
@@ -197,7 +219,7 @@ public static partial class Effects
             int pad = clamp ? 0 : (int)MathF.Ceiling(MathF.Abs(amount)) + 1;
             return Resample(s, a, pad, pad, (src, tmp, w, h, rb) =>
             {
-                PixelFx.ChromaticAberration(src, tmp, w, h, rb, dx, dy, radial, s.Cx + pad, s.Cy + pad, amount, clamp);
+                PixelFx.ChromaticAberration(src, tmp, w, h, rb, dx, dy, radial, s.Cx + pad, s.Cy + pad, amount, clamp, a.Effect.GetInt("type"));
                 return tmp;
             }) ?? s;
         }
@@ -402,7 +424,46 @@ public static partial class Effects
                 case 4: m.Rz += strength * (float)Math.Sin(phase); break;                           // 揺れ (傾く)
                 case 5: m.Oy += strength * (float)Math.Sin(phase); break;                           // 浮遊 (上下)
                 case 6: m.Oy -= strength * (float)Math.Abs(Math.Sin(phase / 2)); break;             // 弾む
-                default: m.Ox += strength * (float)Math.Sin(phase); break;                          // 横揺れ
+                case 7: m.Ox += strength * (float)Math.Sin(phase); break;                           // 横揺れ
+                case 8:   // 振り子: 上の端を支点にして左右に振れる
+                {
+                    float deg = strength * (float)Math.Sin(phase), rad = deg * MathF.PI / 180f;
+                    float half = s.Height * s.Scale / 2;
+                    m.Rz += deg;
+                    m.Ox += -half * MathF.Sin(rad);
+                    m.Oy += -half + half * MathF.Cos(rad);
+                    break;
+                }
+                case 9:   // 反復移動: (移動量X, 移動量Y) まで行って戻る (端で加減速)
+                {
+                    double tri = speed * t % 1;
+                    float k = (float)(0.5 - 0.5 * Math.Cos(2 * Math.PI * tri));
+                    m.Ox += a.Track("dx") * k; m.Oy += a.Track("dy") * k;
+                    break;
+                }
+                case 10: m.Rx += (float)(360 * speed * t); break;   // 回転 (X 軸・リール)
+                case 11: m.Ry += (float)(360 * speed * t); break;   // 回転 (Y 軸)
+                default:  // 立方体の面: 6 つのオブジェクトに 1〜6 の面を割り当てると立方体になる (カメラ制御と使う)
+                {
+                    float size = a.Track("cube");
+                    if (size <= 0) size = s.Width * s.Scale;
+                    float half = size / 2, spin = (float)(360 * speed * t), sr = spin * MathF.PI / 180f;
+                    // 面の中心 (立方体の中心から) と向き。Z は奥が +
+                    (float X, float Y, float Z, float Rx, float Ry) f = a.Effect.GetInt("face") switch
+                    {
+                        0 => (0, 0, -half, 0, 0),        // 前
+                        1 => (0, 0, half, 0, 180),       // 後ろ
+                        2 => (half, 0, 0, 0, -90),       // 右
+                        3 => (-half, 0, 0, 0, 90),       // 左
+                        4 => (0, -half, 0, -90, 0),      // 上
+                        _ => (0, half, 0, 90, 0),        // 下
+                    };
+                    // 立方体ごと Y 軸で回す
+                    float cs = MathF.Cos(sr), sn = MathF.Sin(sr);
+                    m.Ox += f.X * cs + f.Z * sn; m.Oy += f.Y; m.Oz += -f.X * sn + f.Z * cs;
+                    m.Rx += f.Rx; m.Ry += f.Ry + spin;
+                    break;
+                }
             }
             return s;
         }

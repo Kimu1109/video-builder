@@ -7,7 +7,7 @@ namespace VideoBuilder.Rendering;
 /// ピクセルを直接扱う処理。対象は 8bit BGRA (乗算済みアルファ)。どれも行ごとに複数スレッドへ分けて実行する。
 /// ピクセルは 32bit (下位から B, G, R, A) として扱い、2 チャンネルずつまとめて計算する (0x00FF00FF の形)。
 /// </summary>
-public static unsafe class PixelFx
+public static unsafe partial class PixelFx
 {
     private const uint LaneMask = 0x00FF00FF;
 
@@ -171,12 +171,15 @@ public static unsafe class PixelFx
     }
 
     /// <summary>
-    /// 色収差: 赤を (dx, dy)、青を (-dx, -dy) だけずらす。radial なら (cx, cy) からの距離に比例してずらす
+    /// 色収差 (色ずれ): pair = 0 なら赤を (dx, dy)、青を (-dx, -dy) だけずらす (1 = 赤と緑、2 = 緑と青)。radial なら (cx, cy) からの距離に比例してずらす
     /// (いちばん遠い点で amount ピクセル)。不透明度はずらした 3 色のうち大きいもの。
     /// </summary>
-    public static void ChromaticAberration(IntPtr src, IntPtr dst, int w, int h, int rowBytes, float dx, float dy, bool radial, float cx, float cy, float amount, bool clamp)
+    public static void ChromaticAberration(IntPtr src, IntPtr dst, int w, int h, int rowBytes, float dx, float dy, bool radial, float cx, float cy, float amount, bool clamp, int pair = 0)
     {
         uint* s = (uint*)src, o = (uint*)dst;
+        // 前にずらす色・後ろにずらす色・ずらさない色 (ピクセルの中の位置)
+        uint mFwd = pair == 2 ? 0xFF00u : 0xFF0000u, mBack = pair == 1 ? 0xFF00u : 0xFFu;
+        uint mKeep = 0xFFFFFFu & ~mFwd & ~mBack;
         int stride = rowBytes / 4;
         float far = MathF.Max(1, MathF.Sqrt(MathF.Max(cx * cx, (w - cx) * (w - cx)) + MathF.Max(cy * cy, (h - cy) * (h - cy))));
         float k = amount / far;
@@ -194,7 +197,7 @@ public static unsafe class PixelFx
                     uint b = Sample(s, w, h, stride, x + ox, y + oy, clamp);
                     uint ra = r >> 24, ga = g >> 24, ba = b >> 24;
                     uint al = Math.Max(ra, Math.Max(ga, ba));
-                    row[x] = (b & 0xFF) | (g & 0xFF00) | (r & 0xFF0000) | al << 24;
+                    row[x] = (b & mBack) | (g & mKeep) | (r & mFwd) | al << 24;
                 }
             }
         });

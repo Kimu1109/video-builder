@@ -6,6 +6,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using VideoBuilder.App.Services;
+using VideoBuilder.Core;
 
 namespace VideoBuilder.App.Controls;
 
@@ -243,6 +244,23 @@ public static class Menus
     }
 
     public static Separator Sep() => new();
+
+    /// <summary>
+    /// エフェクトを追加するメニューの項目。分類 (EffectDefinition.Group) ごとのサブメニューにまとめる
+    /// (分類のないプラグインの効果は「プラグイン」に入れる)。どれも分類がなければ (音声のエフェクトなど) 並べるだけ。
+    /// </summary>
+    public static IEnumerable<object> Effects(IEnumerable<EffectDefinition> defs, Action<EffectDefinition> add)
+    {
+        var list = defs.ToList();
+        object Leaf(EffectDefinition d) => Item(d.Name, d.Icon, () => add(d));
+        if (list.All(d => d.Group == null && EffectRegistry.IsBuiltin(d.Id))) return list.Select(Leaf).ToList();
+        string GroupOf(EffectDefinition d) => d.Group ?? (EffectRegistry.IsBuiltin(d.Id) ? "切り替え・その他" : "プラグイン");
+        var order = EffectRegistry.FilterGroups.ToList();
+        return list.GroupBy(GroupOf)
+            .OrderBy(g => order.IndexOf(g.Key) is var i && i >= 0 ? i : order.Count)
+            .Select(g => (object)Sub(g.Key, null, g.Select(Leaf)))
+            .ToList();
+    }
 
     /// <summary>
     /// 一覧 (ComboBox・AutoCompleteBox) の項目を訳さずに表示する。利用者が付けた名前 (カテゴリ・グループ) の一覧に使う。

@@ -1590,3 +1590,20 @@ public class UiTests
     }
 
 }
+
+public class EffectMenuTests
+{
+    [AvaloniaFact]
+    public void Filter_menu_is_grouped_by_category_and_lists_every_filter()
+    {
+        var items = Menus.Effects(EffectRegistry.Filters, _ => { }).Cast<MenuItem>().ToList();
+        Assert.Equal(EffectRegistry.FilterGroups.Length, items.Count);
+        int leaves = items.Sum(i => i.Items.Count);
+        Assert.Equal(EffectRegistry.Filters.Count(), leaves);
+
+        // 音声のエフェクトは分類がないので、サブメニューにせず並べる
+        var audio = Menus.Effects(EffectRegistry.AudioFilters, _ => { }).Cast<MenuItem>().ToList();
+        Assert.Equal(EffectRegistry.AudioFilters.Count(), audio.Count);
+        Assert.All(audio, a => Assert.Empty(a.Items));
+    }
+}

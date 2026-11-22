@@ -43,6 +43,11 @@ public class EffectTests
     {
         "filter.glow", "filter.dirblur", "filter.radialblur", "filter.sharpen", "filter.chromatic", "filter.raster", "filter.noise",
         "filter.vignette", "filter.gradient", "filter.diagclip", "filter.levels", "filter.posterize", "filter.anim",
+        "filter.emit", "filter.diffuse", "filter.flash", "filter.light", "filter.bevel", "filter.edge", "filter.edgeblur",
+        "filter.extcolor", "filter.hueconvert", "filter.colorkey", "filter.lumakey", "filter.lensblur", "filter.motionblur",
+        "filter.ripple", "filter.polar", "filter.displace", "filter.mirror", "filter.kaleido", "filter.sphere", "filter.freeform",
+        "filter.basic", "filter.shake", "filter.loop", "filter.imageblend", "filter.videoblend", "filter.deinterlace",
+        "filter.shatter", "filter.circle", "filter.random",
     };
 
     [Fact]
@@ -65,7 +70,12 @@ public class EffectTests
             var p = Small();
             AddShape(p, 0, "#204060", 0, 0);                       // 背景
             var star = AddShape(p, 1, "#FFD040", 120, 6);
+            star.Draw!.Tracks["x"] = new AnimatedValue(0) { Mode = MovementMode.Linear };
+            star.Draw!.Tracks["x"].Values[0] = -60; star.Draw!.Tracks["x"].Values[1] = 60;   // モーションブラー用に動かす
             Filter(star, id);
+            // 選択肢のあるパラメータは、いちばん後ろの選択肢でも描けること
+            var last = Filter(star, id);
+            foreach (var d in EffectRegistry.Get(id).Params.Where(d => d.Kind == ParamKind.Choice)) last.Values[d.Key] = (d.Choices.Length - 1).ToString();
             var text = ObjectFactory.Create(EffectRegistry.Text, 2, 0, 60);
             ObjectFactory.AddFilter(text, id);
             p.Root.Objects.Add(text);
@@ -356,6 +366,192 @@ public class EffectTests
     }
 
     [Fact]
+    public void Keys_remove_the_chosen_colors_and_brightness()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#20C040", 100);
+        var e = Filter(o, "filter.colorkey"); e.Values["color"] = "#20C040";
+        using (var bmp = Render(p)) Assert.Equal(SKColors.Black, bmp.GetPixel(160, 120));
+
+        var q = Small();
+        var dark = AddShape(q, 0, "#202020", 100);
+        Filter(dark, "filter.lumakey");                                       // 暗い部分を透明に
+        using (var bmp = Render(q)) Assert.Equal(SKColors.Black, bmp.GetPixel(160, 120));
+        dark.Main.Values["color"] = "#E0E0E0";
+        using (var bmp = Render(q)) Assert.Equal(new SKColor(0xE0, 0xE0, 0xE0), bmp.GetPixel(160, 120));
+    }
+
+    [Fact]
+    public void Hue_conversion_changes_only_the_chosen_hue()
+    {
+        var p = Small();
+        var red = AddShape(p, 0, "#FF0000", 80); red.Draw!.Tracks["x"] = new AnimatedValue(-80);
+        var green = AddShape(p, 1, "#00FF00", 80); green.Draw!.Tracks["x"] = new AnimatedValue(80);
+        p.Root.Objects.Add(ObjectFactory.Create("filter.hueconvert", 2, 0, 60));   // 赤 → 青
+        using var bmp = Render(p);
+        var r = bmp.GetPixel(80, 120);
+        Assert.True(r.Blue > 200 && r.Red < 40, "赤が青にならない: " + r);
+        Assert.Equal(new SKColor(0, 255, 0), bmp.GetPixel(240, 120));
+    }
+
+    [Fact]
+    public void Mirror_draws_a_fading_reflection_below()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FFFFFF", 60); o.Draw!.Tracks["y"] = new AnimatedValue(-40);
+        Filter(o, "filter.mirror", ("alpha", 0), ("fade", 100));
+        using var bmp = Render(p);
+        var near = bmp.GetPixel(160, 120 - 40 + 32);    // 映り込みの上の方 (明るい)
+        var far = bmp.GetPixel(160, 120 - 40 + 85);     // 下の方 (薄い)
+        Assert.True(near.Red > 180, "映り込みがない: " + near);
+        Assert.True(far.Red < near.Red - 60, $"離れても薄くならない: {near} {far}");
+    }
+
+    [Fact]
+    public void Sphere_and_polar_and_freeform_change_the_shape()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FFFFFF", 160);
+        Filter(o, "filter.sphere", ("size", 100));
+        using (var bmp = Render(p))
+        {
+            Assert.Equal(SKColors.Black, bmp.GetPixel(160 - 48, 120 - 48));   // 角は丸く欠ける
+            Assert.True(bmp.GetPixel(160, 120).Red > 200);
+            Assert.Equal(SKColors.Black, bmp.GetPixel(160 + 70, 120));       // 直径 100 の外
+        }
+
+        var q = Small();
+        var f = AddShape(q, 0, "#FFFFFF", 100);
+        Filter(f, "filter.freeform", ("x1", 40), ("x4", 40));                // 左の辺を右へ
+        using (var bmp = Render(q))
+        {
+            Assert.Equal(SKColors.Black, bmp.GetPixel(160 - 45, 120));
+            Assert.Equal(SKColors.White, bmp.GetPixel(160 + 45, 120));
+        }
+    }
+
+    [Fact]
+    public void Arrangements_draw_copies_and_shatter_scatters_pieces()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FFFFFF", 20);
+        Filter(o, "filter.circle", ("count", 4), ("radius", 80));
+        using (var bmp = Render(p))
+        {
+            Assert.Equal(SKColors.White, bmp.GetPixel(160, 40));     // 上
+            Assert.Equal(SKColors.White, bmp.GetPixel(240, 120));    // 右
+            Assert.Equal(SKColors.Black, bmp.GetPixel(160, 120));    // 中心には描かない
+        }
+
+        var q = Small();
+        var s = AddShape(q, 0, "#FFFFFF", 100);
+        Filter(s, "filter.shatter", ("start", 0.5), ("fade", 0), ("speed", 60), ("gravity", 0), ("size", 20));
+        using (var before = Render(q, 10)) Assert.Equal(SKColors.White, before.GetPixel(160 - 45, 120 - 45));
+        using var after = Render(q, 50);
+        int white = 0;
+        for (int y = 0; y < 240; y += 2) for (int x = 0; x < 320; x += 2) if (after.GetPixel(x, y).Red > 200) white++;
+        Assert.InRange(white, 50, 2400);                              // 破片は残っているが、元の四角形からは散っている
+        Assert.NotEqual(SKColors.White, after.GetPixel(160 - 45, 120 - 45));
+    }
+
+    [Fact]
+    public void Motion_blur_follows_the_objects_movement()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FFFFFF", 40);
+        var x = o.Draw!.Tracks["x"]; x.Mode = MovementMode.Linear; x.Values[0] = -300; x.Values[1] = 300;   // 1 フレーム約 10px 右へ
+        Filter(o, "filter.motionblur", ("shutter", 300));
+        using var bmp = Render(p, 30);
+        float cx = 160 + (float)(-300 + 600.0 * 30 / 59);
+        Assert.True(bmp.GetPixel((int)cx - 30, 120).Red > 20, "後ろに尾を引いていない");
+        Assert.Equal(SKColors.Black, bmp.GetPixel((int)cx, 120 + 30));
+    }
+
+    [Fact]
+    public void Edge_detection_and_lens_blur_and_bevel_work()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FFFFFF", 100);
+        Filter(o, "filter.edge");
+        using (var bmp = Render(p))
+        {
+            Assert.True(bmp.GetPixel(160 - 50, 120).Red > 100, "縁が線にならない");
+            Assert.Equal(SKColors.Black, bmp.GetPixel(160, 120));   // 中は消える
+        }
+
+        var q = Small();
+        Filter(AddShape(q, 0, "#FFFFFF", 100), "filter.lensblur", ("radius", 30));
+        using (var bmp = Render(q))
+        {
+            Assert.InRange(bmp.GetPixel(160 + 50, 120).Red, 60, 200);   // 縁がぼける
+            Assert.Equal(SKColors.White, bmp.GetPixel(160, 120));
+        }
+
+        var r = Small();
+        AddShape(r, 0, "#808080", 0, 0);
+        Filter(AddShape(r, 1, "#808080", 100), "filter.bevel", ("width", 16));
+        using (var bmp = Render(r))
+        {
+            Assert.True(bmp.GetPixel(160 - 46, 120 - 46).Red > 0x90, "光の側が明るくない");
+            Assert.True(bmp.GetPixel(160 + 46, 120 + 46).Red < 0x70, "影の側が暗くない");
+        }
+    }
+
+    [Fact]
+    public void Image_loop_tiles_and_image_blend_uses_the_file()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FFFFFF", 40);
+        Filter(o, "filter.loop", ("countX", 3), ("countY", 1));
+        using (var bmp = Render(p))
+        {
+            Assert.Equal(SKColors.White, bmp.GetPixel(160 - 40, 120));
+            Assert.Equal(SKColors.White, bmp.GetPixel(160 + 40, 120));
+        }
+
+        var file = Path.Combine(Path.GetTempPath(), $"vb-blend-{Guid.NewGuid():N}.png");
+        try
+        {
+            using (var bmp = new SKBitmap(16, 16)) { bmp.Erase(SKColors.Red); File.WriteAllBytes(file, bmp.Encode(SKEncodedImageFormat.Png, 100).ToArray()); }
+            var q = Small();
+            var s = AddShape(q, 0, "#FFFFFF", 60);
+            var e = Filter(s, "filter.imageblend", ("scale", 1000));
+            e.Values["file"] = file; e.Values["blend"] = "2";               // 乗算
+            using var bmp2 = Render(q);
+            Assert.Equal(new SKColor(255, 0, 0), bmp2.GetPixel(160, 120));
+            Assert.Equal(SKColors.Black, bmp2.GetPixel(160 + 50, 120));      // 形の外には描かない
+        }
+        finally { File.Delete(file); }
+    }
+
+    [Fact]
+    public void Cube_faces_and_basic_effect_and_new_transitions_place_objects()
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FFFFFF", 40);
+        var e = Filter(o, "filter.basic", ("x", 80), ("aspect", 50));
+        using (var bmp = Render(p))
+        {
+            Assert.Equal(SKColors.White, bmp.GetPixel(240, 120 - 15));
+            Assert.Equal(SKColors.Black, bmp.GetPixel(240 + 15, 120));      // 横が半分になる
+        }
+
+        // 立方体の右の面は、横を向く (正面からは線のように細く見える)
+        var c = Small();
+        var face = AddShape(c, 0, "#FFFFFF", 80);
+        var anim = ObjectFactory.AddFilter(face, "filter.anim");
+        anim.Values["type"] = "12"; anim.Values["face"] = "2"; anim.Tracks["speed"] = new AnimatedValue(0);
+        using (var bmp = Render(c)) Assert.Equal(SKColors.Black, bmp.GetPixel(160 + 40 - 20, 120));
+
+        // 弾んで登場: 入りの途中は上にいて、入り終わると元の位置
+        var t = Small();
+        var d = AddShape(t, 0, "#FFFFFF", 40);
+        var tr = ObjectFactory.AddFilter(d, "filter.transition"); tr.Values["type"] = "21"; tr.Tracks["in"] = new AnimatedValue(1);
+        using (var bmp = Render(t, 3)) Assert.Equal(SKColors.Black, bmp.GetPixel(160, 120));
+        using (var bmp = Render(t, 40)) Assert.Equal(SKColors.White, bmp.GetPixel(160, 120));
+    }
+
+    [Fact]
     public void Heavy_effects_render_full_hd_in_reasonable_time()
     {
         // 1080p の画面全体にかける。時間は表示するだけ (CI の速さはまちまちなので、極端に遅くないことだけ確かめる)
@@ -363,6 +559,8 @@ public class EffectTests
         {
             ("filter.glow", "radius", 40.0), ("filter.dirblur", "length", 120.0), ("filter.radialblur", "amount", 30.0),
             ("filter.sharpen", "radius", 3.0), ("filter.chromatic", "amount", 8.0), ("filter.raster", "amplitude", 30.0), ("filter.noise", "amount", 30.0),
+            ("filter.lensblur", "radius", 40.0), ("filter.ripple", "amplitude", 20.0), ("filter.kaleido", "count", 6.0), ("filter.edge", "strength", 100.0),
+            ("filter.bevel", "width", 12.0), ("filter.light", "width", 20.0), ("filter.flash", "length", 60.0), ("filter.diffuse", "radius", 40.0),
         })
         {
             var p = Small(1920, 1080);

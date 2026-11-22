@@ -134,7 +134,7 @@ public sealed class TimelineView : UserControl
         }
         menu.Items.Add(Menus.Sub("オブジェクトを追加", "AddBox", media));
         menu.Items.Add(Menus.Sub("調整レイヤーを追加", "Filter",
-            EffectRegistry.Filters.Select(f => (object)Menus.Item(f.Name, f.Icon, () => _session.AddObject(f.Id, hit.Layer, hit.Frame, len)))));
+            Menus.Effects(EffectRegistry.Filters, f => _session.AddObject(f.Id, hit.Layer, hit.Frame, len))));
         var templates = Svc.Templates.List();
         var templateItems = new List<object>();
         foreach (var group in templates.GroupBy(t => t.Category))
@@ -205,7 +205,7 @@ public sealed class TimelineView : UserControl
         }
         menu.Items.Add(Menus.Sep());
         menu.Items.Add(Menus.Sub("エフェクトの追加", "AddBox",
-            EffectRegistry.FiltersFor(o).Select(f => (object)Menus.Item(f.Name, f.Icon, () => _session.AddFilter(o, f.Id)))));
+            Menus.Effects(EffectRegistry.FiltersFor(o), f => _session.AddFilter(o, f.Id))));
         menu.Items.Add(Menus.Item("オブジェクトを有効にする", null, () =>
         {
             var targets = _session.WithGroup(_session.SelectedObjects.ToList());

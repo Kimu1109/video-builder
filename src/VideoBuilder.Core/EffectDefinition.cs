@@ -55,6 +55,8 @@ public sealed class EffectDefinition
     public string Icon { get; init; } = "Icon.Filter";
     /// <summary>タイムライン上のオブジェクト色 (#RRGGBB)。</summary>
     public string Color { get; init; } = "#7A7A7A";
+    /// <summary>エフェクトを追加するメニューでの分類 (「色」「ぼかし」など)。null ならプラグインは「プラグイン」、それ以外は分けずに並べる。</summary>
+    public string? Group { get; init; }
     public IReadOnlyList<ParamDefinition> Params { get; init; } = Array.Empty<ParamDefinition>();
 
     public ParamDefinition? Find(string key) => Params.FirstOrDefault(p => p.Key == key);
