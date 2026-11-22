@@ -237,7 +237,7 @@ public class VoicevoxPluginTests
         var style = new VoiceStyle(3, "ずんだもん", "ノーマル");
         double fps = session.Project.Settings.Fps.Value;
 
-        var placed = VoicePlacer.Place(ctx, "/tmp/voice.wav", 1.01, "こんにちは", style, new VoiceParams { Speed = 1.2 }, subtitle: true);
+        var placed = VoicePlacer.Place(ctx, new VoiceClip("/tmp/voice.wav", 1.01, "こんにちは", style, new VoiceParams { Speed = 1.2 }), subtitle: true);
         Assert.NotNull(placed);
         var (audio, caption) = (placed!.Audio, placed.Subtitle!);
         int expected = (int)Math.Ceiling(1.01 * fps);
@@ -246,13 +246,13 @@ public class VoicevoxPluginTests
         Assert.Equal("こんにちは", caption.Main.Values["text"]);
         Assert.Equal("/tmp/voice.wav", audio.Main.Values["file"]);
         Assert.Equal(caption.GroupId, audio.GroupId);
-        Assert.Equal("こんにちは", audio.PluginData![VoicePlacer.KeyText]);
-        Assert.Equal("3", audio.PluginData[VoicePlacer.KeyStyleId]);
-        Assert.Equal("ずんだもん (ノーマル)", audio.PluginData[VoicePlacer.KeySpeaker]);
-        Assert.Contains("1.2", audio.PluginData[VoicePlacer.KeyParams]);
+        Assert.Equal("こんにちは", audio.PluginData![VoiceInfo.KeyText]);
+        Assert.Equal("3", audio.PluginData[VoiceInfo.KeyStyleId]);
+        Assert.Equal("ずんだもん (ノーマル)", audio.PluginData[VoiceInfo.KeySpeaker]);
+        Assert.Contains("1.2", audio.PluginData[VoiceInfo.KeyParams]);
 
         // 字幕なし: 音声だけ
-        var only = VoicePlacer.Place(ctx, "/tmp/voice2.wav", 0.5, "やあ", style, new VoiceParams(), subtitle: false);
+        var only = VoicePlacer.Place(ctx, new VoiceClip("/tmp/voice2.wav", 0.5, "やあ", style, new VoiceParams()), subtitle: false);
         Assert.Null(only!.Subtitle);
         Assert.Null(only.Audio.GroupId);
 
@@ -273,7 +273,7 @@ public class VoicevoxPluginTests
         session.Select(session.Scene.Objects[0].Id);
         var ctx = new PluginCommandContext(session, null, "voicevox", TempDir());
         string? before = session.History.UndoDescription;
-        Assert.Null(VoicePlacer.Place(ctx, "/tmp/v.wav", 1, "a", new VoiceStyle(3, "ずんだもん", "ノーマル"), new VoiceParams(), subtitle: true));
+        Assert.Null(VoicePlacer.Place(ctx, new VoiceClip("/tmp/v.wav", 1, "a", new VoiceStyle(3, "ずんだもん", "ノーマル"), new VoiceParams()), subtitle: true));
         Assert.Single(session.Scene.Objects);
         Assert.Equal("準備", before);
         Assert.Equal(before, session.History.UndoDescription);   // 空の取り消しを残さない
@@ -346,7 +346,7 @@ public class VoicevoxPluginTests
 
             // 前回の話者 (あまあま = 1) と話速がエンジンに渡り、設定に残る
             Assert.Contains(engine.Requests, r => r.PathAndQuery.StartsWith("/synthesis") && r.PathAndQuery.Contains("speaker=1") && r.Body.Contains("\"speedScale\":1.5"));
-            Assert.Equal("1", audio.PluginData![VoicePlacer.KeyStyleId]);
+            Assert.Equal("1", audio.PluginData![VoiceInfo.KeyStyleId]);
             Assert.Equal(1, VoiceSettings.Load(ctx.DataDirectory).StyleId);
         }
         finally
@@ -404,9 +404,229 @@ public class VoicevoxPluginTests
             await Until(() => owner.OwnedWindows.OfType<MessageDialog>().Any());
             var message = owner.OwnedWindows.OfType<MessageDialog>().Single();
             Assert.Contains("0.21.1", Texts(message));
+            Assert.Contains("話者 2 人・スタイル 4 個", Texts(message));   // 話者の一覧も読めている
             message.Close();
             await Until(() => run.IsCompleted);
             Assert.Equal(engine.Url, VoiceSettings.Load(ctx.DataDirectory).EngineUrl);
+        }
+        finally
+        {
+            owner.Close();
+            try { Directory.Delete(dataRoot, true); } catch { }
+        }
+    }
+
+    // ---------------- 台本から一括で作る ----------------
+
+    private static readonly List<VoiceStyle> Styles = new()
+    {
+        new(2, "四国めたん", "ノーマル"), new(3, "ずんだもん", "ノーマル"), new(1, "ずんだもん", "あまあま"), new(22, "ずんだもん", "ささやき"),
+    };
+
+    [Fact]
+    public void Script_lines_pick_speakers_by_name()
+    {
+        var zundaSweet = Styles[2];
+        var lines = ScriptParser.Parse("""
+            # コメントの行は飛ばす
+            ずんだもん: こんにちはなのだ
+            四国めたん：こんにちは
+
+            ずんだもん（ささやき）： ないしょなのだ
+            ず ん だ も ん (ノーマル):ふつうなのだ
+            時刻は 10:30 です
+            知らない人: だれ？
+            話者のない行
+            ずんだもん:
+            """, Styles, zundaSweet);
+        Assert.Equal(new[]
+        {
+            (2, "こんにちはなのだ", 1),        // キャラクター名だけ: 既定と同じキャラクターなので既定のスタイル (あまあま)
+            (3, "こんにちは", 2),              // 全角のコロン。ほかのキャラクターは最初のスタイル
+            (5, "ないしょなのだ", 22),         // スタイル付き (全角の括弧)
+            (6, "ふつうなのだ", 3),            // 空白は無視
+            (7, "時刻は 10:30 です", 1),       // コロンの前が話者でなければ、行全体を既定の話者で
+            (8, "知らない人: だれ？", 1),
+            (9, "話者のない行", 1),
+        }, lines.Select(l => (l.LineNumber, l.Text, l.Style.Id)));
+    }
+
+    private static VoiceClip Clip(string text, double seconds, int style = 3) =>
+        new($"/tmp/{text}.wav", seconds, text, Styles.First(s => s.Id == style), new VoiceParams());
+
+    [AvaloniaFact]
+    public void Script_clips_are_laid_out_in_order_on_one_pair_of_layers()
+    {
+        var session = new EditorSession();
+        session.CurrentFrame = 30;
+        // レイヤー 1 の 100 フレーム目だけふさがっている → 3 つ目がぶつかるので、レイヤー 2・3 に並べる
+        session.Edit("準備", () => session.Scene.Objects.Add(ObjectFactory.Create(EffectRegistry.Shape, 1, 100, 1)));
+        var ctx = new PluginCommandContext(session, null, "voicevox", TempDir());
+        int F(double sec) => (int)Math.Ceiling(sec * session.Project.Settings.Fps.Value - 1e-6);
+
+        var placed = VoicePlacer.PlaceMany(ctx, new[] { Clip("一", 1.0), Clip("二", 0.5, 1), Clip("三", 0.8, 2) }, gapFrames: 6, subtitle: true, "台本");
+        Assert.NotNull(placed);
+        Assert.Equal(3, placed!.Count);
+        int start = 30;
+        foreach (var (p, sec) in placed.Zip(new[] { 1.0, 0.5, 0.8 }))
+        {
+            Assert.Equal((2, start, F(sec)), (p.Subtitle!.Layer, p.Subtitle.Start, p.Subtitle.Length));
+            Assert.Equal((3, start, F(sec)), (p.Audio.Layer, p.Audio.Start, p.Audio.Length));
+            Assert.Equal(p.Subtitle.GroupId, p.Audio.GroupId);
+            start += F(sec) + 6;
+        }
+        Assert.Equal(3, placed.Select(p => p.Audio.GroupId).Distinct().Count());   // 1 組ずつ別のグループ
+        Assert.Equal("1", placed[1].Audio.PluginData![VoiceInfo.KeyStyleId]);
+        Assert.Equal(6, session.SelectionIds.Count);
+
+        // まとめて 1 回で取り消せる
+        Assert.Equal("台本", session.History.UndoDescription);
+        session.Undo();
+        Assert.Single(session.Scene.Objects);
+    }
+
+    // ---------------- 作り直す ----------------
+
+    [AvaloniaFact]
+    public void Targets_are_found_from_audio_or_its_subtitle_and_replaced_in_place()
+    {
+        var session = new EditorSession();
+        var ctx = new PluginCommandContext(session, null, "voicevox", TempDir());
+        int F(double sec) => (int)Math.Ceiling(sec * session.Project.Settings.Fps.Value - 1e-6);
+        var placed = VoicePlacer.PlaceMany(ctx, new[] { Clip("一", 1.0), Clip("二", 1.0) }, gapFrames: 0, subtitle: true, "台本")!;
+        var regen = new RegenerateCommand();
+
+        // 何も選んでいない・VOICEVOX でないものだけを選んでいる → 対象なし
+        session.Select(null);
+        Assert.False(regen.CanRun(ctx));
+        var shape = ObjectFactory.Create(EffectRegistry.Shape, 10, 0, 10);
+        session.Edit("図形", () => session.Scene.Objects.Add(shape));
+        session.Select(shape.Id);
+        Assert.Empty(VoicePlacer.FindTargets(ctx));
+
+        // 字幕を選んでも、同じグループの音声が対象になる。字幕を直していれば、直した文字が今のセリフ
+        var first = placed[0];
+        session.Edit("字幕を直す", () => session.Scene.Find(first.Subtitle!.Id)!.Main.Values["text"] = "直したセリフ");
+        session.Select(first.Subtitle!.Id);
+        Assert.True(regen.CanRun(ctx));
+        var target = Assert.Single(VoicePlacer.FindTargets(ctx));
+        Assert.Equal(first.Audio.Id, target.Audio.Id);
+        Assert.Equal("直したセリフ", target.CurrentText);
+        Assert.Equal("一", target.Info.Text);
+
+        // 短くなるものは差し替える。長くなって次のセリフにぶつかるものは差し替えない
+        session.SelectMany(new[] { first.Audio.Id, placed[1].Audio.Id });
+        var targets = VoicePlacer.FindTargets(ctx);
+        Assert.Equal(2, targets.Count);
+        var blocked = VoicePlacer.Replace(ctx, new[]
+        {
+            (targets[0], Clip("直したセリフ", 0.5, 22) with { Path = "/tmp/new1.wav" }),
+        });
+        Assert.Empty(blocked);
+        var audio = session.Scene.Find(first.Audio.Id)!;
+        var caption = session.Scene.Find(first.Subtitle.Id)!;
+        Assert.Equal("/tmp/new1.wav", audio.Main.Values["file"]);
+        Assert.Equal(F(0.5), audio.Length);
+        Assert.Equal(F(0.5), caption.Length);
+        Assert.Equal("直したセリフ", caption.Main.Values["text"]);
+        Assert.Equal("22", audio.PluginData![VoiceInfo.KeyStyleId]);
+        Assert.Equal("直したセリフ", audio.PluginData[VoiceInfo.KeyText]);
+        Assert.Equal("VOICEVOX の音声を作り直す", session.History.UndoDescription);
+
+        // 1 つ目を元の長さより長くすると、すぐ後ろの 2 つ目にぶつかる
+        var longer = VoicePlacer.Replace(ctx, new[] { (VoicePlacer.FindTargets(ctx)[0], Clip("長い", 1.5)) });
+        Assert.Single(longer);
+        Assert.Equal(F(0.5), session.Scene.Find(first.Audio.Id)!.Length);   // 変わらない
+        Assert.Equal("VOICEVOX の音声を作り直す", session.History.UndoDescription);
+
+        // 取り消すと、元のファイル・長さ・情報に戻る
+        session.Undo();
+        audio = session.Scene.Find(first.Audio.Id)!;
+        Assert.Equal("/tmp/一.wav", audio.Main.Values["file"]);
+        Assert.Equal(F(1.0), audio.Length);
+        Assert.Equal("一", VoiceInfo.Read(audio)!.Text);
+    }
+
+    [AvaloniaFact]
+    public void Regenerate_form_keeps_each_speaker_when_many_are_selected()
+    {
+        var session = new EditorSession();
+        var ctx = new PluginCommandContext(session, null, "voicevox", TempDir());
+        var placed = VoicePlacer.PlaceMany(ctx, new[] { Clip("一", 1.0, 3), Clip("二", 1.0, 2) }, 0, subtitle: false, "台本")!;
+        session.SelectMany(placed.Select(p => p.Audio.Id));
+        var targets = VoicePlacer.FindTargets(ctx);
+
+        var form = RegenerateCommand.BuildForm(ctx, targets, Styles);
+        Assert.Equal(RegenerateCommand.Keep, form.Get<PluginChoiceField>("style").Value);
+        Assert.Equal(new[] { ("一", 3), ("二", 2) }, RegenerateCommand.ReadForm(form, targets, Styles).Select(r => (r.Text, r.Style.Id)));
+        form.Get<PluginChoiceField>("style").Value = "22";
+        Assert.All(RegenerateCommand.ReadForm(form, targets, Styles), r => Assert.Equal(22, r.Style.Id));
+
+        // 1 つなら、セリフ・話者・調整の値を変えられる
+        var single = RegenerateCommand.BuildForm(ctx, targets.Take(1).ToList(), Styles);
+        Assert.Equal("一", single.Get<PluginTextField>("text").Value);
+        Assert.Equal("3", single.Get<PluginChoiceField>("style").Value);
+
+        // 作ったときの話者が今のエンジンにない
+        var others = new List<VoiceStyle> { new(99, "だれか", "ノーマル") };
+        form.Get<PluginChoiceField>("style").Value = RegenerateCommand.Keep;
+        Assert.Throws<VoicevoxException>(() => RegenerateCommand.ReadForm(form, targets, others));
+    }
+
+    [AvaloniaFact]
+    public async Task Script_and_regenerate_commands_run_end_to_end_against_the_engine()
+    {
+        using var engine = new FakeEngine { Seconds = 0.5 };
+        var owner = new Window();
+        owner.Show();
+        var session = new EditorSession();
+        var dataRoot = TempDir();
+        var ctx = new PluginCommandContext(session, owner, "voicevox", dataRoot);
+        new VoiceSettings { EngineUrl = engine.Url, StyleId = 3, ScriptGap = 0.2 }.Save(ctx.DataDirectory);
+        int F(double sec) => (int)Math.Ceiling(sec * session.Project.Settings.Fps.Value - 1e-6);
+        try
+        {
+            // 台本: 3 行 (話者付き 2 行)
+            var run = new ScriptCommand().RunAsync(ctx);
+            await Until(() => owner.OwnedWindows.OfType<PluginFormDialog>().Any() || run.IsCompleted);
+            var form = Assert.Single(owner.OwnedWindows.OfType<PluginFormDialog>());
+            form.GetLogicalDescendants().OfType<TextBox>().First(t => t is not NumberBox).Text = "ずんだもん: いち\n四国めたん: に\nさん";
+            Click(form, "作って並べる");
+            await Until(() => run.IsCompleted);
+            await run;
+            Assert.Empty(owner.OwnedWindows);
+            var audios = session.Scene.Objects.Where(o => o.Main.DefinitionId == EffectRegistry.Audio).OrderBy(o => o.Start).ToList();
+            Assert.Equal(3, audios.Count);
+            int gap = (int)Math.Round(0.2 * session.Project.Settings.Fps.Value);   // セリフの間 0.2 秒
+            Assert.Equal(new[] { 0, F(0.5) + gap, 2 * (F(0.5) + gap) }, audios.Select(a => a.Start));
+            Assert.Equal(new[] { "3", "2", "3" }, audios.Select(a => a.PluginData![VoiceInfo.KeyStyleId]));
+            Assert.Equal(new[] { "speaker=3", "speaker=2", "speaker=3" },
+                engine.Requests.Where(r => r.PathAndQuery.StartsWith("/synthesis")).Select(r => r.PathAndQuery.Split('?')[1]));
+            Assert.Equal(0.2, VoiceSettings.Load(ctx.DataDirectory).ScriptGap);
+
+            // 2 つ目の字幕を直して、字幕を選んで作り直す (エンジンは今度は 0.4 秒の音声を返すので、短くなる)
+            engine.Seconds = 0.4;
+            var second = audios[1];
+            var oldFile = second.Main.Values["file"];
+            var caption = session.Scene.Objects.Single(o => o.GroupId == second.GroupId && o.Main.DefinitionId == EffectRegistry.Text);
+            session.Edit("字幕を直す", () => caption.Main.Values["text"] = "にい");
+            session.Select(caption.Id);
+            var regen = new RegenerateCommand().RunAsync(ctx);
+            await Until(() => owner.OwnedWindows.OfType<PluginFormDialog>().Any() || regen.IsCompleted);
+            var regenForm = Assert.Single(owner.OwnedWindows.OfType<PluginFormDialog>());
+            Assert.Equal("にい", regenForm.GetLogicalDescendants().OfType<TextBox>().First(t => t is not NumberBox).Text);
+            Click(regenForm, "作り直す");
+            await Until(() => regen.IsCompleted);
+            await regen;
+            Assert.Empty(owner.OwnedWindows);
+            var after = session.Scene.Find(second.Id)!;
+            Assert.Equal(F(0.4), after.Length);
+            Assert.NotEqual(oldFile, after.Main.Values["file"]);   // 前のファイルは残す (取り消せるように)
+            Assert.True(File.Exists(oldFile));
+            Assert.True(File.Exists(after.Main.Values["file"]));
+            Assert.Equal("にい", after.PluginData![VoiceInfo.KeyText]);
+            Assert.Equal("2", after.PluginData[VoiceInfo.KeyStyleId]);   // 話者はそのまま
+            Assert.Contains(engine.Requests, r => r.PathAndQuery.StartsWith("/audio_query") && Uri.UnescapeDataString(r.PathAndQuery).Contains("text=にい"));
         }
         finally
         {

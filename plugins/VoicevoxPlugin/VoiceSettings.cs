@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json;
-using VideoBuilder.Core;
 using VideoBuilder.Plugins;
 
 namespace VoicevoxPlugin;
@@ -16,6 +15,8 @@ public sealed class VoiceSettings
     public VoiceParams Voice { get; set; } = new();
     /// <summary>字幕 (テキストオブジェクト) も置く。</summary>
     public bool AddSubtitle { get; set; } = true;
+    /// <summary>台本から一括で作るときの、セリフとセリフの間 (秒)。</summary>
+    public double ScriptGap { get; set; } = 0.3;
 
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
@@ -29,6 +30,7 @@ public sealed class VoiceSettings
             var s = JsonSerializer.Deserialize<VoiceSettings>(File.ReadAllText(path), Options) ?? new VoiceSettings();
             if (VoicevoxClient.ParseUrl(s.EngineUrl) == null) s.EngineUrl = VoicevoxClient.DefaultUrl;
             s.Voice = (s.Voice ?? new VoiceParams()).Clamped();
+            s.ScriptGap = double.IsFinite(s.ScriptGap) ? Math.Clamp(s.ScriptGap, 0, 10) : 0.3;
             return s;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException) { return new VoiceSettings(); }
@@ -80,57 +82,5 @@ public static class VoiceFiles
         // 半端なサロゲートを残さない
         if (sb.Length > 0 && char.IsHighSurrogate(sb[^1])) sb.Length--;
         return sb.ToString().Trim('_', '.');
-    }
-}
-
-/// <summary>作った音声 (と字幕) をタイムラインに置く。</summary>
-public static class VoicePlacer
-{
-    // PluginData のキー (あとで作り直すときに使う)
-    public const string KeyText = "voicevox.text";
-    public const string KeyStyleId = "voicevox.styleId";
-    public const string KeySpeaker = "voicevox.speaker";
-    public const string KeyParams = "voicevox.params";
-
-    public sealed record Placed(TimelineObject Audio, TimelineObject? Subtitle);
-
-    /// <summary>
-    /// 再生位置に音声を置く。字幕も置くなら、字幕を目安のレイヤー (から下の空いているところ) に、音声をそのすぐ下に置いて、グループにする。
-    /// 置く場所がなければ null (何も変えない)。1 回で取り消せる。
-    /// </summary>
-    public static Placed? Place(IPluginCommandContext context, string wavPath, double seconds, string text, VoiceStyle style, VoiceParams voice, bool subtitle)
-    {
-        var fps = context.Project.Settings.Fps.Value;
-        // 終わりが切れないよう、端数は切り上げる
-        int length = Math.Max(1, (int)Math.Ceiling(seconds * fps - 1e-6));
-        int frame = Math.Max(0, context.CurrentFrame);
-        int end = frame + length - 1;
-
-        // 置く場所を先に決める (置けないときに、空の取り消し履歴を残さないため)
-        var scene = context.Scene;
-        int needed = subtitle ? 2 : 1;
-        int top = -1;
-        for (int l = Math.Max(0, context.TargetLayer); l + needed <= Scene.LayerCount && top < 0; l++)
-            if (Enumerable.Range(l, needed).All(x => scene.IsFree(x, frame, end))) top = l;
-        if (top < 0) return null;
-
-        Placed? result = null;
-        context.Edit("VOICEVOX の音声を置く", e =>
-        {
-            var caption = subtitle ? e.AddText(text, top, frame, length) : null;
-            var audio = e.AddAudioFile(wavPath, subtitle ? top + 1 : top, frame, length);
-            if (audio == null || subtitle && caption == null) throw new InvalidOperationException("音声を置けませんでした。");
-            audio.PluginData = new Dictionary<string, string>
-            {
-                [KeyText] = text,
-                [KeyStyleId] = style.Id.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                [KeySpeaker] = style.Label,
-                [KeyParams] = JsonSerializer.Serialize(voice),
-            };
-            if (caption != null) e.Group(new[] { caption, audio });
-            e.Select(caption != null ? new[] { caption, audio } : new[] { audio });
-            result = new Placed(audio, caption);
-        });
-        return result;
     }
 }
