@@ -6,7 +6,11 @@ using VideoBuilder.Plugins;
 namespace VoicevoxPlugin;
 
 /// <summary>作った音声 1 つ (ファイル・長さ・セリフ・話者・調整の値)。</summary>
-public sealed record VoiceClip(string Path, double Seconds, string Text, VoiceStyle Style, VoiceParams Voice);
+public sealed record VoiceClip(string Path, double Seconds, string Text, VoiceStyle Style, VoiceParams Voice)
+{
+    /// <summary>口パクの時刻表 (LipSync.Encode)。作れなかったときは null。</summary>
+    public string? Lips { get; init; }
+}
 
 /// <summary>音声オブジェクトに残す、作ったときの情報 (TimelineObject.PluginData)。</summary>
 public sealed record VoiceInfo(string Text, int StyleId, string Speaker, VoiceParams Voice)
@@ -15,6 +19,10 @@ public sealed record VoiceInfo(string Text, int StyleId, string Speaker, VoicePa
     public const string KeyStyleId = "voicevox.styleId";
     public const string KeySpeaker = "voicevox.speaker";
     public const string KeyParams = "voicevox.params";
+    /// <summary>キャラクター名 (口パク立ち絵が、自分の声を探すのに使う)。</summary>
+    public const string KeyCharacter = "voicevox.character";
+    /// <summary>口パクの時刻表 (LipSync.Encode)。</summary>
+    public const string KeyLips = "voicevox.lips";
     /// <summary>字幕をテンプレートで置いたとき、セリフを入れた公開項目の表示名 (作り直すときに使う)。</summary>
     public const string KeySubtitleField = "voicevox.subtitleField";
 
@@ -25,6 +33,21 @@ public sealed record VoiceInfo(string Text, int StyleId, string Speaker, VoicePa
         audio.PluginData[KeyStyleId] = clip.Style.Id.ToString(CultureInfo.InvariantCulture);
         audio.PluginData[KeySpeaker] = clip.Style.Label;
         audio.PluginData[KeyParams] = JsonSerializer.Serialize(clip.Voice);
+        audio.PluginData[KeyCharacter] = clip.Style.Speaker;
+        if (clip.Lips != null) audio.PluginData[KeyLips] = clip.Lips;
+        else audio.PluginData.Remove(KeyLips);
+    }
+
+    /// <summary>
+    /// 音声オブジェクトのキャラクター名。古い版で作ったもの (キャラクター名を残していない) は、話者の表示名 "名前 (スタイル)" から取る。
+    /// </summary>
+    public static string? CharacterOf(TimelineObject audio)
+    {
+        if (audio.PluginData is not { } d) return null;
+        if (d.TryGetValue(KeyCharacter, out var c)) return c;
+        if (!d.TryGetValue(KeySpeaker, out var label)) return null;
+        int paren = label.LastIndexOf(" (", StringComparison.Ordinal);
+        return paren > 0 ? label[..paren] : label;
     }
 
     /// <summary>このプラグインで作った音声オブジェクトなら、その情報。そうでなければ null。</summary>

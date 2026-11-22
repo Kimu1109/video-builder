@@ -74,7 +74,7 @@ public class VoicevoxPluginTests
                          {"name":"波音リツ","speaker_uuid":"c","styles":[{"name":"ノーマル","id":6000,"type":"singing_teacher"},{"name":"クイーン","id":6001,"type":"frame_decode"}]}]
                         """);
                 else if (path.StartsWith("/audio_query"))
-                    reply = Encoding.UTF8.GetBytes("""{"accent_phrases":[],"speedScale":1.0,"pitchScale":0.0,"intonationScale":1.0,"volumeScale":1.0,"prePhonemeLength":0.1,"postPhonemeLength":0.1,"outputSamplingRate":24000,"outputStereo":false,"kana":""}""");
+                    reply = Encoding.UTF8.GetBytes("""{"accent_phrases":[{"moras":[{"text":"コ","consonant":"k","consonant_length":0.05,"vowel":"o","vowel_length":0.1,"pitch":5.5},{"text":"ン","consonant":null,"consonant_length":null,"vowel":"N","vowel_length":0.08,"pitch":5.4},{"text":"マ","consonant":"m","consonant_length":0.06,"vowel":"a","vowel_length":0.12,"pitch":5.6}],"accent":1,"pause_mora":null,"is_interrogative":false}],"speedScale":1.0,"pitchScale":0.0,"intonationScale":1.0,"volumeScale":1.0,"prePhonemeLength":0.1,"postPhonemeLength":0.1,"outputSamplingRate":24000,"outputStereo":false,"kana":""}""");
                 else if (path.StartsWith("/synthesis")) { reply = Wav(Seconds); type = "audio/wav"; }
                 else { c.Response.StatusCode = 422; reply = Encoding.UTF8.GetBytes("{\"detail\":\"unknown\"}"); }
                 c.Response.ContentType = type;
@@ -206,8 +206,9 @@ public class VoicevoxPluginTests
         Assert.Equal(new[] { 2, 3, 1, 22 }, styles.Select(s => s.Id));
         Assert.Equal("ずんだもん (あまあま)", styles[2].Label);
 
-        var wav = await client.SynthesizeAsync("こんにちは & さようなら", 1, new VoiceParams { Speed = 1.3 }, default);
-        Assert.True(WavInfo.TryGetDuration(wav, out var sec));
+        var synthesis = await client.SynthesizeAsync("こんにちは & さようなら", 1, new VoiceParams { Speed = 1.3 }, default);
+        Assert.True(WavInfo.TryGetDuration(synthesis.Wav, out var sec));
+        Assert.Equal(1.3, JsonNode.Parse(synthesis.Query)!["speedScale"]!.GetValue<double>(), 3);   // 合成に使った audio_query も返る
         Assert.Equal(1.25, sec, 3);
         var query = engine.Requests.Single(r => r.PathAndQuery.StartsWith("/audio_query"));
         Assert.Equal("POST", query.Method);
@@ -348,6 +349,10 @@ public class VoicevoxPluginTests
             Assert.Contains(engine.Requests, r => r.PathAndQuery.StartsWith("/synthesis") && r.PathAndQuery.Contains("speaker=1") && r.Body.Contains("\"speedScale\":1.5"));
             Assert.Equal("1", audio.PluginData![VoiceInfo.KeyStyleId]);
             Assert.Equal(1, VoiceSettings.Load(ctx.DataDirectory).StyleId);
+            // 口パクの時刻表とキャラクター名も残る (「コ・ン・マ」→ お・閉・あ)
+            Assert.Equal("ずんだもん", audio.PluginData[VoiceInfo.KeyCharacter]);
+            Assert.Equal(new[] { Mouth.Closed, Mouth.O, Mouth.Closed, Mouth.A, Mouth.Closed },
+                LipSync.Decode(audio.PluginData[VoiceInfo.KeyLips]).Points.Select(x => x.Mouth));
         }
         finally
         {
@@ -805,5 +810,173 @@ public class VoicevoxPluginTests
             owner.Close();
             try { Directory.Delete(dataRoot, true); } catch { }
         }
+    }
+
+    // ---------------- 口パク ----------------
+
+    private const string KonmaQuery = """
+        {"accent_phrases":[
+          {"moras":[{"text":"コ","consonant":"k","consonant_length":0.05,"vowel":"o","vowel_length":0.10},
+                    {"text":"ン","consonant":null,"consonant_length":null,"vowel":"N","vowel_length":0.08},
+                    {"text":"マ","consonant":"m","consonant_length":0.06,"vowel":"a","vowel_length":0.12}],
+           "pause_mora":{"text":"、","consonant":null,"consonant_length":null,"vowel":"pau","vowel_length":0.2}},
+          {"moras":[{"text":"イ","consonant":null,"consonant_length":null,"vowel":"i","vowel_length":0.01},
+                    {"text":"ス","consonant":"s","consonant_length":0.07,"vowel":"U","vowel_length":0.09}],
+           "pause_mora":null}],
+         "speedScale":1.0,"prePhonemeLength":0.1,"postPhonemeLength":0.1}
+        """;
+
+    [Fact]
+    public void Lip_sync_is_built_from_the_query_and_scaled_to_the_voice()
+    {
+        // 合計 0.1 + (0.05+0.1) + 0.08 + (0.06+0.12) + 0.2 + 0.01 + (0.07+0.09) + 0.1 = 0.98 秒
+        var lips = LipSync.FromQuery(KonmaQuery, 0.98)!;
+        Assert.Equal(new[]
+        {
+            (0.0, Mouth.Closed),
+            (0.1, Mouth.O),        // k の子音から「お」の口
+            (0.25, Mouth.Closed),  // ん → 閉じる。続く m (唇を閉じる子音) も閉じたまま
+            (0.39, Mouth.A),
+            (0.51, Mouth.Closed),  // 間 (、)
+            (0.72, Mouth.U),       // 0.01 秒の「い」は短すぎるので飛ばす。無声の U も「う」の口
+            (0.88, Mouth.Closed),
+        }, lips.Points.Select(p => (Math.Round(p.Time, 2), p.Mouth)));
+
+        // 話速などで実際の音声が倍の長さなら、時刻表も倍になる
+        var slow = LipSync.FromQuery(KonmaQuery, 1.96)!;
+        Assert.Equal(0.2, slow.Points[1].Time, 3);
+        Assert.Equal(Mouth.A, slow.At(0.39 * 2 + 0.01));
+
+        Assert.Equal(Mouth.Closed, lips.At(-1));
+        Assert.Equal(Mouth.O, lips.At(0.2));
+        Assert.Equal(Mouth.Closed, lips.At(5));
+        Assert.Null(LipSync.FromQuery("not json", 1));
+
+        // 文字列にして読み直す。壊れた部分は飛ばす
+        var text = lips.Encode();
+        Assert.StartsWith("0:-;0.1:o;0.25:-;0.39:a", text);
+        Assert.Equal(lips.Points, LipSync.Decode(text).Points);
+        Assert.Equal(new[] { (0.0, Mouth.Closed), (0.5, Mouth.A) }, LipSync.Decode("0:-;x:a;0.3:z;0.5:a;0.4:o").Points);
+    }
+
+    [Fact]
+    public void Mouth_images_fall_back_to_a_then_closed()
+    {
+        var e = new Effect(MouthSourceDefinition());
+        Assert.Equal("", MouthSource.ImageFor(e, Mouth.A));
+        e.Values["closed"] = "/c.png";
+        Assert.Equal("/c.png", MouthSource.ImageFor(e, Mouth.I));   // 閉じた絵しかない
+        e.Values["a"] = "/a.png";
+        Assert.Equal("/a.png", MouthSource.ImageFor(e, Mouth.I));   // 開け閉めだけ
+        e.Values["i"] = "/i.png";
+        Assert.Equal("/i.png", MouthSource.ImageFor(e, Mouth.I));
+        Assert.Equal("/c.png", MouthSource.ImageFor(e, Mouth.Closed));
+        e.Values["closed"] = "";
+        Assert.Equal("/a.png", MouthSource.ImageFor(e, Mouth.Closed));
+    }
+
+    private static EffectDefinition MouthSourceDefinition()
+    {
+        if (!EffectRegistry.Exists(MouthSource.Id))
+        {
+            EffectRegistry.Register(MouthSource.Definition);
+            VideoBuilder.Rendering.Effects.RegisterSource(MouthSource.Id, new MouthSource());
+        }
+        return EffectRegistry.Get(MouthSource.Id);
+    }
+
+    /// <summary>このプラグインで作った音声オブジェクト (口パクの時刻表付き)。</summary>
+    private static TimelineObject Voice(int layer, int start, int length, string character, string lips, bool withCharacterKey = true)
+    {
+        var o = ObjectFactory.Create(EffectRegistry.Audio, layer, start, length);
+        o.PluginData = new Dictionary<string, string> { [VoiceInfo.KeyText] = "x", [VoiceInfo.KeyStyleId] = "3", [VoiceInfo.KeySpeaker] = $"{character} (ノーマル)", [VoiceInfo.KeyLips] = lips };
+        if (withCharacterKey) o.PluginData[VoiceInfo.KeyCharacter] = character;
+        return o;
+    }
+
+    [Fact]
+    public void Mouth_follows_the_characters_voice_in_the_same_scene()
+    {
+        var p = new Project();
+        double fps = p.Settings.Fps.Value;
+        int F(double sec) => (int)Math.Round(sec * fps);
+        var owner = ObjectFactory.Create(MouthSourceDefinition().Id, 5, 0, F(10));
+        p.Root.Objects.Add(owner);
+        // ずんだもん: 1 秒目から 2 秒間。0.5 秒目から「あ」
+        var zunda = Voice(1, F(1), F(2), "ずんだもん", "0:-;0.5:a;1.5:-");
+        // 四国めたん: 同じ時間に「お」(キャラクターを指定すれば無視される)
+        var metan = Voice(2, F(1), F(2), "四国めたん", "0:o", withCharacterKey: false);
+        p.Root.Objects.Add(zunda);
+        p.Root.Objects.Add(metan);
+
+        Assert.Equal(Mouth.Closed, MouthSource.CurrentMouth(p, owner, "ずんだもん", F(1.2)));
+        Assert.Equal(Mouth.A, MouthSource.CurrentMouth(p, owner, "ずんだもん", F(1.6)));
+        Assert.Equal(Mouth.A, MouthSource.CurrentMouth(p, owner, " ずんだもん ", F(1.6)));   // 空白は無視
+        Assert.Equal(Mouth.Closed, MouthSource.CurrentMouth(p, owner, "ずんだもん", F(2.6)));
+        Assert.Equal(Mouth.Closed, MouthSource.CurrentMouth(p, owner, "ずんだもん", F(5)));      // 鳴っていない
+        Assert.Equal(Mouth.O, MouthSource.CurrentMouth(p, owner, "四国めたん", F(1.2)));      // キャラクター名を残していない古い音声
+        Assert.Equal(Mouth.O, MouthSource.CurrentMouth(p, owner, "", F(1.2)));                // 指定なし: 口を開けているもの
+
+        // 開始位置・再生速度・分割のずれも見る
+        zunda.Main.Tracks["position"] = new AnimatedValue(0.5);
+        Assert.Equal(Mouth.A, MouthSource.CurrentMouth(p, owner, "ずんだもん", F(1.1)));
+        zunda.Main.Tracks["position"] = new AnimatedValue(0);
+        zunda.Main.Tracks["speed"] = new AnimatedValue(200);
+        Assert.Equal(Mouth.A, MouthSource.CurrentMouth(p, owner, "ずんだもん", F(1.3)));    // 0.3 秒 x 2 = 0.6 秒目
+
+        // 無効・非表示のレイヤーの音声は見ない。別のシーンの音声も見ない
+        zunda.Main.Tracks["speed"] = new AnimatedValue(100);
+        zunda.Enabled = false;
+        Assert.Equal(Mouth.Closed, MouthSource.CurrentMouth(p, owner, "ずんだもん", F(1.6)));
+        zunda.Enabled = true;
+        p.Root.Layers[1] = new LayerInfo { Visible = false };
+        Assert.Equal(Mouth.Closed, MouthSource.CurrentMouth(p, owner, "ずんだもん", F(1.6)));
+        var other = new Scene { Id = "other", Name = "別" };
+        p.Scenes.Add(other);
+        var lonely = ObjectFactory.Create(MouthSource.Id, 0, 0, F(10));
+        other.Objects.Add(lonely);
+        Assert.Equal(Mouth.Closed, MouthSource.CurrentMouth(p, lonely, "四国めたん", F(1.2)));
+    }
+
+    private static string Png(string dir, string name, SkiaSharp.SKColor color)
+    {
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, name);
+        using var bmp = new SkiaSharp.SKBitmap(40, 40);
+        bmp.Erase(color);
+        using var img = SkiaSharp.SKImage.FromBitmap(bmp);
+        using var data = img.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100);
+        File.WriteAllBytes(path, data.ToArray());
+        return path;
+    }
+
+    [AvaloniaFact]
+    public void Mouth_object_draws_the_image_for_the_current_vowel()
+    {
+        var dir = TempDir();
+        try
+        {
+            var p = new Project();
+            p.Settings.Width = 160; p.Settings.Height = 120;
+            double fps = p.Settings.Fps.Value;
+            var owner = ObjectFactory.Create(MouthSourceDefinition().Id, 3, 0, (int)(fps * 5));
+            owner.Main.Values["character"] = "ずんだもん";
+            owner.Main.Values["closed"] = Png(dir, "closed.png", SkiaSharp.SKColors.Red);
+            owner.Main.Values["a"] = Png(dir, "a.png", SkiaSharp.SKColors.Lime);
+            p.Root.Objects.Add(owner);
+            p.Root.Objects.Add(Voice(1, 0, (int)(fps * 2), "ずんだもん", "0:-;0.5:a;1.5:-"));
+
+            using var engine = new VideoBuilder.Rendering.RenderEngine();
+            SkiaSharp.SKColor At(double sec)
+            {
+                using var image = engine.RenderImage(p, p.Root, (int)Math.Round(sec * fps));
+                using var bmp = SkiaSharp.SKBitmap.FromImage(image);
+                return bmp.GetPixel(80, 60);
+            }
+            Assert.Equal(SkiaSharp.SKColors.Red, At(0.2));    // 閉じた口
+            Assert.Equal(SkiaSharp.SKColors.Lime, At(1.0));   // 「あ」(「い」などの絵がなくても「あ」で開く)
+            Assert.Equal(SkiaSharp.SKColors.Red, At(3.0));    // 声が終わったら閉じる
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 }

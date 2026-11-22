@@ -21,6 +21,8 @@ public sealed class Plugin : IPlugin
         host.RegisterCommand(new RegenerateCommand());
         host.RegisterCommand(new SubtitleTemplateCommand());
         host.RegisterCommand(new SettingsCommand());
+        // 口パク立ち絵 (メディアオブジェクト)
+        host.RegisterMediaObject(MouthSource.Definition, new MouthSource());
     }
 
     /// <summary>待ち時間付きで実行する。待ち時間を過ぎたら VoicevoxException (利用者の中止なら OperationCanceledException)。</summary>
@@ -51,12 +53,12 @@ public sealed class Plugin : IPlugin
     /// <summary>1 つのセリフを音声にして、dir に保存する。</summary>
     internal static async Task<VoiceClip> SynthesizeToFileAsync(VoicevoxClient client, string dir, string text, VoiceStyle style, VoiceParams voice, CancellationToken ct)
     {
-        var wav = await WithTimeout(TimeSpan.FromMinutes(5), ct, t => client.SynthesizeAsync(text, style.Id, voice, t));
-        if (!WavInfo.TryGetDuration(wav, out var seconds)) throw new VoicevoxException("作った音声を読めませんでした。");
+        var result = await WithTimeout(TimeSpan.FromMinutes(5), ct, t => client.SynthesizeAsync(text, style.Id, voice, t));
+        if (!WavInfo.TryGetDuration(result.Wav, out var seconds)) throw new VoicevoxException("作った音声を読めませんでした。");
         Directory.CreateDirectory(dir);
         var file = VoiceFiles.NewPath(dir, style.Speaker, text, DateTime.Now);
-        await File.WriteAllBytesAsync(file, wav, ct);
-        return new VoiceClip(file, seconds, text, style, voice);
+        await File.WriteAllBytesAsync(file, result.Wav, ct);
+        return new VoiceClip(file, seconds, text, style, voice) { Lips = LipSync.FromQuery(result.Query, seconds)?.Encode() };
     }
 
     // ---------------- フォームの部品 ----------------

@@ -42,6 +42,9 @@ public sealed record VoiceParams
     };
 }
 
+/// <summary>音声合成の結果。Query は合成に使った audio_query。</summary>
+public sealed record Synthesis(byte[] Wav, string Query);
+
 /// <summary>VOICEVOX のエンジンにつながらない・エラーを返した。Message はそのまま利用者に見せる。</summary>
 public sealed class VoicevoxException(string message, Exception? inner = null) : Exception(message, inner);
 
@@ -122,8 +125,8 @@ public sealed class VoicevoxClient
         return result;
     }
 
-    /// <summary>セリフを音声 (WAV) にする。</summary>
-    public async Task<byte[]> SynthesizeAsync(string text, int styleId, VoiceParams voice, CancellationToken ct)
+    /// <summary>セリフを音声 (WAV) にする。Query は合成に使った audio_query (声の調整を書き込んだもの。口パクに使う)。</summary>
+    public async Task<Synthesis> SynthesizeAsync(string text, int styleId, VoiceParams voice, CancellationToken ct)
     {
         var speaker = styleId.ToString(CultureInfo.InvariantCulture);
         string queryJson;
@@ -139,7 +142,7 @@ public sealed class VoicevoxClient
         using var synth = await SendAsync(request, ct);
         var wav = await synth.Content.ReadAsByteArrayAsync(ct);
         if (!WavInfo.TryGetDuration(wav, out _)) throw new VoicevoxException("エンジンから返ってきた音声を読めませんでした。");
-        return wav;
+        return new Synthesis(wav, body);
     }
 
     /// <summary>audio_query の結果に、声の調整を書き込む。</summary>
