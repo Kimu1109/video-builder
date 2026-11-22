@@ -445,13 +445,17 @@ public class EffectTests
 
         var q = Small();
         var s = AddShape(q, 0, "#FFFFFF", 100);
+        s.Id = "scatter-test";   // 破片の動きはオブジェクトの ID から決まる乱数なので、毎回同じになるよう固定する
         Filter(s, "filter.scatter", ("start", 0.5), ("fade", 0), ("speed", 60), ("gravity", 0), ("size", 20));
         using (var before = Render(q, 10)) Assert.Equal(SKColors.White, before.GetPixel(160 - 45, 120 - 45));
         using var after = Render(q, 50);
         int white = 0;
         for (int y = 0; y < 240; y += 2) for (int x = 0; x < 320; x += 2) if (after.GetPixel(x, y).Red > 200) white++;
-        Assert.InRange(white, 50, 2400);                              // 破片は残っているが、元の四角形からは散っている
-        Assert.NotEqual(SKColors.White, after.GetPixel(160 - 45, 120 - 45));
+        Assert.InRange(white, 50, 2400);                              // 破片は残っている
+        // 元の四角形の範囲は、半分以上が空いている (破片が外へ散った)
+        int inside = 0;
+        for (int y = 70; y < 170; y += 2) for (int x = 110; x < 210; x += 2) if (after.GetPixel(x, y).Red > 200) inside++;
+        Assert.True(inside < 50 * 50 / 2, "散っていない: " + inside);
     }
 
     [Fact]
@@ -459,6 +463,7 @@ public class EffectTests
     {
         var p = Small();
         var o = AddShape(p, 0, "#FFFFFF", 160);
+        o.Id = "shatter-test";   // 乱数はオブジェクトの ID から決まるので固定する
         Filter(o, "filter.shatter", ("start", 0.5), ("speed", 40), ("delay", 300), ("size", 20));
         using (var before = Render(p, 10)) Assert.Equal(SKColors.White, before.GetPixel(160, 120));
         // 割れ始めてすぐ: 中心の近くは割れて動き出しているが、外側 (角) はまだそのまま
@@ -490,6 +495,7 @@ public class EffectTests
 
         var q = Small();
         var n = AddShape(q, 0, "#FFFFFF", 30);
+        n.Id = "ninja-test";     // 移動先はオブジェクトの ID から決まる乱数なので固定する
         var f = ObjectFactory.AddFilter(n, "filter.transition"); f.Values["type"] = "27"; f.Tracks["in"] = new AnimatedValue(1);
         // 移動の途中: 中心から離れた所にいる。入り終わると元の位置
         var positions = new HashSet<(int, int)>();

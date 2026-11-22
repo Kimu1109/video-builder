@@ -167,6 +167,75 @@ public class TemplateTests : IDisposable
     }
 
     [Fact]
+    public void Expanded_templates_keep_their_exposed_items_per_placement()
+    {
+        var (s, text, _, shape) = LowerThird();
+        var pkg = TemplatePackage.Create(s.Project, new[] { text, shape }, new TemplateOptions
+        {
+            Name = "帯", InsertAs = TemplateInsertMode.Objects,
+            Exposed = new()
+            {
+                new ExposedParam { ObjectId = shape.Id, Effect = 0, Key = "color", Label = "帯の色" },
+                new ExposedParam { ObjectId = shape.Id, Effect = shape.Effects.Count - 1, Key = "alpha", Label = "帯の透明度" },   // 変形のトラックバー
+                new ExposedParam { ObjectId = text.Id, Effect = 0, Key = "text", Label = "名前" },
+            },
+        });
+        var path = Path.Combine(_dir, "obj" + TemplatePackage.Extension);
+        pkg.Save(path);
+        var loaded = TemplatePackage.Load(path);
+
+        var target = new EditorSession();
+        Assert.Equal(2, target.InsertTemplate(loaded.Instantiate(target.Project, Path.Combine(_dir, "assets"), TemplateInsertMode.Objects), 0, 0));
+        Assert.Equal(2, target.InsertTemplate(loaded.Instantiate(target.Project, Path.Combine(_dir, "assets"), TemplateInsertMode.Objects), 0, 200));
+
+        // 置くたびに別の組になり、項目はその組のオブジェクトを指す
+        var groups = target.Scene.TemplateGroups!;
+        Assert.Equal(2, groups.Count);
+        Assert.NotEqual(groups[0].Id, groups[1].Id);
+        foreach (var g in groups)
+        {
+            Assert.Equal(new[] { "帯の色", "帯の透明度", "名前" }, g.Exposed.Select(x => x.Label));
+            var members = target.Scene.Objects.Where(o => o.TemplateGroup == g.Id).ToList();
+            Assert.Equal(2, members.Count);
+            Assert.All(g.Exposed, x => Assert.Contains(members, m => m.Id == x.ObjectId));
+            Assert.All(g.Exposed, x => Assert.NotNull(x.Resolve(target.Scene)));
+        }
+        Assert.Equal("帯", groups[0].Source!.Name);                       // どのテンプレートから置いたかも覚えている
+
+        // メインのシーンでも、組のオブジェクトなら項目を足したり外したりできる (取り消せる)
+        var placedText = target.Scene.Objects.First(o => o.TemplateGroup == groups[0].Id && o.Main.DefinitionId == EffectRegistry.Text);
+        Assert.True(target.CanExpose(placedText));
+        Assert.NotNull(target.FindExposed(placedText, 0, "text"));
+        target.SetExposed(placedText, 0, "color", "文字色");
+        Assert.Equal(4, target.TemplateGroupOf(placedText)!.Exposed.Count);
+        Assert.Equal(3, target.Scene.TemplateGroups![1].Exposed.Count);     // もう片方の組は変わらない
+        target.Undo();
+        Assert.Equal(3, target.TemplateGroupOf(placedText)!.Exposed.Count);
+        Assert.Null(target.Scene.Exposed);                                   // メインのシーン自体の公開項目にはしない
+
+        // 普通のオブジェクトは、メインのシーンでは公開できない
+        var plain = target.AddObject(EffectRegistry.Shape, 10, 0, 30)!;
+        Assert.False(target.CanExpose(plain));
+
+        // 貼り付け (普通の挿入) では、組とのつながりは持ち込まない
+        Assert.Equal(1, target.Insert(new[] { placedText }, 20, 500, "貼り付け"));
+        Assert.Null(target.Scene.Objects.Single(o => o.Layer == 20).TemplateGroup);
+
+        // 保存して読み直しても、組と項目は残る
+        var projPath = Path.Combine(_dir, "p.vbproj");
+        ProjectSerializer.Save(target.Project, projPath);
+        var reloaded = ProjectSerializer.Load(projPath);
+        Assert.Equal(2, reloaded.Root.TemplateGroups!.Count);
+        Assert.Equal(2, reloaded.Root.Objects.Count(o => o.TemplateGroup == groups[0].Id));
+
+        // 置いたオブジェクトからテンプレートを作り直すと、組とのつながりは消える (新しいテンプレートの中身は普通のオブジェクト)
+        var members0 = target.Scene.Objects.Where(o => o.TemplateGroup == groups[0].Id).ToList();
+        var again = TemplatePackage.Create(target.Project, members0, new TemplateOptions { Name = "帯 2", InsertAs = TemplateInsertMode.Objects });
+        Assert.All(again.Scenes[0].Objects, o => Assert.Null(o.TemplateGroup));
+        Assert.Null(again.Scenes[0].TemplateGroups);
+    }
+
+    [Fact]
     public void Template_from_a_single_scene_object_uses_that_scene_and_keeps_its_exposed_params()
     {
         var s = new EditorSession();

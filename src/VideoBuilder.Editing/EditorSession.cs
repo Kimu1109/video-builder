@@ -362,9 +362,9 @@ public sealed class EditorSession
     /// 置ける場所がなければ何もせず 0 を返す。
     /// </summary>
     public int InsertTemplate(TemplateInstance instance, int layer, int frame, string description = "テンプレートの追加") =>
-        Insert(instance.Objects, layer, frame, description, instance.Scenes);
+        Insert(instance.Objects, layer, frame, description, instance.Scenes, instance.Group);
 
-    private int Insert(IReadOnlyList<TimelineObject> sources, int layer, int frame, string description, IReadOnlyList<Scene>? scenes)
+    private int Insert(IReadOnlyList<TimelineObject> sources, int layer, int frame, string description, IReadOnlyList<Scene>? scenes, TemplateGroup? templateGroup = null)
     {
         if (sources.Count == 0) return 0;
         int minLayer = sources.Min(o => o.Layer), minStart = sources.Min(o => o.Start);
@@ -378,6 +378,10 @@ public sealed class EditorSession
         {
             if (scenes != null) foreach (var sc in scenes) Project.Scenes.Add(sc);
             var groupMap = new Dictionary<string, string>();
+            var idMap = new Dictionary<string, string>();
+            // テンプレートの組は、置くたびに新しい Id にする (同じテンプレートを 2 回置いても、別々に編集できるように)
+            var group = templateGroup?.Clone();
+            if (group != null) group.Id = Guid.NewGuid().ToString("N")[..8];
             foreach (var src in sources)
             {
                 var o = src.Clone(newId: true);
@@ -389,8 +393,17 @@ public sealed class EditorSession
                     if (!groupMap.TryGetValue(o.GroupId, out var g)) groupMap[o.GroupId] = g = Guid.NewGuid().ToString("N")[..8];
                     o.GroupId = g;
                 }
+                idMap[src.Id] = o.Id;
+                // テンプレートの組のオブジェクトは新しい組に入れる。貼り付けなどでは、組とのつながりは持ち込まない
+                o.TemplateGroup = group != null && src.TemplateGroup == templateGroup!.Id ? group.Id : null;
                 Scene.Objects.Add(o);
                 added.Add(o.Id);
+            }
+            if (group != null)
+            {
+                group.Exposed.RemoveAll(x => !idMap.ContainsKey(x.ObjectId));
+                foreach (var x in group.Exposed) x.ObjectId = idMap[x.ObjectId];
+                (Scene.TemplateGroups ??= new()).Add(group);
             }
         });
         if (added.Count > 0) SelectMany(added);
@@ -600,23 +613,39 @@ public sealed class EditorSession
 
     // ---------------- テンプレートの公開項目 ----------------
 
-    /// <summary>今のシーンで、obj の effectIndex 番目のエフェクトの key が公開されていればその項目。</summary>
-    public ExposedParam? FindExposed(TimelineObject obj, int effectIndex, string key) =>
-        Scene.Exposed?.FirstOrDefault(x => x.ObjectId == obj.Id && x.Effect == effectIndex && x.Key == key);
+    /// <summary>obj が「複数のオブジェクトとして置いた」テンプレートのものなら、その組。</summary>
+    public TemplateGroup? TemplateGroupOf(TimelineObject obj) => Scene.FindTemplateGroup(obj.TemplateGroup);
 
-    /// <summary>今のシーンの公開項目に加える (すでにあれば外す)。label が null なら外すだけ。</summary>
+    /// <summary>obj の項目を公開できるか: テンプレートの組のオブジェクトか、メイン以外のシーンのオブジェクト。</summary>
+    public bool CanExpose(TimelineObject obj) => TemplateGroupOf(obj) != null || Scene != Project.Root;
+
+    /// <summary>obj の effectIndex 番目のエフェクトの key が公開されていればその項目 (組のオブジェクトなら組の項目)。</summary>
+    public ExposedParam? FindExposed(TimelineObject obj, int effectIndex, string key) =>
+        (TemplateGroupOf(obj)?.Exposed ?? Scene.Exposed)?.FirstOrDefault(x => x.ObjectId == obj.Id && x.Effect == effectIndex && x.Key == key);
+
+    /// <summary>公開項目に加える (すでにあれば表示名を変える)。label が null なら外すだけ。組のオブジェクトなら組の項目を変える。</summary>
     public void SetExposed(TimelineObject obj, int effectIndex, string key, string? label)
     {
         var target = new ExposedParam { ObjectId = obj.Id, Effect = effectIndex, Key = key, Label = label ?? "" };
+        string? groupId = TemplateGroupOf(obj)?.Id;
         Edit(label == null ? "公開の解除" : "項目の公開", () =>
         {
-            var list = Scene.Exposed ??= new List<ExposedParam>();
+            var group = Scene.FindTemplateGroup(groupId);
+            var list = group?.Exposed ?? (Scene.Exposed ??= new List<ExposedParam>());
             int i = list.FindIndex(x => x.SameTarget(target));
             if (label == null) { if (i >= 0) list.RemoveAt(i); }
             else if (i >= 0) list[i].Label = label;
             else list.Add(target);
-            if (list.Count == 0) Scene.Exposed = null;
+            if (group == null && list.Count == 0) Scene.Exposed = null;
         });
+    }
+
+    /// <summary>今のシーンのテンプレートの組の公開項目を items に置き換える (並べ替え・グループ・表示名の変更・削除)。</summary>
+    public void ReplaceGroupExposed(string groupId, IEnumerable<ExposedParam> items)
+    {
+        if (Scene.FindTemplateGroup(groupId) == null) return;
+        var list = ExposedParam.GroupTogether(items.Select(x => x.Clone()));
+        Edit("テンプレートの項目の編集", () => Scene.FindTemplateGroup(groupId)!.Exposed = list);
     }
 
     /// <summary>

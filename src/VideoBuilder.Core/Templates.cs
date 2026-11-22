@@ -63,6 +63,8 @@ public sealed class TemplateInstance
 {
     public List<Scene> Scenes { get; } = new();
     public List<TimelineObject> Objects { get; } = new();
+    /// <summary>複数のオブジェクトとして置くとき: 置くオブジェクトをまとめる組 (公開項目を持つ)。シーンとして置くときは null。</summary>
+    public TemplateGroup? Group { get; set; }
     /// <summary>テンプレートが使っているのに、読み込まれていないエフェクト (プラグイン)。</summary>
     public List<string> MissingPlugins { get; } = new();
 }
@@ -125,6 +127,7 @@ public sealed class TemplatePackage
             foreach (var src in objects)
             {
                 var c = src.Clone();
+                c.TemplateGroup = null;   // 元のテンプレートの組とのつながりは持ち込まない
                 int len = c.Length;
                 c.Layer = src.Layer - minLayer;
                 c.SetRange(src.Start - minStart, src.Start - minStart + len - 1);
@@ -139,6 +142,8 @@ public sealed class TemplatePackage
         }
         body.RangeStart = body.RangeEnd = null;
         body.Template = null;   // 新しいテンプレートの本体になる (元のテンプレートとのつながりは、保存するときに決める)
+        body.TemplateGroups = null;
+        foreach (var o in body.Objects) o.TemplateGroup = null;
         pkg.Scenes.Add(body);
 
         // 本体から参照しているシーンを、入れ子の奥までたどって集める
@@ -459,6 +464,10 @@ public sealed class TemplatePackage
         {
             inst.Scenes.AddRange(scenes.Skip(1));
             inst.Objects.AddRange(body.Objects);
+            // 公開項目は、置いたオブジェクトの組に持たせる (シーンを作らないので、シーンの公開項目には置けない)
+            var group = new TemplateGroup { Source = body.Template.Clone(), Exposed = body.Exposed?.Select(x => x.Clone()).ToList() ?? new() };
+            foreach (var o in body.Objects) o.TemplateGroup = group.Id;
+            inst.Group = group;
         }
         foreach (var id in Meta.Plugins.Concat(UsedPlugins(scenes)).Distinct())
             if (!EffectRegistry.Exists(id)) inst.MissingPlugins.Add(id);

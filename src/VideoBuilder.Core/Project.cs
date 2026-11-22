@@ -78,6 +78,19 @@ public sealed class ExposedParam
     }
 }
 
+/// <summary>
+/// 「複数のオブジェクトとして置いた」テンプレート 1 つぶん。置いたオブジェクトは TimelineObject.TemplateGroup にこの Id を持ち、
+/// 公開項目 (Exposed) はそのオブジェクトを ObjectId で指す。どれかを選ぶと、プロパティに「テンプレートの項目」が出る。
+/// </summary>
+public sealed class TemplateGroup
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N")[..8];
+    public TemplateSource? Source { get; set; }
+    public List<ExposedParam> Exposed { get; set; } = new();
+
+    public TemplateGroup Clone() => new() { Id = Id, Source = Source?.Clone(), Exposed = Exposed.Select(x => x.Clone()).ToList() };
+}
+
 /// <summary>挿入したテンプレートの元 (テンプレートの id・名前・版)。新しい版が出たときに更新するために覚えておく。</summary>
 public sealed class TemplateSource
 {
@@ -106,6 +119,10 @@ public sealed class Scene
     public List<ExposedParam>? Exposed { get; set; }
     /// <summary>テンプレートを挿入してできたシーンなら、その元。ないときは null。</summary>
     public TemplateSource? Template { get; set; }
+    /// <summary>このシーンに「複数のオブジェクトとして置いた」テンプレート。ないときは null (保存しない)。</summary>
+    public List<TemplateGroup>? TemplateGroups { get; set; }
+
+    public TemplateGroup? FindTemplateGroup(string? id) => id == null ? null : TemplateGroups?.FirstOrDefault(g => g.Id == id);
 
     public LayerInfo GetLayer(int index) => Layers.TryGetValue(index, out var l) ? l : DefaultLayer;
     private static readonly LayerInfo DefaultLayer = new();
@@ -170,6 +187,7 @@ public sealed class Scene
         foreach (var (k, v) in Layers) s.Layers[k] = v.Clone();
         s.Exposed = Exposed?.Select(x => x.Clone()).ToList();
         s.Template = Template?.Clone();
+        s.TemplateGroups = TemplateGroups?.Select(g => g.Clone()).ToList();
         return s;
     }
 
@@ -180,6 +198,7 @@ public sealed class Scene
         foreach (var (k, v) in Layers) s.Layers[k] = v.Clone();
         s.Exposed = Exposed?.Select(x => x.Clone()).ToList();
         s.Template = Template?.Clone();
+        s.TemplateGroups = TemplateGroups?.Select(g => g.Clone()).ToList();
         return s;
     }
 }

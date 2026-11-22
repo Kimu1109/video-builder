@@ -15,6 +15,8 @@ public sealed class TimelineObject
     public List<Effect> Effects { get; set; } = new();
     /// <summary>映像と音声のペアなど、一緒に動かすオブジェクトのグループ。</summary>
     public string? GroupId { get; set; }
+    /// <summary>「複数のオブジェクトとして置いた」テンプレートのどれか (Scene.TemplateGroups の Id)。ないときは null。</summary>
+    public string? TemplateGroup { get; set; }
     public bool Enabled { get; set; } = true;
 
     [JsonIgnore] public int Length => End - Start + 1;
@@ -59,7 +61,7 @@ public sealed class TimelineObject
         var o = new TimelineObject
         {
             Id = newId ? Guid.NewGuid().ToString("N")[..12] : Id,
-            Layer = Layer, Start = Start, End = End, GroupId = GroupId, Enabled = Enabled,
+            Layer = Layer, Start = Start, End = End, GroupId = GroupId, Enabled = Enabled, TemplateGroup = TemplateGroup,
             SourceOffsetFrames = SourceOffsetFrames,
             KeyFrames = new List<int>(KeyFrames),
         };
@@ -72,7 +74,7 @@ public sealed class TimelineObject
     {
         if (ReferenceEquals(a, b)) return true;
         if (a.Id != b.Id || a.Layer != b.Layer || a.Start != b.Start || a.End != b.End || a.Enabled != b.Enabled
-            || a.GroupId != b.GroupId || a.SourceOffsetFrames != b.SourceOffsetFrames
+            || a.GroupId != b.GroupId || a.TemplateGroup != b.TemplateGroup || a.SourceOffsetFrames != b.SourceOffsetFrames
             || a.KeyFrames.Count != b.KeyFrames.Count || a.Effects.Count != b.Effects.Count) return false;
         for (int i = 0; i < a.KeyFrames.Count; i++) if (a.KeyFrames[i] != b.KeyFrames[i]) return false;
         for (int i = 0; i < a.Effects.Count; i++) if (!Effect.SameContent(a.Effects[i], b.Effects[i])) return false;
@@ -82,7 +84,7 @@ public sealed class TimelineObject
     /// <summary>src の内容 (ID 以外) を写す。ドラッグ中に「元の状態からやり直す」ために使う。</summary>
     public void RestoreFrom(TimelineObject src)
     {
-        Layer = src.Layer; Start = src.Start; End = src.End; GroupId = src.GroupId; Enabled = src.Enabled;
+        Layer = src.Layer; Start = src.Start; End = src.End; GroupId = src.GroupId; Enabled = src.Enabled; TemplateGroup = src.TemplateGroup;
         SourceOffsetFrames = src.SourceOffsetFrames;
         KeyFrames = new List<int>(src.KeyFrames);
         Effects = src.Effects.Select(e => e.Clone()).ToList();

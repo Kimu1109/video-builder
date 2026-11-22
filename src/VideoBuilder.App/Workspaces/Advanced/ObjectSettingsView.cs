@@ -128,12 +128,18 @@ public sealed class ObjectSettingsView : UserControl
 
     // ---------------- テンプレートの項目 ----------------
 
-    /// <summary>シーンオブジェクトの参照先のシーンと、その公開項目。</summary>
-    private (Scene Scene, List<ExposedParam> Items)? ExposedOf(TimelineObject? o)
+    /// <summary>
+    /// 「テンプレートの項目」に出す項目と、項目が指すオブジェクトのあるシーン。
+    /// シーンオブジェクトなら参照先のシーンの公開項目、「複数のオブジェクトとして置いた」テンプレートのオブジェクトなら、その組の公開項目
+    /// (このときのシーンは今のシーンで、GroupId に組の Id が入る)。
+    /// </summary>
+    private (Scene Scene, List<ExposedParam> Items, string? GroupId)? ExposedOf(TimelineObject? o)
     {
-        if (o == null || o.Main.DefinitionId != EffectRegistry.SceneRef) return null;
+        if (o == null) return null;
+        if (_session.TemplateGroupOf(o) is { Exposed.Count: > 0 } g) return (_session.Scene, g.Exposed, g.Id);
+        if (o.Main.DefinitionId != EffectRegistry.SceneRef) return null;
         var scene = _session.Project.FindScene(o.Main.GetString("scene"));
-        return scene?.Exposed is { Count: > 0 } items ? (scene, items) : null;
+        return scene?.Exposed is { Count: > 0 } items ? (scene, items, null) : null;
     }
 
     /// <summary>公開項目の並び (種類と名前)。同じなら欄を使い回せる。</summary>
@@ -154,6 +160,9 @@ public sealed class ObjectSettingsView : UserControl
         {
             var t = Target;
             if (t == null || ExposedOf(t) is not { } x) return 0;
+            // 組の項目は同じシーンのオブジェクトなので、今のフレームをそのオブジェクトの範囲に収めるだけ
+            if (x.GroupId != null)
+                return Resolve() is { } r ? Math.Clamp(_session.CurrentFrame, r.Object.Start, r.Object.End) : _session.CurrentFrame;
             return SceneTime.InnerFrame(_session.Project, t, x.Scene, t.Bounds, Math.Clamp(_session.CurrentFrame, t.Start, t.End));
         }
         return new Slot(() => Resolve()?.Object, () => Resolve()?.Effect, Frame, "x" + index, Verbatim: true);
@@ -173,7 +182,7 @@ public sealed class ObjectSettingsView : UserControl
         if (ExposedOf(o) is not { } x)
         {
             if (!fromTemplate) return null;
-            x = (_session.Project.FindScene(o.Main.GetString("scene"))!, new List<ExposedParam>());
+            x = (_session.Project.FindScene(o.Main.GetString("scene"))!, new List<ExposedParam>(), null);
         }
         var rows = new StackPanel { Margin = new Thickness(8, 4, 18, 8), Spacing = 2 };
         if (fromTemplate)
@@ -213,7 +222,7 @@ public sealed class ObjectSettingsView : UserControl
         }
         var head = new DockPanel { Margin = new Thickness(4, 0, 16, 0), Height = 24 };
         var edit = new IconButton("Tune", "テンプレートの項目を編集 (並べ替え・グループ・表示名)");
-        edit.Click += (_, _) => { if (ExposedOf(Target) is { } cur) _ = EditExposedAsync(cur.Scene.Id); };
+        edit.Click += (_, _) => { if (ExposedOf(Target) is { } cur) _ = EditExposedAsync(cur.Scene.Id, cur.GroupId); };
         edit.IsVisible = x.Items.Count > 0;
         DockPanel.SetDock(edit, Dock.Right);
         head.Children.Add(edit);
@@ -237,7 +246,7 @@ public sealed class ObjectSettingsView : UserControl
         row.ContextRequested += (_, e) =>
         {
             var o = Target;
-            if (o == null || _session.Scene == _session.Project.Root) return;
+            if (o == null || !_session.CanExpose(o)) return;
             e.Handled = true;
             var current = _session.FindExposed(o, effectIndex, p.Key);
             var menu = new ContextMenu();
@@ -258,25 +267,32 @@ public sealed class ObjectSettingsView : UserControl
                     if (label != null && Target is { } t) _session.SetExposed(t, effectIndex, p.Key, label.Trim());
                 }));
             }
-            if (_session.Scene.Exposed is { Count: > 0 })
+            var group = _session.TemplateGroupOf(o);
+            if (group is { Exposed.Count: > 0 } || (group == null && _session.Scene.Exposed is { Count: > 0 }))
             {
                 menu.Items.Add(Menus.Sep());
-                menu.Items.Add(Menus.Item("テンプレートの項目を編集...", "Tune", () => _ = EditExposedAsync(_session.Scene.Id)));
+                menu.Items.Add(Menus.Item("テンプレートの項目を編集...", "Tune", () => _ = EditExposedAsync(_session.Scene.Id, group?.Id)));
             }
             menu.Open(row);
         };
         return row;
     }
 
-    /// <summary>シーンの公開項目の並べ替え・グループ・表示名・削除のダイアログを開く。</summary>
-    private async Task EditExposedAsync(string sceneId)
+    /// <summary>
+    /// 公開項目の並べ替え・グループ・表示名・削除のダイアログを開く。groupId があれば (今のシーンの) テンプレートの組の項目、なければシーンの項目。
+    /// </summary>
+    private async Task EditExposedAsync(string sceneId, string? groupId = null)
     {
         if (TopLevel.GetTopLevel(this) is not Window w) return;
         var scene = _session.Project.FindScene(sceneId);
-        if (scene?.Exposed is not { Count: > 0 }) return;
-        var d = new ExposedItemsDialog(scene);
+        if (scene == null) return;
+        var items = groupId != null ? scene.FindTemplateGroup(groupId)?.Exposed : scene.Exposed;
+        if (items is not { Count: > 0 }) return;
+        var d = new ExposedItemsDialog(scene, items);
         await d.ShowDialog(w);
-        if (d.Result != null) _session.ReplaceExposed(sceneId, d.Result);
+        if (d.Result == null) return;
+        if (groupId != null) _session.ReplaceGroupExposed(groupId, d.Result);
+        else _session.ReplaceExposed(sceneId, d.Result);
     }
 
     // ---------------- スタイル ----------------

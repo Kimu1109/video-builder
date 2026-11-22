@@ -602,6 +602,41 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public void Expanded_template_objects_show_the_template_items_in_the_properties()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        var t = s.AddObject(EffectRegistry.Text, 0, 0, 60)!;
+        t.Main.Values["text"] = "見出し";
+        var shape = s.AddObject(EffectRegistry.Shape, 1, 0, 60)!;
+        var pkg = TemplatePackage.Create(s.Project, new[] { t, shape }, new TemplateOptions
+        {
+            Name = "展開テスト用", InsertAs = TemplateInsertMode.Objects,
+            Exposed = new() { new ExposedParam { ObjectId = t.Id, Effect = 0, Key = "text", Label = "タイトル" },
+                              new ExposedParam { ObjectId = shape.Id, Effect = shape.Effects.Count - 1, Key = "x", Label = "帯の位置" } },
+        });
+        Svc.Templates.Save(pkg);
+        var entry = Svc.Templates.List().Single(e => e.Name == "展開テスト用");
+        try
+        {
+            EditorCommands.InsertTemplate(entry, 10, 300);
+            var placedShape = s.Scene.Objects.Single(o => o.Layer == 11 && o.Start == 300);
+            s.Select(placedShape.Id);
+            s.CurrentFrame = 310;
+            Pump();
+            // 図形を選んでも、組の項目 (テキストの本文を含む) が出て、テキストを書き換えられる
+            var settings = w.GetVisualDescendants().OfType<ObjectSettingsView>().Single();
+            Assert.Contains(settings.GetVisualDescendants().OfType<TextBlock>(), b => b.Text == L.T("テンプレートの項目") && b.IsEffectivelyVisible);
+            var box = settings.GetVisualDescendants().OfType<TextBox>().First(b => b.Text == "見出し" && b.IsEffectivelyVisible);
+            box.Text = "新しい見出し";
+            Pump();
+            Assert.Equal("新しい見出し", s.Scene.Objects.Single(o => o.Layer == 10 && o.Start == 300).Main.GetString("text"));
+            Shot(w, "template-expanded-properties");
+        }
+        finally { Svc.Templates.Delete(entry); }
+    }
+
+    [AvaloniaFact]
     public void Template_dialogs_show_candidates_and_the_library()
     {
         var w = Open();
@@ -611,9 +646,21 @@ public class UiTests
         var save = new TemplateSaveDialog(s.Project, new[] { t, img }, "見出し", new[] { "テロップ" });
         save.Show(w);
         Pump();
-        // テキストの本文と画像のファイルは、最初から公開する項目に選ばれている
+        // テキストの本文・文字色と画像のファイルは、最初から公開する項目に選ばれている
         var checkedRows = save.GetVisualDescendants().OfType<CheckBox>().Where(c => c.IsChecked == true).ToList();
-        Assert.Equal(2, checkedRows.Count);
+        Assert.Equal(3, checkedRows.Count);
+        // 変形 (X・拡大率など) やフィルタのトラックバーも選べる。オブジェクトごとにまとめて並ぶ
+        Assert.Equal(2, save.GetVisualDescendants().OfType<CollapsibleSection>().Count());
+        int all = save.GetVisualDescendants().OfType<CollapsibleSection>().Sum(x => ((StackPanel)x.Body).Children.OfType<DockPanel>().Count());
+        int expected = new[] { t, img }.Sum(o => o.Effects.Sum(e => e.Definition.Params.Count(p => p.Key != "scene")));
+        Assert.Equal(expected, all);
+        // 絞り込み: 「拡大率」で探すと、2 つのオブジェクトの「変形」の拡大率だけが残る
+        var search = save.GetVisualDescendants().OfType<TextBox>().First(b => b.Watermark == "パラメータ名で絞り込む" || b.Watermark == L.T("パラメータ名で絞り込む"));
+        search.Text = L.T("拡大率");
+        Pump();
+        int visible = save.GetVisualDescendants().OfType<CollapsibleSection>().Sum(x => ((StackPanel)x.Body).Children.OfType<DockPanel>().Count(r => r.IsVisible));
+        Assert.Equal(2, visible);
+        search.Text = "";
         Shot(save, "template-save-dialog");
         save.Close();
 
@@ -880,11 +927,12 @@ public class UiTests
             Assert.Contains("説明", texts);
             Assert.DoesNotContain("Description", texts);
 
-            // テンプレートの保存のダイアログの「どこの項目か」も、本文をそのまま出す
+            // テンプレートの保存のダイアログの、オブジェクトごとの欄の見出しも、本文をそのまま出す (訳さない)
             var d = new TemplateSaveDialog(s.Project, new[] { s.Scene.Find(text.Id)! }, "x", Array.Empty<string>());
             d.Show(w);
             Pump();
-            Assert.Contains(d.GetVisualDescendants().OfType<TextBlock>(), t => t.Text != null && t.Text.StartsWith("テキスト › Text › "));
+            var section = d.GetVisualDescendants().OfType<CollapsibleSection>().Single();
+            Assert.Contains(section.Children[0].GetVisualDescendants().OfType<TextBlock>(), t => t.Text == "テキスト");
             d.Close();
 
             // タイムラインのシーンの一覧: 選んだシーンの名前がそのまま出る

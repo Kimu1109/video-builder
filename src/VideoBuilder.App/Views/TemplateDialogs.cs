@@ -21,6 +21,19 @@ public sealed class TemplateSaveDialog : DialogBase
 
     private sealed record Candidate(CheckBox Check, TextBox Label, string ObjectId, int Effect, string Key);
 
+    /// <summary>
+    /// 最初から公開する項目にしておくもの: テキストの本文・文字色、図形の色、素材のファイル (音声以外)、ベクター画像の色。
+    /// </summary>
+    internal static bool Suggest(TimelineObject o, ParamDefinition p)
+    {
+        string id = o.Main.DefinitionId;
+        if (p.Kind == ParamKind.File) return id != EffectRegistry.Audio;
+        if (id == EffectRegistry.Text) return p.Key is "text" or "color";
+        if (id == EffectRegistry.Shape) return p.Key == "color";
+        if (id == EffectRegistry.Vector) return p.Kind == ParamKind.Color;
+        return false;
+    }
+
     public TemplateSaveDialog(Project project, IReadOnlyList<TimelineObject> targets, string suggestedName, IReadOnlyList<string> categories)
         : base("テンプレートとして保存", 560)
     {
@@ -56,49 +69,83 @@ public sealed class TemplateSaveDialog : DialogBase
         Body.Children.Add(stretchNote);
 
         Body.Children.Add(Heading("公開する項目"));
+        // 展開して置いたテンプレートから作り直すときは、その組の公開項目を最初から選んでおく
+        var owner = single == null ? project.Scenes.FirstOrDefault(sc => sc.Objects.Contains(targets[0])) : null;
+        var groupIds = targets.Select(t => t.TemplateGroup).Distinct().ToList();
+        var previous = single?.Exposed ?? (groupIds.Count == 1 ? owner?.FindTemplateGroup(groupIds[0])?.Exposed : null);
+        var search = new TextBox { Watermark = "パラメータ名で絞り込む", Margin = new Thickness(0, 0, 0, 4) };
+        Body.Children.Add(search);
         var list = new StackPanel { Spacing = 2 };
         var candidates = new List<Candidate>();
-        var rows = new List<(bool Suggested, Control Row)>();
         var usedLabels = new HashSet<string>();
+        // 絞り込み用: 行と、その行を探す文字 (オブジェクト・エフェクト・パラメータの名前)
+        var searchable = new List<(Control Row, string Text, CollapsibleSection Section)>();
+        var sections = new List<CollapsibleSection>();
+        // エフェクトの小見出しと、その下の行 (絞り込みで行がすべて隠れたら、小見出しも隠す)
+        var effectHeads = new List<(TextBlock Head, List<Control> Rows)>();
         foreach (var o in objects)
         {
+            var rowsOfObject = new StackPanel { Spacing = 2 };
+            int selectedInObject = 0;
+            var section = new CollapsibleSection(Labels.Object(o), rowsOfObject);
             for (int ei = 0; ei < o.Effects.Count; ei++)
             {
                 var e = o.Effects[ei];
                 if (!EffectRegistry.Exists(e.DefinitionId)) continue;
+                List<Control>? effectRows = null;
                 foreach (var p in e.Definition.Params)
                 {
                     if (p.Key == "scene") continue;
-                    // 一覧が長くなりすぎないよう、トラックバーはオブジェクト本体 (先頭のエフェクト) のものだけを出す
-                    if (p.Kind == ParamKind.Track && ei != 0) continue;
                     // ベクター画像の「色 n」は、Lottie にその番号の色があるものだけを出す
                     if (e.DefinitionId == EffectRegistry.Vector && VectorColors.SlotOf(p.Key) is var cs and >= 0
                         && cs >= VectorColors.PaletteOfFile(e.GetString("file")).Count) continue;
-                    var existing = single?.Exposed?.FirstOrDefault(x => x.ObjectId == o.Id && x.Effect == ei && x.Key == p.Key);
-                    bool suggested = existing != null || (single == null && ei == 0 &&
-                        ((o.Main.DefinitionId == EffectRegistry.Text && p.Key == "text") || (p.Kind == ParamKind.File && o.Main.DefinitionId != EffectRegistry.Audio)));
+                    var existing = previous?.FirstOrDefault(x => x.ObjectId == o.Id && x.Effect == ei && x.Key == p.Key);
+                    bool suggested = existing != null || (previous == null && ei == 0 && Suggest(o, p));
                     // 表示名は利用者が付ける名前として保存するので、表示している言語の名前を最初に入れておく
                     string baseLabel = L.T(p.Name), label = existing?.Label ?? baseLabel;
                     if (existing == null) for (int n = 2; usedLabels.Contains(label); n++) label = $"{baseLabel} {n}";
-                    if (suggested) usedLabels.Add(label);
+                    if (suggested) { usedLabels.Add(label); selectedInObject++; }
+                    if (effectRows == null)
+                    {
+                        // エフェクトごとの小見出し
+                        var effectHead = new TextBlock { Text = e.Definition.Name, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, rowsOfObject.Children.Count == 0 ? 0 : 6, 0, 0) };
+                        effectHead.Classes.Add("secondary");
+                        rowsOfObject.Children.Add(effectHead);
+                        effectHeads.Add((effectHead, effectRows = new List<Control>()));
+                    }
                     var check = new CheckBox { IsChecked = suggested, VerticalAlignment = VerticalAlignment.Center };
                     var labelBox = new TextBox { Text = label, Width = 160, IsEnabled = suggested };
                     check.IsCheckedChanged += (_, _) => labelBox.IsEnabled = check.IsChecked == true;
-                    // オブジェクトの表示名 (テキストの本文など) を含むので、組み立てた文字はもう訳さない
-                    var where = L.Verbatim($"{Labels.Object(o)} › {L.T(e.Definition.Name)} › {L.T(p.Name)}");
-                    where.VerticalAlignment = VerticalAlignment.Center; where.TextTrimming = TextTrimming.CharacterEllipsis; where.Margin = new Thickness(8, 0, 0, 0);
-                    where.Classes.Add("secondary");
-                    var row = new DockPanel { Children = { check, labelBox, where } };
+                    var what = new TextBlock { Text = p.Name, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(8, 0, 0, 0) };
+                    what.Classes.Add("secondary");
+                    var row = new DockPanel { Children = { check, labelBox, what } };
                     DockPanel.SetDock(check, Dock.Left); DockPanel.SetDock(labelBox, Dock.Left);
-                    rows.Add((suggested, row));
+                    rowsOfObject.Children.Add(row);
+                    effectRows.Add(row);
                     candidates.Add(new Candidate(check, labelBox, o.Id, ei, p.Key));
+                    searchable.Add((row, $"{Labels.Object(o)} {L.T(e.Definition.Name)} {L.T(p.Name)} {e.Definition.Name} {p.Name}", section));
                 }
             }
+            if (rowsOfObject.Children.Count == 0) continue;
+            // 選んだ項目があるオブジェクトは開いておく (1 つだけのときも開く)
+            section.IsExpanded = selectedInObject > 0 || objects.Count == 1;
+            sections.Add(section);
+            list.Children.Add(section);
         }
-        // 最初から選んだ項目を上に出す (一覧が長いと埋もれるため)
-        foreach (var (_, row) in rows.Where(r => r.Suggested).Concat(rows.Where(r => !r.Suggested))) list.Children.Add(row);
-        Body.Children.Add(new ScrollViewer { Content = list, MaxHeight = 220, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled });
-        var exposeNote = new TextBlock { Text = "まとめて置いたときに、プロパティの「テンプレートの項目」に出す項目です。あとから、シーンの中でパラメータ名を右クリックして変えることもできます。", TextWrapping = TextWrapping.Wrap };
+        search.TextChanged += (_, _) =>
+        {
+            var q = search.Text?.Trim() ?? "";
+            foreach (var (row, text, _) in searchable) row.IsVisible = q.Length == 0 || text.Contains(q, StringComparison.OrdinalIgnoreCase);
+            foreach (var (head, rows) in effectHeads) head.IsVisible = rows.Any(r => r.IsVisible);
+            foreach (var sec in sections)
+            {
+                bool any = searchable.Any(r => r.Section == sec && r.Row.IsVisible);
+                sec.IsVisible = any;
+                if (q.Length > 0 && any) sec.IsExpanded = true;
+            }
+        };
+        Body.Children.Add(new ScrollViewer { Content = list, MaxHeight = 300, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled });
+        var exposeNote = new TextBlock { Text = "置いたあとに、プロパティの「テンプレートの項目」に出す項目です (まとめて置いたときはシーンオブジェクト、展開して置いたときは置いたどのオブジェクトを選んでも出ます)。あとから、パラメータ名を右クリックして変えることもできます。", TextWrapping = TextWrapping.Wrap };
         exposeNote.Classes.Add("secondary");
         Body.Children.Add(exposeNote);
 
@@ -120,6 +167,42 @@ public sealed class TemplateSaveDialog : DialogBase
             Close();
         }, accent: true);
         Opened += (_, _) => { name.Focus(); name.SelectAll(); };
+    }
+}
+
+/// <summary>開け閉めできる欄 (見出しの矢印で開閉する)。見出しは利用者が付けた名前などなので訳さない。</summary>
+public sealed class CollapsibleSection : StackPanel
+{
+    private readonly IconButton _arrow;
+    public Control Body { get; }
+
+    public CollapsibleSection(string title, Control body)
+    {
+        Body = body;
+        body.Margin = new Thickness(28, 2, 4, 6);
+        _arrow = new IconButton("ArrowRight");
+        _arrow.Click += (_, _) => IsExpanded = !IsExpanded;
+        var text = L.Verbatim(title);
+        text.FontWeight = FontWeight.SemiBold;
+        text.VerticalAlignment = VerticalAlignment.Center;
+        text.TextTrimming = TextTrimming.CharacterEllipsis;
+        var head = new DockPanel { Height = 26, Children = { _arrow, text } };
+        DockPanel.SetDock(_arrow, Dock.Left);
+        // 見出しのどこを押しても開け閉めできる
+        head.Background = Brushes.Transparent;
+        head.PointerPressed += (_, e) => { if (e.Source is not Button) { IsExpanded = !IsExpanded; e.Handled = true; } };
+        var border = new Border { Child = head, BorderThickness = new Thickness(0, 0, 0, 1) };
+        border[!Border.BackgroundProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Bg.Elevated");
+        border[!Border.BorderBrushProperty] = new Avalonia.Markup.Xaml.MarkupExtensions.DynamicResourceExtension("Border.Default");
+        Children.Add(border);
+        Children.Add(body);
+        IsExpanded = false;
+    }
+
+    public bool IsExpanded
+    {
+        get => Body.IsVisible;
+        set { Body.IsVisible = value; _arrow.Icon = Icons.Get(value ? "ArrowDown" : "ArrowRight"); }
     }
 }
 
@@ -404,10 +487,14 @@ public sealed class ExposedItemsDialog : DialogBase
     private readonly List<ExposedParam> _items;
     private readonly StackPanel _rows = new() { Spacing = 4 };
 
-    public ExposedItemsDialog(Scene scene) : base("テンプレートの項目を編集", 640)
+    public ExposedItemsDialog(Scene scene) : this(scene, scene.Exposed ?? new()) { }
+
+    /// <param name="scene">項目が指すオブジェクトのあるシーン。</param>
+    /// <param name="items">編集する項目 (シーンの公開項目、またはテンプレートの組の項目)。</param>
+    public ExposedItemsDialog(Scene scene, IEnumerable<ExposedParam> items) : base("テンプレートの項目を編集", 640)
     {
         _scene = scene;
-        _items = (scene.Exposed ?? new()).Select(x => x.Clone()).ToList();
+        _items = items.Select(x => x.Clone()).ToList();
 
         var header = new Grid { ColumnDefinitions = new ColumnDefinitions("160,140,*,Auto") };
         void Col(string text, int col)
