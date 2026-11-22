@@ -50,6 +50,26 @@ public static class Generators
     /// <summary>1 文字ごとの描き方 (透明度 0〜1・下へのずれ px・拡大率)。</summary>
     public readonly record struct CharStyle(float Alpha, float Dy, float Scale);
 
+    /// <summary>テキストの飾り (縦書き・下線・取り消し線)。既定は横書きで線なし。</summary>
+    public readonly record struct TextDecor(bool Vertical, bool Underline, bool Strike)
+    {
+        public string Key => $"{(Vertical ? 1 : 0)}{(Underline ? 1 : 0)}{(Strike ? 1 : 0)}";
+    }
+
+    /// <summary>
+    /// 1 文字の置き方。(X, Y) は立てて描くときの基準線の位置。Rotate なら (CenterX, CenterY) を中心に 90 度回して描く (縦書きの括弧・長音など)。
+    /// Span0〜Span1 は行の向きに沿った文字の範囲、Pos は線を引く基準 (横書きは基準線の高さ、縦書きは列の中心)。線は行 (Line) ごとにまとめて引く。
+    /// </summary>
+    private readonly record struct Glyph(string Text, SKTypeface Face, float X, float Y, float Advance, int Index,
+        bool Rotate, float CenterX, float CenterY, int Line, float Span0, float Span1, float Pos);
+
+    // 縦書きで 90 度回して描く文字 (括弧・長音・ダッシュ・波線・三点リーダーなど)
+    private const string VerticalRotated = "ー－―‐-–—～〜~…‥「」『』（）()［］[]【】〈〉《》｛｝{}<>＜＞→←＝=：:；;｜|＿_";
+    // 縦書きで右上に寄せる文字 (句読点)
+    private const string VerticalPunct = "、。，．､｡,.";
+    // 縦書きで少し右上に寄せる小さい仮名
+    private const string VerticalSmall = "ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ";
+
     /// <summary>テキストの文字 (テキストの要素) の数。改行も 1 文字として数える (テキストアニメーションの順番)。</summary>
     public static int CountChars(string text)
     {
@@ -73,7 +93,9 @@ public static class Generators
         /// <summary>行ごとにまとめて描くもの (字間が 0 でアニメーションがないとき)。</summary>
         public required List<(string Text, SKTypeface Face, float X, float Y)> Runs;
         /// <summary>1 文字ずつ描くもの (字の位置・送り幅・アニメーションの順番)。</summary>
-        public required List<(string Text, SKTypeface Face, float X, float Y, float Advance, int Index)> Chars;
+        public required List<Glyph> Chars;
+        /// <summary>縦書き (Runs は使わず、いつも 1 文字ずつ描く)。</summary>
+        public required bool Vertical;
         /// <summary>拡大の中心にする高さ (基準線からの距離)。</summary>
         public required float MiddleFromBaseline;
         /// <summary>書体を持っておく (使っている間に破棄されないように)。</summary>
@@ -88,9 +110,9 @@ public static class Generators
     public static long TextLayoutsBuilt => Interlocked.Read(ref _layoutsBuilt);
     private static long _layoutsBuilt;
 
-    private static TextLayout? LayoutFor(string text, string family, float size, bool bold, bool italic, int align, float spacing, float leading, bool animated)
+    private static TextLayout? LayoutFor(string text, string family, float size, bool bold, bool italic, int align, float spacing, float leading, bool animated, bool vertical)
     {
-        string key = string.Join('\u0001', text, family, F(size), bold, italic, align, F(spacing), F(leading), animated);
+        string key = string.Join('\u0001', text, family, F(size), bold, italic, align, F(spacing), F(leading), animated, vertical);
         lock (Layouts)
         {
             if (Layouts.TryGetValue(key, out var known))
@@ -100,7 +122,7 @@ public static class Generators
                 return known;
             }
         }
-        var made = BuildLayout(text, family, size, bold, italic, align, spacing, leading, animated);
+        var made = BuildLayout(text, family, size, bold, italic, align, spacing, leading, animated, vertical);
         Interlocked.Increment(ref _layoutsBuilt);
         lock (Layouts)
         {
@@ -111,7 +133,7 @@ public static class Generators
         }
     }
 
-    private static TextLayout? BuildLayout(string text, string family, float size, bool bold, bool italic, int align, float spacing, float leading, bool animated)
+    private static TextLayout? BuildLayout(string text, string family, float size, bool bold, bool italic, int align, float spacing, float leading, bool animated, bool vertical)
     {
         var style = new SKFontStyle(bold ? SKFontStyleWeight.Bold : SKFontStyleWeight.Normal, SKFontStyleWidth.Normal,
             italic ? SKFontStyleSlant.Italic : SKFontStyleSlant.Upright);
@@ -178,6 +200,7 @@ public static class Generators
 
         var m = font.Metrics;
         float lineHeight = m.Descent - m.Ascent + m.Leading + leading;
+        if (vertical) return BuildVertical(text, size, align, spacing, lineHeight, animated, italic, baseFace, font.Embolden, font.SkewX, faces, FaceFor, MeasureRaw, m);
         float maxWidth = lines.Max(l => l.Width);
         const int pad = 2;
         int padY = pad + (animated ? (int)MathF.Ceiling(size * 0.7f) : 0);
@@ -186,9 +209,10 @@ public static class Generators
         if (w <= pad * 2 || h <= 0 || w > 16384 || h > 16384) return null;
 
         var runList = new List<(string, SKTypeface, float, float)>();
-        var chars = new List<(string, SKTypeface, float, float, float, int)>();
+        var chars = new List<Glyph>();
+        float middle = (m.Ascent + m.Descent) / 2;
         float y = padY - m.Ascent;
-        int index = 0;
+        int index = 0, lineNo = 0;
         foreach (var (runs, width) in lines)
         {
             float x = pad + align switch { 1 => (maxWidth - width) / 2, 2 => maxWidth - width, _ => 0 };
@@ -201,18 +225,73 @@ public static class Generators
                 {
                     string el = e.GetTextElement();
                     float adv = MeasureRaw(el, run.Face);
-                    chars.Add((el, run.Face, cx, y, adv, index++));
+                    chars.Add(new Glyph(el, run.Face, cx, y, adv, index++, false, cx + adv / 2, y + middle, lineNo, cx, cx + adv, y));
                     cx += adv + spacing;
                 }
                 x += run.Width;
             }
             y += lineHeight;
             index++;   // 改行も 1 文字
+            lineNo++;
         }
         return new TextLayout
         {
             BaseFace = baseFace, Size = size, Embolden = font.Embolden, SkewX = font.SkewX, Width = w, Height = h,
-            Runs = runList, Chars = chars, MiddleFromBaseline = (m.Ascent + m.Descent) / 2, Faces = faces,
+            Runs = runList, Chars = chars, MiddleFromBaseline = middle, Faces = faces, Vertical = false,
+        };
+    }
+
+    /// <summary>
+    /// 縦書きの並び。行は右から左へ並ぶ列になり、文字は上から下へ 1 文字ずつ (送りは文字の大きさ + 字間) 並ぶ。
+    /// 揃え (左寄せ・中央・右寄せ) は、縦書きでは上揃え・中央・下揃えになる。括弧や長音は 90 度回し、句読点・小さい仮名は右上に寄せる。
+    /// </summary>
+    private static TextLayout? BuildVertical(string text, float size, int align, float spacing, float columnPitch, bool animated, bool italic,
+        SKTypeface baseFace, bool embolden, float skewX, List<SKTypeface> faces, Func<int, SKTypeface> faceFor, Func<string, SKTypeface, float> measure, SKFontMetrics m)
+    {
+        var columns = text.Replace("\r\n", "\n").Split('\n').Select(l =>
+        {
+            var els = new List<string>();
+            var e = StringInfo.GetTextElementEnumerator(l);
+            while (e.MoveNext()) els.Add(e.GetTextElement());
+            return els;
+        }).ToList();
+        float cell = size + spacing;
+        float Height(int n) => n <= 0 ? 0 : n * cell - spacing;
+        float maxHeight = Math.Max(size, columns.Max(c => Height(c.Count)));
+        // 列の幅は、右側に引く傍線 (下線) が入るよう、文字の大きさの 1.25 倍以上にする
+        float colWidth = Math.Max(size * 1.25f, columnPitch);
+        const int pad = 2;
+        int padY = pad + (animated ? (int)MathF.Ceiling(size * 0.7f) : 0);
+        int w = (int)MathF.Ceiling(colWidth * columns.Count) + pad * 2 + (italic ? (int)(size * 0.25f) : 0);
+        int h = (int)MathF.Ceiling(maxHeight) + padY * 2;
+        if (w <= pad * 2 || h <= padY * 2 || w > 16384 || h > 16384) return null;
+
+        float middle = (m.Ascent + m.Descent) / 2;
+        var chars = new List<Glyph>();
+        int index = 0;
+        for (int c = 0; c < columns.Count; c++)
+        {
+            float centerX = w - pad - colWidth * c - colWidth / 2;
+            float colH = Height(columns[c].Count);
+            float top = padY + align switch { 1 => (maxHeight - colH) / 2, 2 => maxHeight - colH, _ => 0 };
+            for (int k = 0; k < columns[c].Count; k++)
+            {
+                string el = columns[c][k];
+                var face = faceFor(char.ConvertToUtf32(el, 0));
+                float adv = measure(el, face);
+                float cellTop = top + k * cell, centerY = cellTop + size / 2;
+                bool rotate = el.Length == 1 && VerticalRotated.Contains(el[0]);
+                float dx = 0, dy = 0;
+                if (el.Length == 1 && VerticalPunct.Contains(el[0])) { dx = size * 0.6f; dy = -size * 0.6f; }
+                else if (el.Length == 1 && VerticalSmall.Contains(el[0])) { dx = size * 0.1f; dy = -size * 0.1f; }
+                chars.Add(new Glyph(el, face, centerX - adv / 2 + dx, centerY - middle + dy, adv, index++, rotate, centerX, centerY, c, cellTop, cellTop + size, centerX));
+            }
+            index++;   // 改行も 1 文字
+        }
+        return new TextLayout
+        {
+            BaseFace = baseFace, Size = size, Embolden = embolden, SkewX = skewX, Width = w, Height = h,
+            Runs = new(), Chars = chars, MiddleFromBaseline = middle, Faces = faces, Vertical = true,
         };
     }
 
@@ -220,12 +299,13 @@ public static class Generators
     /// null でなければ、文字ごとに描き方を変える (テキストアニメーション)。引数は文字の番号 (改行も 1 文字)。
     /// 字の並びはアニメーションがないときと同じ。下からのずれ・拡大で絵からはみ出さないよう、上下に余白を足す (中心は変わらない)。
     /// </param>
+    /// <param name="decor">縦書き・下線・取り消し線。</param>
     public static SKImage? RenderText(string text, string family, float size, SKColor color, bool bold, bool italic, int align, float spacing, float leading,
-        Func<int, CharStyle>? perChar = null)
+        Func<int, CharStyle>? perChar = null, TextDecor decor = default)
     {
         if (string.IsNullOrEmpty(text) || size <= 0) return null;
         if (string.IsNullOrWhiteSpace(family)) family = DefaultFontFamily;
-        var layout = LayoutFor(text, family, size, bold, italic, align, spacing, leading, perChar != null);
+        var layout = LayoutFor(text, family, size, bold, italic, align, spacing, leading, perChar != null, decor.Vertical);
         if (layout == null) return null;
 
         using var font = new SKFont(layout.BaseFace, layout.Size) { Subpixel = true, Edging = SKFontEdging.Antialias, Embolden = layout.Embolden, SkewX = layout.SkewX };
@@ -239,33 +319,69 @@ public static class Generators
             if (surface == null) { PixelPool.Return(buffer, (long)rowBytes * info.Height); return null; }
             var canvas = surface.Canvas;
             canvas.Clear(SKColors.Transparent);
+            bool lines = decor.Underline || decor.Strike;
             if (perChar != null)
             {
-                // 1 文字ずつ、決めた透明度・ずれ・拡大率で描く
-                foreach (var (el, face, x, y, adv, index) in layout.Chars)
+                // 1 文字ずつ、決めた透明度・ずれ・拡大率で描く (線も 1 文字ずつ、その文字の透明度で)
+                foreach (var g in layout.Chars)
                 {
-                    var st = perChar(index);
+                    var st = perChar(g.Index);
                     if (st.Alpha <= 0 || st.Scale <= 0) continue;
-                    font.Typeface = face;
                     paint.Color = color.WithAlpha((byte)Math.Clamp(color.Alpha * st.Alpha, 0, 255));
                     canvas.Save();
                     canvas.Translate(0, st.Dy);
-                    if (st.Scale != 1) canvas.Scale(st.Scale, st.Scale, x + adv / 2, y + layout.MiddleFromBaseline);
-                    canvas.DrawText(el, x, y, font, paint);
+                    if (st.Scale != 1) canvas.Scale(st.Scale, st.Scale, g.CenterX, g.CenterY);
+                    DrawGlyph(canvas, font, paint, g, layout);
+                    if (lines) DrawLines(canvas, paint, layout, decor, g.Span0, g.Span1 + (layout.Vertical ? 0 : spacing), g.Pos);
                     canvas.Restore();
                 }
             }
-            else if (spacing == 0)
-            {
-                foreach (var (t, face, x, y) in layout.Runs) { font.Typeface = face; canvas.DrawText(t, x, y, font, paint); }
-            }
             else
             {
-                foreach (var (el, face, x, y, _, _) in layout.Chars) { font.Typeface = face; canvas.DrawText(el, x, y, font, paint); }
+                if (layout.Vertical || spacing != 0) foreach (var g in layout.Chars) DrawGlyph(canvas, font, paint, g, layout);
+                else foreach (var (t, face, x, y) in layout.Runs) { font.Typeface = face; canvas.DrawText(t, x, y, font, paint); }
+                if (lines)
+                    foreach (var line in layout.Chars.GroupBy(g => g.Line))
+                        DrawLines(canvas, paint, layout, decor, line.Min(g => g.Span0), line.Max(g => g.Span1), line.First().Pos);
             }
             canvas.Flush();
         }
         return PixelPool.ToImage(buffer, info, rowBytes);
+    }
+
+    private static void DrawGlyph(SKCanvas canvas, SKFont font, SKPaint paint, Glyph g, TextLayout layout)
+    {
+        font.Typeface = g.Face;
+        if (!g.Rotate) { canvas.DrawText(g.Text, g.X, g.Y, font, paint); return; }
+        canvas.Save();
+        canvas.RotateDegrees(90, g.CenterX, g.CenterY);
+        canvas.DrawText(g.Text, g.CenterX - g.Advance / 2, g.CenterY - layout.MiddleFromBaseline, font, paint);
+        canvas.Restore();
+    }
+
+    /// <summary>
+    /// 下線・取り消し線を引く。横書きは from〜to が横の範囲で pos が基準線の高さ。縦書きは縦の範囲で pos が列の中心
+    /// (下線は文字の右側の傍線になる)。太さは文字の大きさの 6%。
+    /// </summary>
+    private static void DrawLines(SKCanvas canvas, SKPaint paint, TextLayout layout, TextDecor decor, float from, float to, float pos)
+    {
+        if (to <= from) return;
+        float size = layout.Size, thick = Math.Max(1, size * 0.06f);
+        void Bar(float across)
+        {
+            var r = layout.Vertical ? SKRect.Create(across - thick / 2, from, thick, to - from) : SKRect.Create(from, across - thick / 2, to - from, thick);
+            canvas.DrawRect(r, paint);
+        }
+        if (layout.Vertical)
+        {
+            if (decor.Underline) Bar(pos + size * 0.58f);
+            if (decor.Strike) Bar(pos);
+        }
+        else
+        {
+            if (decor.Underline) Bar(pos + size * 0.12f);
+            if (decor.Strike) Bar(pos + layout.MiddleFromBaseline);
+        }
     }
 
     /// <param name="type">EffectRegistry.ShapeTypes の番号。</param>

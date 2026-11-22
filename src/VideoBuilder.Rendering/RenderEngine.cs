@@ -64,7 +64,8 @@ public sealed class RenderEngine : IDisposable
     private readonly record struct CameraState(int FromLayer, int ToLayer, Matrix4x4 View, float Focal, bool ZSort = false, float Dof = 0, float FocusDistance = 0);
 
     /// <summary>オブジェクトを画面のどこにどう描くか (Place で求め、DrawPlaced で描く)。</summary>
-    private readonly record struct Placement(SKMatrix Matrix, float Depth, float Alpha, float Scale, int Blend, int Camera);
+    /// <param name="Invert">「背景と被る色を反転」の効果があれば、その設定。</param>
+    private readonly record struct Placement(SKMatrix Matrix, float Depth, float Alpha, float Scale, int Blend, int Camera, Effects.OverlapInvertParams? Invert = null);
 
     /// <summary>奥行きで並べ替えるために、描くのを待っているオブジェクト。</summary>
     private readonly record struct DeferredDraw(Sprite Sprite, TimelineObject Obj, Placement Place, int Order, bool ChangesEveryFrame);
@@ -206,14 +207,14 @@ public sealed class RenderEngine : IDisposable
                         float focus = E("focus");
                         if (focus <= 0) focus = Math.Max(1, Vector3.Distance(eye, aim));   // 0 = 目標の位置にピントを合わせる
                         // 新しいカメラより前に待たせていたものは、前のカメラの並びで描き終えておく
-                        FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth);
+                        FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth, surface);
                         cameras.Add(new CameraState(obj.Layer + 1, n <= 0 ? int.MaxValue : obj.Layer + n,
                             LookAt(eye, aim, E("roll")), focal, main.GetBool("zsort"), Math.Max(0, E("dof")), focus));
                         break;
                     }
                     case EffectCategory.Filter:
                         // 画面全体にかける効果は、それまでに描くはずだったものを描き終えてからかける
-                        FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth);
+                        FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth, surface);
                         ApplyToFrameBuffer(ctx, obj, bounds, surface);
                         break;
                     case EffectCategory.VideoSource:
@@ -241,17 +242,17 @@ public sealed class RenderEngine : IDisposable
                         {
                             // 奥行きで並べ替える: 同じカメラのものが続く間は描かずに待たせる
                             if (deferred.Count > 0 && deferred[0].Place.Camera != place.Camera)
-                                FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth);
+                                FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth, surface);
                             deferred.Add(new DeferredDraw(sprite, obj, place, deferred.Count, changes));
                             break;
                         }
-                        FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth);
-                        DrawPlaced(canvas, ApplyDepthOfField(ctx, sprite, obj, place, cameras, depth), sprite, obj, place, W, depth == 0 ? LastQuads : null, Draft, target, changes);
+                        FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth, surface);
+                        DrawPlaced(canvas, ApplyDepthOfField(ctx, sprite, obj, place, cameras, depth), sprite, obj, place, W, depth == 0 ? LastQuads : null, Draft, target, changes, surface);
                         break;
                     }
                 }
             }
-            FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth);
+            FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth, surface);
         }
         finally
         {
@@ -261,7 +262,7 @@ public sealed class RenderEngine : IDisposable
 
     /// <summary>待たせていたものを、奥 (カメラから遠い) から順に描く。同じ距離ならレイヤー順。</summary>
     private void FlushDeferred(SKCanvas canvas, List<DeferredDraw> deferred, List<CameraState> cameras, int W, int H,
-        List<(string, SKPoint[])>? quads, SKPixmap? target, RenderContext ctx, int depth)
+        List<(string, SKPoint[])>? quads, SKPixmap? target, RenderContext ctx, int depth, SKSurface? surface = null)
     {
         if (deferred.Count == 0) return;
         deferred.Sort((a, b) =>
@@ -270,7 +271,7 @@ public sealed class RenderEngine : IDisposable
             return c != 0 ? c : a.Order.CompareTo(b.Order);
         });
         foreach (var d in deferred)
-            DrawPlaced(canvas, ApplyDepthOfField(ctx, d.Sprite, d.Obj, d.Place, cameras, depth), d.Sprite, d.Obj, d.Place, W, quads, Draft, target, d.ChangesEveryFrame);
+            DrawPlaced(canvas, ApplyDepthOfField(ctx, d.Sprite, d.Obj, d.Place, cameras, depth), d.Sprite, d.Obj, d.Place, W, quads, Draft, target, d.ChangesEveryFrame, surface);
         deferred.Clear();
     }
 
@@ -388,12 +389,24 @@ public sealed class RenderEngine : IDisposable
         h.ScaleX *= inv; h.SkewX *= inv; h.TransX *= inv;
         h.SkewY *= inv; h.ScaleY *= inv; h.TransY *= inv;
         h.Persp0 *= inv; h.Persp1 *= inv; h.Persp2 = 1;
-        return new Placement(h, m.M43, Math.Clamp(alpha, 0, 1), scale, blend, camera);
+        return new Placement(h, m.M43, Math.Clamp(alpha, 0, 1), scale, blend, camera, OverlapInvertOf(obj, bounds, frame));
+    }
+
+    /// <summary>オブジェクトに (有効な)「背景と被る色を反転」があれば、その今の設定。</summary>
+    private static Effects.OverlapInvertParams? OverlapInvertOf(TimelineObject obj, int[] bounds, int frame)
+    {
+        foreach (var e in obj.Effects)
+        {
+            if (!e.Enabled || e.DefinitionId != Effects.OverlapInvertId) continue;
+            return new Effects.OverlapInvertParams((float)e.Eval("range", bounds, frame) / 100f, (float)e.Eval("soft", bounds, frame) / 100f,
+                (float)e.Eval("strength", bounds, frame) / 100f, e.GetInt("mode"));
+        }
+        return null;
     }
 
     /// <summary>Place で求めた位置に描く。quadSprite は選択枠に使う絵 (ぼかして広がる前の大きさ)。</summary>
     private static void DrawPlaced(SKCanvas canvas, Sprite sprite, Sprite quadSprite, TimelineObject obj, Placement place, int W,
-        List<(string, SKPoint[])>? quads, bool draft, SKPixmap? target, bool changesEveryFrame)
+        List<(string, SKPoint[])>? quads, bool draft, SKPixmap? target, bool changesEveryFrame, SKSurface? surface = null)
     {
         var h = place.Matrix;
         float alpha = place.Alpha, scale = place.Scale;
@@ -450,7 +463,11 @@ public sealed class RenderEngine : IDisposable
                 FilterQuality = QualityFor(canvas.TotalMatrix, draft, new SKPoint(-sprite.Cx, -sprite.Cy)),
                 IsAntialias = true,
             };
-            if (blend == 2)
+            if (place.Invert is { } overlap && surface != null && Effects.DrawOverlapInvert(canvas, surface, sprite, paint, overlap))
+            {
+                // 背景と被る色を反転: 背景を読んで色を決めて重ねた (合成モードは使わない)
+            }
+            else if (blend == 2)
             {
                 // 減算: 背景を反転 → 加算 → もう一度反転
                 using var invert = new SKPaint { Color = SKColors.White, BlendMode = SKBlendMode.Difference };
@@ -966,10 +983,11 @@ public sealed class RenderEngine : IDisposable
                 string text = main.GetString("text"), font = main.GetString("font"), color = main.GetString("color");
                 bool bold = main.GetBool("bold"), italic = main.GetBool("italic");
                 int align = main.GetInt("align");
-                string key = $"T|{text}|{font}|{Generators.F(size)}|{color}|{bold}|{italic}|{align}|{Generators.F(sp)}|{Generators.F(ld)}";
+                var decor = new Generators.TextDecor(main.GetBool("vertical"), main.GetBool("underline"), main.GetBool("strike"));
+                string key = $"T|{text}|{font}|{Generators.F(size)}|{color}|{bold}|{italic}|{align}|{Generators.F(sp)}|{Generators.F(ld)}|{decor.Key}";
                 int anim = main.GetInt("anim");
                 if (anim <= 0 || text.Length == 0)
-                    return Cached(key, () => Generators.RenderText(text, font, size, ParseColor(color), bold, italic, align, sp, ld));
+                    return Cached(key, () => Generators.RenderText(text, font, size, ParseColor(color), bold, italic, align, sp, ld, null, decor));
                 // テキストアニメーション: 動いている間は毎フレーム描く。終わったら同じ絵を使い回す
                 double t = p.FrameToSeconds(frame - obj.Start);
                 double interval = main.Eval("interval", bounds, obj.Start), duration = main.Eval("duration", bounds, obj.Start);
@@ -990,8 +1008,8 @@ public sealed class RenderEngine : IDisposable
                         _ => new(e > 0 ? 1 : 0, 0, e),
                     };
                 }
-                if (t >= end) return Cached($"{key}|A{anim}|{reverse}|done", () => Generators.RenderText(text, font, size, ParseColor(color), bold, italic, align, sp, ld, Style));
-                var img = Generators.RenderText(text, font, size, ParseColor(color), bold, italic, align, sp, ld, Style);
+                if (t >= end) return Cached($"{key}|A{anim}|{reverse}|done", () => Generators.RenderText(text, font, size, ParseColor(color), bold, italic, align, sp, ld, Style, decor));
+                var img = Generators.RenderText(text, font, size, ParseColor(color), bold, italic, align, sp, ld, Style, decor);
                 return img == null ? null : ctx.Own(img);
             }
             case EffectRegistry.Shape:

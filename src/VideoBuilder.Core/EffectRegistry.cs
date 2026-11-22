@@ -115,6 +115,8 @@ public static class EffectRegistry
                 Col("color", "文字色", "#FFFFFF"),
                 C("bold", "太字"), C("italic", "イタリック"),
                 new ParamDefinition { Key = "align", Name = "揃え", Kind = ParamKind.Choice, Choices = new[] { "左寄せ", "中央揃え", "右寄せ" }, Default = 1 },
+                // 縦書きでは、揃えは上揃え・中央・下揃えになる
+                C("vertical", "縦書き"), C("underline", "下線"), C("strike", "取り消し線"),
                 // テキストアニメーション (1 文字ずつ)。時間はオブジェクトの先頭から数える
                 new ParamDefinition { Key = "anim", Name = "文字の出し方", Kind = ParamKind.Choice, Choices = TextAnimations },
                 T("interval", "文字の間隔 (秒)", 0, 10, 0.05, 3, 0, 0.5), T("duration", "1 文字の長さ (秒)", 0, 10, 0.3, 2, 0, 2),
@@ -218,7 +220,22 @@ public static class EffectRegistry
             T("brightness", "明るさ", 0, 200, 100), T("contrast", "コントラスト", 0, 200, 100),
             T("hue", "色相", -360, 360, 0), T("luminance", "輝度", 0, 200, 100), T("saturation", "彩度", 0, 200, 100));
         F("filter.blur", "ぼかし", "Icon.BlurOn", T("radius", "範囲", 0, 1000, 5, 0, 0, 200), C("fixed", "サイズ固定"));
-        F("filter.border", "縁取り", "Icon.BorderStyle", T("size", "サイズ", 0, 500, 3, 0), T("blur", "ぼかし", 0, 100, 0, 0), Col("color", "縁色", "#000000"));
+        F("filter.border", "縁取り", "Icon.BorderStyle", T("size", "サイズ", 0, 500, 3, 0), T("blur", "ぼかし", 0, 100, 0, 0), Col("color", "縁色", "#000000"),
+            C("only", "縁だけにする (中を抜く)"));
+        // ---- 文字を飾る効果 (どのオブジェクトにも使える) ----
+        F("filter.backplate", "背景の帯", "Icon.Crop",
+            T("padx", "余白 (横)", 0, 2000, 24, 0, 0, 200), T("pady", "余白 (縦)", 0, 2000, 12, 0, 0, 200), T("radius", "角の丸み", 0, 2000, 8, 0, 0, 100),
+            Col("color", "帯の色", "#000000"), T("alpha", "透明度", 0, 100, 30, 0),
+            T("line", "枠線の幅", 0, 200, 0, 0, 0, 20), Col("linecolor", "枠線の色", "#FFFFFF"),
+            new ParamDefinition { Key = "fit", Name = "帯の大きさ", Kind = ParamKind.Choice, Choices = new[] { "文字に合わせる", "絵の大きさ" } });
+        F("filter.innershadow", "内側シャドー", "Icon.Layers",
+            T("x", "X", -200, 200, 4, 0), T("y", "Y", -200, 200, 4, 0), T("density", "濃さ", 0, 100, 60), T("spread", "拡散", 0, 50, 4, 0), Col("color", "影色", "#000000"));
+        F("filter.extrude", "立体 (押し出し)", "Icon.Layers",
+            T("depth", "奥行き", 0, 200, 12, 0, 0, 60), T("angle", "向き", -3600, 3600, 45, 1, -180, 180),
+            Col("color", "手前の色", "#606060"), Col("color2", "奥の色", "#202020"));
+        F("filter.overlapinvert", "背景と被る色を反転", "Icon.InvertColors",
+            T("range", "判定の幅", 0, 100, 20, 0), T("soft", "なめらかさ", 0, 100, 10, 0), T("strength", "強さ", 0, 100, 100, 0),
+            new ParamDefinition { Key = "mode", Name = "変える色", Kind = ParamKind.Choice, Choices = new[] { "背景の反転色", "白か黒 (見やすい方)" } });
         F("filter.shadow", "シャドー", "Icon.Layers",
             T("x", "X", -200, 200, 8, 0), T("y", "Y", -200, 200, 8, 0), T("density", "濃さ", 0, 100, 60), T("spread", "拡散", 0, 50, 10, 0), Col("color", "影色", "#000000"));
         F("filter.clip", "クロップ", "Icon.Crop", T("top", "上", 0, 4000, 0, 0, 0, 1000), T("bottom", "下", 0, 4000, 0, 0, 0, 1000), T("left", "左", 0, 4000, 0, 0, 0, 1000), T("right", "右", 0, 4000, 0, 0, 0, 1000));
@@ -487,11 +504,11 @@ public static class EffectRegistry
     private static string FilterGroupOf(string id) => id switch
     {
         "filter.color" or "filter.mono" or "filter.flip" or "filter.levels" or "filter.posterize" or "filter.extcolor" or "filter.hueconvert"
-            or "filter.gradient" or "filter.vignette" or "filter.noise" or "filter.chromatic" => "色",
+            or "filter.gradient" or "filter.vignette" or "filter.noise" or "filter.chromatic" or "filter.overlapinvert" => "色",
         "filter.blur" or "filter.dirblur" or "filter.radialblur" or "filter.lensblur" or "filter.motionblur" or "filter.edgeblur"
             or "filter.mosaic" or "filter.sharpen" => "ぼかし",
-        "filter.glow" or "filter.emit" or "filter.diffuse" or "filter.flash" or "filter.light" or "filter.shadow" => "光",
-        "filter.border" or "filter.bevel" or "filter.edge" => "縁・輪郭",
+        "filter.glow" or "filter.emit" or "filter.diffuse" or "filter.flash" or "filter.light" or "filter.shadow" or "filter.innershadow" => "光",
+        "filter.border" or "filter.bevel" or "filter.edge" or "filter.backplate" or "filter.extrude" => "縁・輪郭",
         "filter.chromakey" or "filter.colorkey" or "filter.lumakey" => "キー (透過)",
         "filter.raster" or "filter.ripple" or "filter.polar" or "filter.displace" or "filter.mirror" or "filter.kaleido" or "filter.sphere"
             or "filter.freeform" => "変形",

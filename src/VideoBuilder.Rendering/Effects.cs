@@ -19,6 +19,7 @@ public static partial class Effects
         Register(new Mask()); Register(new Transition());
         RegisterMore();
         RegisterExtra();
+        RegisterText();
     }
 
     private static readonly Dictionary<string, VideoBuilder.Plugins.IVideoSource> Sources = new();
@@ -42,6 +43,7 @@ public static partial class Effects
         "filter.levels", "filter.posterize",
         "filter.emit", "filter.diffuse", "filter.flash", "filter.edge", "filter.polar", "filter.mirror", "filter.kaleido", "filter.freeform",
         "filter.lensblur", "filter.deinterlace", "filter.random",
+        "filter.backplate", "filter.innershadow", "filter.extrude", "filter.overlapinvert",
     };
 
     /// <summary>結果を使い回してよい効果か (EffectFlags.Deterministic)。</summary>
@@ -452,17 +454,20 @@ public static partial class Effects
             float blur = a.Track("blur");
             if (size <= 0) return s;
             int pad = a.IsFrameBuffer ? 0 : size + (int)MathF.Ceiling(blur * 1.5f);
-            if (a.Context.Gpu == null && BorderOnCpu(s.Image, size, blur / 2, pad, a.Color("color")) is { } own)
+            bool only = a.Check("only");
+            if (!only && a.Context.Gpu == null && BorderOnCpu(s.Image, size, blur / 2, pad, a.Color("color")) is { } own)
                 return new Sprite(a.Context.Own(own), s.Cx + pad, s.Cy + pad);
             using var dilate = SKImageFilter.CreateDilate(size, size);
             using var cf = SKColorFilter.CreateBlendMode(a.Color("color"), SKBlendMode.SrcIn);
             using var colored = SKImageFilter.CreateColorFilter(cf, dilate);
             using var final = blur > 0 ? SKImageFilter.CreateBlur(blur / 2, blur / 2, colored) : null;
             using var paint = new SKPaint { ImageFilter = final ?? colored };
+            // 縁だけにするときは、元の絵の形を抜く (袋文字)
+            using var cut = only ? new SKPaint { BlendMode = SKBlendMode.DstOut } : null;
             return Redraw(s, a, pad, pad, pad, pad, (c, x, y) =>
             {
                 c.DrawImage(s.Image, x, y, paint);
-                c.DrawImage(s.Image, x, y);
+                c.DrawImage(s.Image, x, y, cut);
             });
         }
     }
