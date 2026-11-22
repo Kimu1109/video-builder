@@ -10,5 +10,7 @@
     <PackageReference Include="Avalonia.Headless.XUnit" />
     <PackageReference Include="Avalonia.Skia" />
     <ProjectReference Include="../../src/VideoBuilder.App/VideoBuilder.App.csproj" />
+    <!-- 同梱するプラグイン (VOICEVOX 連携) を、本体の画面と組み合わせて確かめる -->
+    <ProjectReference Include="../../plugins/VoicevoxPlugin/VoicevoxPlugin.csproj" />
   </ItemGroup>
 </Project>

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- 依存先 (API・Core) はアプリ本体のものを使うので、出力フォルダにコピーしない -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>VoicevoxPlugin</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/VideoBuilder.Plugin.Abstractions/VideoBuilder.Plugin.Abstractions.csproj" Private="false" ExcludeAssets="runtime" />
+    <ProjectReference Include="../../src/VideoBuilder.Core/VideoBuilder.Core.csproj" Private="false" ExcludeAssets="runtime" />
+    <None Include="plugin.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- API が使う SkiaSharp のネイティブライブラリ (約 40MB) は、本体のものを使うのでコピーしない -->
+  <Target Name="DropNativeAssets" AfterTargets="ResolvePackageAssets">
+    <ItemGroup>
+      <RuntimeTargetsCopyLocalItems Remove="@(RuntimeTargetsCopyLocalItems)" />
+      <NativeCopyLocalItems Remove="@(NativeCopyLocalItems)" />
+    </ItemGroup>
+  </Target>
+</Project>

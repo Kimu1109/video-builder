@@ -383,4 +383,50 @@ public class PluginApiTests
         finally { PluginCommands.Unregister("test.cmd.unique"); }
         Assert.DoesNotContain(PluginCommands.All, e => e.Command.Id == "test.cmd.unique");
     }
+
+    // ---------------- 同梱のプラグイン (VOICEVOX 連携) ----------------
+
+    private static string? BuiltPluginDir(string project, string dll)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "VideoBuilder.sln"))) dir = dir.Parent;
+        if (dir == null) return null;
+        var bin = Path.Combine(dir.FullName, "plugins", project, "bin");
+        if (!Directory.Exists(bin)) return null;
+        return Directory.EnumerateFiles(bin, dll, SearchOption.AllDirectories)
+            .OrderByDescending(File.GetLastWriteTimeUtc).Select(Path.GetDirectoryName).FirstOrDefault();
+    }
+
+    [Fact]
+    public void Voicevox_plugin_loads_and_bundled_copies_yield_to_loaded_ones()
+    {
+        var dir = BuiltPluginDir("VoicevoxPlugin", "VoicevoxPlugin.dll");
+        Assert.NotNull(dir);   // ソリューション全体をビルドしていれば必ずある
+        // 本体のものを使うライブラリ (API・Core・SkiaSharp) は、プラグインのフォルダに入れない
+        Assert.False(File.Exists(Path.Combine(dir!, "VideoBuilder.Core.dll")));
+        Assert.False(File.Exists(Path.Combine(dir!, "VideoBuilder.Plugin.Abstractions.dll")));
+        Assert.False(Directory.Exists(Path.Combine(dir!, "runtimes")));
+
+        if (!PluginCommands.All.Any(c => c.Command.Id == "voicevox.synthesize"))
+        {
+            var info = PluginLoader.Load(dir!, Path.Combine(dir!, "plugin.json"));
+            Assert.True(info.Loaded, info.Error);
+            Assert.Equal("voicevox", info.Id);
+        }
+        var commands = PluginCommands.All.Where(c => c.PluginId == "voicevox").Select(c => (c.Command.Id, c.Command.Group)).ToList();
+        Assert.Contains(("voicevox.synthesize", "VOICEVOX"), commands);
+        Assert.Contains(("voicevox.settings", "VOICEVOX"), commands);
+
+        // アプリに同梱したもの (plugins/voicevox) は、同じ ID が読み込まれていれば、何も言わずに飛ばす
+        var root = Path.Combine(Path.GetTempPath(), $"vb-bundled-{Guid.NewGuid():N}");
+        try
+        {
+            var copy = Path.Combine(root, "voicevox");
+            Directory.CreateDirectory(copy);
+            foreach (var f in Directory.GetFiles(dir!)) File.Copy(f, Path.Combine(copy, Path.GetFileName(f)));
+            Assert.Empty(PluginLoader.LoadAll(root, skipLoaded: true));
+            Assert.Contains("同じ ID", Assert.Single(PluginLoader.LoadAll(root)).Error);
+        }
+        finally { try { Directory.Delete(root, true); } catch { } }
+    }
 }

@@ -42,6 +42,9 @@ mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" "$appdir/usr/share/i
 dotnet publish "$root/src/VideoBuilder.App" -c Release -r "linux-$arch" --self-contained true \
   -p:DebugType=none -p:PublishSingleFile=false -p:PublishReadyToRun=true -o "$appdir/usr/bin"
 
+# 同梱するプラグイン (VOICEVOX 連携など)
+"$root/packaging/publish-plugins.sh" "$appdir/usr/bin"
+
 # FFmpeg と、それが使うコーデックのライブラリを同梱する (FFmpegLoader は実行ファイルの隣の ffmpeg フォルダを探す)
 "$root/packaging/ffmpeg/build.sh" --prefix "$root/artifacts/ffmpeg/linux-$arch" --bundle "$appdir/usr/bin/ffmpeg"
 # ライセンスの文書

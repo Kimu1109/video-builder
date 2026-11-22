@@ -2399,3 +2399,18 @@ VOICEVOX との連携のように、外のアプリと通信して素材を作�
 - コマンドが投げた例外は、メッセージで知らせてプラグインのログに残す。
 - 設定の置き場所は `$XDG_DATA_HOME/video-builder/plugin-data/<プラグインの ID>/`。
 - サンプルプラグインには、フォームで文字と長さを聞いて再生位置にテキストを置くコマンドを追加した。
+
+### 22.41 VOICEVOX 連携 (同梱のプラグイン)
+
+プラグイン API v3 (22.40) の上に、VOICEVOX との連携を `plugins/VoicevoxPlugin` として作った。使い方は [plugins/VoicevoxPlugin/README.md](../plugins/VoicevoxPlugin/README.md)。
+
+- 「プラグイン」→「VOICEVOX」に「セリフから音声を作る...」と「設定...」を出す。
+- エンジンの HTTP API (`/speakers` → `/audio_query` → `/synthesis`) を呼ぶ。歌う用のスタイル (`type` が `talk` 以外) は一覧から除く。
+  同じ PC のエンジンにはプロキシを通さずにつなぐ。つながらない・返事がないときは、理由をメッセージで出す (一覧は 10 秒、合成は 5 分で打ち切る)。
+- 音声の長さは WAV のヘッダから求める (FFmpeg がなくても置ける)。オブジェクトの長さは端数を切り上げる。
+- 字幕と音声は、2 つのレイヤーが並んで空いているところを先に探してから置く (置けないときに空の取り消し履歴を残さない)。
+- 置いた音声には `PluginData` にセリフ・スタイル・調整の値を残す (作り直す機能のため)。
+- 配布物: アプリは実行ファイルの隣の `plugins/` も読む (`AppPaths.BundledPluginDir`)。利用者が同じ ID のプラグインを入れていれば、そちらを優先し、同梱のものは何も言わずに飛ばす。
+  `packaging/publish-plugins.sh` が `publish-all.sh` (tar.gz・Windows・macOS・Flatpak) と AppImage の作成から呼ばれ、プラグインを発行して入れる。
+  プラグインには本体と共有するライブラリ (API・Core・SkiaSharp のネイティブライブラリ) を入れない。
+
