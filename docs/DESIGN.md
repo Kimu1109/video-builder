@@ -1136,7 +1136,7 @@ video-builder/
    - `host.RegisterAudioEffect(定義, IAudioEffect)` … 音声のエフェクト
    - `host.RegisterMediaObject(定義, IVideoSource)` … メディアオブジェクト
    - `host.RegisterInterpolator(IInterpolator)` … トラックバーの移動方法
-   - `host.RegisterCommand(IPluginCommand)` … 「プラグイン」メニューのコマンド (API バージョン 3 から)
+   - `host.RegisterCommand(IPluginCommand)` … 「プラグイン」メニューのコマンド (API バージョン 3 から。テンプレートを使う API は 4 から)
 3. `plugin.json` (id / name / version / apiVersion / assembly) と DLL を、`$XDG_DATA_HOME/video-builder/plugins/<名前>/` に置く。
 
 詳しくは [PLUGIN_API.md](PLUGIN_API.md)。
@@ -2423,4 +2423,20 @@ VOICEVOX との連携のように、外のアプリと通信して素材を作�
   先頭の位置は変えずに長さを合わせ、後ろにぶつかるものは差し替えない。前のファイルは残すので、取り消せば元に戻る。
 - エンジン 0.26 から、しゃべる用のスタイルの種類に `streaming_talk` が加わった (以前は `talk`)。歌う用 (`sing`・`singing_teacher`・`frame_decode`) だけを除くようにしている。
   設定の接続確認では、バージョンに加えて話者の一覧も読み、話者とスタイルの数を出す。
+
+### 22.42 プラグイン API (バージョン 4): テンプレート / VOICEVOX の字幕テンプレート
+
+字幕の見た目を利用者が決められるよう、テンプレートの仕組みをプラグインから使えるようにした ([PLUGIN_API.md](PLUGIN_API.md#テンプレート-バージョン-4))。`apiVersion` 1〜4 を受け付ける。
+
+- `ListTemplates` / `LoadTemplate` / `TemplateFields` と、`IPluginEditor.AddTemplate` / `SetTemplateValues`。公開項目は表示名で指す。
+- `AddTemplate` は、テンプレートの既定の置き方によらず、シーンオブジェクト 1 つとして置き、「長さに合わせて伸縮」をオンにする。
+  「複数のオブジェクト」として置くと、長さを合わせる方法がなく (オブジェクトごとの長さを伸ばすと動きが崩れる)、字幕と音声を 2 つのレイヤーの組で並べる前提も崩れるため。
+  セリフごとにシーンが 1 つ増えるが、テンプレートを通常どおり挿入したときと同じ。
+- 公開項目の値の読み書きは Core の `ExposedValues` (文字列で扱う。数値は不変の書式、チェックは "1" / "0")。
+
+VOICEVOX 連携の「字幕のテンプレート...」:
+
+- すべての話者の既定と、キャラクターごとのテンプレートを選ぶ (キャラクターごとの指定は「既定に従う」「文字だけ」「テンプレート」)。設定は Id で持つので、ライブラリで名前を変えても使える。
+- セリフは、指定した表示名の公開項目 (空なら最初の文字の項目) に入れる。保存するときと、音声を作る前に、テンプレートと項目があるかを確かめて知らせる。
+- 作り直すときは、字幕のテンプレートの項目から今のセリフを読み、作り直したセリフを書き戻して、長さを合わせる (ほかの項目はそのまま)。
 

@@ -410,6 +410,40 @@ public sealed class EditorSession
         return added.Count;
     }
 
+    /// <summary>
+    /// シーンとして作ったテンプレート (Instantiate の Scene の置き方) を、長さ length で置く。
+    /// 「長さに合わせて伸縮」をオンにするので、入りと抜けの動きはそのままで、中間が伸び縮みする。
+    /// layer から下で、範囲がすべて空いている最初のレイヤーに置く。置けなければ null。Edit の中で呼ぶ。
+    /// </summary>
+    public TimelineObject? PlaceTemplateScene(TemplateInstance instance, int layer, int start, int length)
+    {
+        if (instance.Objects.Count != 1 || instance.Objects[0].Main.DefinitionId != EffectRegistry.SceneRef)
+            throw new ArgumentException("シーンとして作ったテンプレートではありません", nameof(instance));
+        start = Math.Max(0, start);
+        int end = start + Math.Max(1, length) - 1;
+        int target = FindFreeLayer(layer, start, end);
+        if (target < 0) return null;
+        foreach (var sc in instance.Scenes) Project.Scenes.Add(sc);
+        var o = instance.Objects[0].Clone(newId: true);
+        o.Layer = target;
+        o.SetRange(start, end);
+        o.Main.Values["stretch"] = "1";
+        Scene.Objects.Add(o);
+        return o;
+    }
+
+    /// <summary>
+    /// テンプレートから置いたもの (シーンオブジェクト、または「複数のオブジェクト」として置いたもののどれか) の公開項目と、
+    /// その項目が指すオブジェクトの並び。テンプレートから置いたものでなければ null。
+    /// </summary>
+    public (IReadOnlyList<ExposedParam> Items, IReadOnlyList<TimelineObject> Objects)? ExposedOfPlaced(TimelineObject o)
+    {
+        if (o.Main.DefinitionId == EffectRegistry.SceneRef && Project.FindScene(o.Main.GetString("scene")) is { Exposed: { } items } scene)
+            return (items, scene.Objects);
+        if (TemplateGroupOf(o) is { } g) return (g.Exposed, Scene.Objects);
+        return null;
+    }
+
     // ---------------- テンプレートの更新 ----------------
 
     /// <summary>シーンオブジェクト o が参照しているシーンの、元のテンプレート。テンプレートから作ったものでなければ null。</summary>

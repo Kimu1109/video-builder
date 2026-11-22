@@ -14,11 +14,12 @@ public sealed class Plugin : IPlugin
 
     public void Initialize(IPluginHost host)
     {
-        // コマンドは API バージョン 3 から (古いアプリでは何も登録しない)
-        if (host.ApiVersion < 3) { host.Log("このアプリのプラグイン API が古いため、使えません (3 以上が必要)"); return; }
+        // コマンドは API バージョン 3 から、テンプレートは 4 から (古いアプリでは何も登録しない)
+        if (host.ApiVersion < 4) { host.Log("このアプリのプラグイン API が古いため、使えません (4 以上が必要)"); return; }
         host.RegisterCommand(new SynthesizeCommand());
         host.RegisterCommand(new ScriptCommand());
         host.RegisterCommand(new RegenerateCommand());
+        host.RegisterCommand(new SubtitleTemplateCommand());
         host.RegisterCommand(new SettingsCommand());
     }
 
@@ -59,6 +60,12 @@ public sealed class Plugin : IPlugin
     }
 
     // ---------------- フォームの部品 ----------------
+
+    internal const string SubtitleNoteTail = "字幕の見た目は「VOICEVOX」→「字幕のテンプレート...」で、テンプレートから選べます。";
+
+    /// <summary>字幕も置くなら、話者ごとの字幕のテンプレートを先に決める (なければ VoicevoxException)。</summary>
+    public static SubtitlePlan PlanSubtitles(IPluginCommandContext context, VoiceSettings settings, bool subtitle, IEnumerable<VoiceStyle> styles) =>
+        subtitle ? SubtitlePlan.Resolve(context, settings, styles.Select(s => s.Speaker)) : SubtitlePlan.Plain;
 
     internal const string CreditNote = "動画には「VOICEVOX:キャラクター名」のクレジットが必要です。キャラクターごとの利用規約も確かめてください。";
 
@@ -125,6 +132,7 @@ public sealed class SynthesizeCommand : IPluginCommand
             settings.Voice = request.Voice;
             settings.AddSubtitle = request.Subtitle;
             settings.Save(context.DataDirectory);
+            var plan = Plugin.PlanSubtitles(context, settings, request.Subtitle, new[] { request.Style });
 
             var dir = VoiceFiles.Directory(context);
             var clip = await context.RunWithProgressAsync("VOICEVOX", (p, ct) =>
@@ -132,7 +140,7 @@ public sealed class SynthesizeCommand : IPluginCommand
                 p.Report(new PluginProgress($"{request.Style.Label} の声を作っています..."));
                 return Plugin.SynthesizeToFileAsync(client, dir, request.Text, request.Style, request.Voice, ct);
             });
-            if (VoicePlacer.Place(context, clip, request.Subtitle) == null)
+            if (VoicePlacer.Place(context, clip, request.Subtitle, plan) == null)
                 await context.ShowMessageAsync("VOICEVOX", $"再生位置に空いているレイヤーがないため、置けませんでした。\n音声は次の場所に保存しました:\n{clip.Path}");
         }
         catch (VoicevoxException e)
@@ -161,7 +169,7 @@ public sealed class SynthesizeCommand : IPluginCommand
             },
         };
         form.Fields.AddRange(Plugin.VoiceFields(settings.Voice));
-        form.Fields.Add(new PluginCheckField { Key = "subtitle", Label = "字幕も置く", Value = settings.AddSubtitle, Note = "セリフのテキストを音声と同じ長さで置き、音声とグループにします。" });
+        form.Fields.Add(new PluginCheckField { Key = "subtitle", Label = "字幕も置く", Value = settings.AddSubtitle, Note = "セリフの字幕を音声と同じ長さで置き、音声とグループにします。" + Plugin.SubtitleNoteTail });
         return form;
     }
 
@@ -198,6 +206,7 @@ public sealed class ScriptCommand : IPluginCommand
             settings.AddSubtitle = request.Subtitle;
             settings.ScriptGap = request.GapSeconds;
             settings.Save(context.DataDirectory);
+            var plan = Plugin.PlanSubtitles(context, settings, request.Subtitle, request.Lines.Select(l => l.Style));
 
             var dir = VoiceFiles.Directory(context);
             var clips = await context.RunWithProgressAsync("VOICEVOX", async (p, ct) =>
@@ -212,7 +221,7 @@ public sealed class ScriptCommand : IPluginCommand
                 return list;
             });
             int gap = (int)Math.Round(request.GapSeconds * context.Project.Settings.Fps.Value);
-            if (VoicePlacer.PlaceMany(context, clips, gap, request.Subtitle, "VOICEVOX の台本を置く") == null)
+            if (VoicePlacer.PlaceMany(context, clips, gap, request.Subtitle, "VOICEVOX の台本を置く", plan) == null)
                 await context.ShowMessageAsync("VOICEVOX", $"再生位置から先に、{clips.Count} 個のセリフがすべて入る空いたレイヤーがないため、置けませんでした。\n音声は次の場所に保存しました:\n{dir}");
         }
         catch (VoicevoxException e)
@@ -244,7 +253,7 @@ public sealed class ScriptCommand : IPluginCommand
             },
         };
         form.Fields.AddRange(Plugin.VoiceFields(settings.Voice));
-        form.Fields.Add(new PluginCheckField { Key = "subtitle", Label = "字幕も置く", Value = settings.AddSubtitle, Note = "字幕を 1 つのレイヤーに、音声をそのすぐ下のレイヤーに並べ、1 組ずつグループにします。" });
+        form.Fields.Add(new PluginCheckField { Key = "subtitle", Label = "字幕も置く", Value = settings.AddSubtitle, Note = "字幕を 1 つのレイヤーに、音声をそのすぐ下のレイヤーに並べ、1 組ずつグループにします。" + Plugin.SubtitleNoteTail });
         return form;
     }
 
@@ -356,6 +365,124 @@ public sealed class RegenerateCommand : IPluginCommand
             return new() { (targets[0], text, StyleOf(targets[0]), Plugin.ReadVoice(form)) };
         }
         return targets.Select(t => (t, t.CurrentText.Trim(), StyleOf(t), t.Info.Voice)).Where(x => x.Item2.Length > 0).ToList();
+    }
+}
+
+/// <summary>
+/// 字幕に使うテンプレートを選ぶ。すべての話者の既定と、キャラクターごとの指定ができる。
+/// テンプレートは、テキストの「テキスト」を公開して保存したもの (公開した文字の項目にセリフを入れる)。
+/// </summary>
+public sealed class SubtitleTemplateCommand : IPluginCommand
+{
+    public string Id => "voicevox.subtitleTemplate";
+    public string Name => "字幕のテンプレート...";
+    public string? Group => Plugin.Group;
+
+    /// <summary>選択肢の値: すべての話者の既定 / 既定に従う / テンプレートを使わない。</summary>
+    public const string DefaultTarget = "*", FollowDefault = "follow", PlainText = "plain";
+
+    public async Task RunAsync(IPluginCommandContext context)
+    {
+        var settings = VoiceSettings.Load(context.DataDirectory);
+        // キャラクターの一覧はエンジンから取る。つながらなければ、既定と、もう指定してあるキャラクターだけを選べる
+        var speakers = settings.SpeakerTemplates.Keys.ToList();
+        string? offline = null;
+        try
+        {
+            var client = new VoicevoxClient(settings.EngineUrl);
+            var styles = await context.RunWithProgressAsync("VOICEVOX", (p, ct) =>
+            {
+                p.Report(new PluginProgress("VOICEVOX のエンジンから話者の一覧を読んでいます..."));
+                return Plugin.WithTimeout(TimeSpan.FromSeconds(10), ct, client.GetStylesAsync);
+            });
+            speakers = styles.Select(s => s.Speaker).Concat(speakers).Distinct().ToList();
+        }
+        catch (VoicevoxException e) { offline = e.Message; }
+
+        var targetForm = BuildTargetForm(settings, speakers, offline);
+        if (!await context.ShowFormAsync(targetForm)) return;
+        var target = targetForm.Get<PluginChoiceField>("target").Value;
+
+        var templates = context.ListTemplates();
+        var form = BuildTemplateForm(settings, target, templates);
+        if (!await context.ShowFormAsync(form)) return;
+        try
+        {
+            Apply(context, settings, target, form, templates);
+            settings.Save(context.DataDirectory);
+        }
+        catch (VoicevoxException e)
+        {
+            await context.ShowMessageAsync("VOICEVOX", e.Message);
+        }
+    }
+
+    /// <summary>1 つ目のフォーム: だれの字幕を設定するか。今の設定も見せる。</summary>
+    public static PluginForm BuildTargetForm(VoiceSettings settings, IReadOnlyList<string> speakers, string? offline)
+    {
+        var lines = new List<string> { $"すべての話者の既定: {(settings.SubtitleTemplate ?? new SubtitleTemplate()).Describe()}" };
+        lines.AddRange(settings.SpeakerTemplates.OrderBy(x => x.Key, StringComparer.CurrentCulture).Select(x => $"{x.Key}: {x.Value.Describe()}"));
+        if (offline != null) lines.Add("(VOICEVOX につながらないため、キャラクターの一覧は出せません)");
+        var options = new List<PluginChoice> { new(DefaultTarget, "(すべての話者の既定)") };
+        options.AddRange(speakers.Select(s => new PluginChoice(s, settings.SpeakerTemplates.TryGetValue(s, out var t) ? $"{s} ({t.Describe()})" : s)));
+        return new PluginForm
+        {
+            Title = "VOICEVOX: 字幕のテンプレート",
+            OkText = "次へ",
+            Message = "今の設定:\n" + string.Join("\n", lines),
+            Fields = { new PluginChoiceField { Key = "target", Label = "設定する話者", Options = options, Value = DefaultTarget } },
+        };
+    }
+
+    /// <summary>2 つ目のフォーム: テンプレートと、セリフを入れる項目。</summary>
+    public static PluginForm BuildTemplateForm(VoiceSettings settings, string target, IReadOnlyList<PluginTemplateInfo> templates)
+    {
+        bool isDefault = target == DefaultTarget;
+        var current = isDefault ? settings.SubtitleTemplate : settings.SpeakerTemplates.GetValueOrDefault(target);
+        var options = new List<PluginChoice>();
+        if (!isDefault) options.Add(new PluginChoice(FollowDefault, "(既定に従う)"));
+        options.Add(new PluginChoice(PlainText, "(テンプレートを使わない: 文字だけ)"));
+        options.AddRange(templates.Select(t => new PluginChoice(t.Id, t.Category.Length > 0 ? $"{t.Category} / {t.Name}" : t.Name)));
+        string value = current == null ? (isDefault ? PlainText : FollowDefault) : current.IsPlain ? PlainText : current.Id;
+        if (!options.Any(o => o.Value == value)) value = options[0].Value;   // ライブラリから消えたテンプレート
+        return new PluginForm
+        {
+            Title = isDefault ? "字幕のテンプレート: すべての話者の既定" : $"字幕のテンプレート: {target}",
+            OkText = "保存",
+            Width = 480,
+            Message = templates.Count == 0
+                ? "テンプレートのライブラリにテンプレートがありません。字幕にしたいテキスト (帯などと一緒でも可) を置き、テキストの「テキスト」を公開して、テンプレートとして保存してください。"
+                : "テンプレートは、シーンオブジェクト 1 つとして置き、音声の長さに合わせて伸縮します (入りと抜けの動きはそのまま)。",
+            Fields =
+            {
+                new PluginChoiceField { Key = "template", Label = "テンプレート", Options = options, Value = value },
+                new PluginTextField
+                {
+                    Key = "field", Label = "セリフを入れる項目", Value = current?.Field ?? "", Placeholder = "(空なら最初の文字の項目)",
+                    Note = "テンプレートで公開した項目の表示名です。文字の項目が 1 つだけなら空のままでかまいません。",
+                },
+            },
+        };
+    }
+
+    /// <summary>2 つ目のフォームの内容を settings に入れる。テンプレートを読み込んで、セリフを入れる項目があるか確かめる。</summary>
+    public static void Apply(IPluginCommandContext context, VoiceSettings settings, string target, PluginForm form, IReadOnlyList<PluginTemplateInfo> templates)
+    {
+        var choice = form.Get<PluginChoiceField>("template").Value;
+        var field = form.Get<PluginTextField>("field").Value.Trim();
+        SubtitleTemplate? value;
+        if (choice == FollowDefault) value = null;
+        else if (choice == PlainText) value = new SubtitleTemplate();
+        else
+        {
+            var info = templates.FirstOrDefault(t => t.Id == choice) ?? throw new VoicevoxException("テンプレートが見つかりません。");
+            var template = context.LoadTemplate(info.Id) ?? throw new VoicevoxException($"テンプレート「{info.Name}」を読み込めませんでした。");
+            SubtitlePlan.FieldOf(template, field);   // 項目がなければここで知らせる
+            value = new SubtitleTemplate { Id = info.Id, Name = info.Name, Field = field };
+        }
+        if (target == DefaultTarget) settings.SubtitleTemplate = value is { IsPlain: true } ? null : value;
+        else if (value == null) settings.SpeakerTemplates.Remove(target);
+        else settings.SpeakerTemplates[target] = value;
     }
 }
 

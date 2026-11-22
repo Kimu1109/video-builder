@@ -15,6 +15,10 @@ public sealed class VoiceSettings
     public VoiceParams Voice { get; set; } = new();
     /// <summary>字幕 (テキストオブジェクト) も置く。</summary>
     public bool AddSubtitle { get; set; } = true;
+    /// <summary>字幕に使うテンプレート (すべての話者の既定)。null なら文字だけの字幕。</summary>
+    public SubtitleTemplate? SubtitleTemplate { get; set; }
+    /// <summary>キャラクターごとの字幕のテンプレート (キャラクター名 → テンプレート)。ないキャラクターは既定に従う。</summary>
+    public Dictionary<string, SubtitleTemplate> SpeakerTemplates { get; set; } = new();
     /// <summary>台本から一括で作るときの、セリフとセリフの間 (秒)。</summary>
     public double ScriptGap { get; set; } = 0.3;
 
@@ -30,6 +34,7 @@ public sealed class VoiceSettings
             var s = JsonSerializer.Deserialize<VoiceSettings>(File.ReadAllText(path), Options) ?? new VoiceSettings();
             if (VoicevoxClient.ParseUrl(s.EngineUrl) == null) s.EngineUrl = VoicevoxClient.DefaultUrl;
             s.Voice = (s.Voice ?? new VoiceParams()).Clamped();
+            s.SpeakerTemplates ??= new();
             s.ScriptGap = double.IsFinite(s.ScriptGap) ? Math.Clamp(s.ScriptGap, 0, 10) : 0.3;
             return s;
         }
@@ -45,6 +50,20 @@ public sealed class VoiceSettings
         File.WriteAllText(tmp, JsonSerializer.Serialize(this, Options));
         File.Move(tmp, path, overwrite: true);
     }
+}
+
+/// <summary>
+/// 字幕に使うテンプレートの指定。Id が空なら「テンプレートを使わない (文字だけ)」。
+/// Field はセリフを入れる公開項目の表示名で、空なら最初の文字の項目。Name は表示用 (ライブラリで名前が変わっても Id で探す)。
+/// </summary>
+public sealed class SubtitleTemplate
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Field { get; set; } = "";
+
+    public bool IsPlain => Id.Length == 0;
+    public string Describe() => IsPlain ? "文字だけ" : Field.Length > 0 ? $"{Name} (項目「{Field}」)" : Name;
 }
 
 /// <summary>作った音声のファイルの置き場所と名前。</summary>

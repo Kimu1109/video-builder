@@ -15,6 +15,8 @@ public sealed record VoiceInfo(string Text, int StyleId, string Speaker, VoicePa
     public const string KeyStyleId = "voicevox.styleId";
     public const string KeySpeaker = "voicevox.speaker";
     public const string KeyParams = "voicevox.params";
+    /// <summary>字幕をテンプレートで置いたとき、セリフを入れた公開項目の表示名 (作り直すときに使う)。</summary>
+    public const string KeySubtitleField = "voicevox.subtitleField";
 
     public static void Write(TimelineObject audio, VoiceClip clip)
     {
@@ -48,15 +50,16 @@ public static class VoicePlacer
         Math.Max(1, (int)Math.Ceiling(seconds * context.Project.Settings.Fps.Value - 1e-6));
 
     /// <summary>1 つを再生位置に置く (PlaceMany の 1 つ版)。</summary>
-    public static Placed? Place(IPluginCommandContext context, VoiceClip clip, bool subtitle) =>
-        PlaceMany(context, new[] { clip }, 0, subtitle, "VOICEVOX の音声を置く")?[0];
+    public static Placed? Place(IPluginCommandContext context, VoiceClip clip, bool subtitle, SubtitlePlan? plan = null) =>
+        PlaceMany(context, new[] { clip }, 0, subtitle, "VOICEVOX の音声を置く", plan)?[0];
 
     /// <summary>
     /// 再生位置から順に、gapFrames ずつ空けて並べる。字幕も置くなら、字幕を 1 つのレイヤーに、音声をそのすぐ下のレイヤーに並べ、
     /// 1 組ずつグループにする。すべてが入るレイヤー (の組) を目安のレイヤーから下に探す。
+    /// 字幕は、plan で話者にテンプレートが決まっていればそのテンプレート (シーンオブジェクト 1 つ)、なければ文字だけのテキスト。
     /// 置く場所がなければ null (何も変えない)。まとめて 1 回で取り消せる。
     /// </summary>
-    public static List<Placed>? PlaceMany(IPluginCommandContext context, IReadOnlyList<VoiceClip> clips, int gapFrames, bool subtitle, string description)
+    public static List<Placed>? PlaceMany(IPluginCommandContext context, IReadOnlyList<VoiceClip> clips, int gapFrames, bool subtitle, string description, SubtitlePlan? plan = null)
     {
         if (clips.Count == 0) return new List<Placed>();
         var ranges = new List<(int Start, int End)>();
@@ -83,10 +86,14 @@ public static class VoicePlacer
             {
                 var (start, end) = ranges[i];
                 int length = end - start + 1;
-                var caption = subtitle ? e.AddText(clips[i].Text, top, start, length) : null;
+                var look = subtitle ? plan?.For(clips[i].Style) : null;
+                var caption = !subtitle ? null
+                    : look != null ? e.AddTemplate(look.Template, top, start, length, new Dictionary<string, string> { [look.Field] = clips[i].Text })
+                    : e.AddText(clips[i].Text, top, start, length);
                 var audio = e.AddAudioFile(clips[i].Path, subtitle ? top + 1 : top, start, length);
                 if (audio == null || subtitle && caption == null) throw new InvalidOperationException("音声を置けませんでした。");
                 VoiceInfo.Write(audio, clips[i]);
+                if (look != null) audio.PluginData![VoiceInfo.KeySubtitleField] = look.Field;
                 if (caption != null) e.Group(new[] { caption, audio });
                 result.Add(new Placed(audio, caption));
             }
@@ -97,12 +104,12 @@ public static class VoicePlacer
 
     // ---------------- 作り直す ----------------
 
-    /// <summary>作り直す対象: このプラグインで作った音声と、同じグループの字幕 (あれば)。</summary>
-    public sealed record Target(TimelineObject Audio, TimelineObject? Subtitle, VoiceInfo Info)
-    {
-        /// <summary>今のセリフ。字幕があれば字幕の文字 (直したあとの文字)、なければ作ったときのセリフ。</summary>
-        public string CurrentText => Subtitle?.Main.Values.GetValueOrDefault("text") is { Length: > 0 } t ? t : Info.Text;
-    }
+    /// <summary>
+    /// 作り直す対象: このプラグインで作った音声と、同じグループの字幕 (あれば)。
+    /// 字幕は文字だけのテキストか、テンプレートから置いたもの (SubtitleField はセリフを入れた公開項目の表示名)。
+    /// CurrentText は今のセリフで、字幕があれば字幕の文字 (直したあとの文字)、なければ作ったときのセリフ。
+    /// </summary>
+    public sealed record Target(TimelineObject Audio, TimelineObject? Subtitle, VoiceInfo Info, string CurrentText, string? SubtitleField);
 
     /// <summary>
     /// 選んでいるものから、作り直す対象を集める。音声を選んでいても、同じグループの字幕を選んでいても対象になる。
@@ -121,9 +128,15 @@ public static class VoicePlacer
             {
                 if (seen.Contains(audio.Id) || VoiceInfo.Read(audio) is not { } info) continue;
                 seen.Add(audio.Id);
-                var subtitle = audio.GroupId == null ? null
-                    : scene.Objects.FirstOrDefault(x => x.GroupId == audio.GroupId && x.Main.DefinitionId == EffectRegistry.Text);
-                result.Add(new Target(audio, subtitle, info));
+                string? field = audio.PluginData!.GetValueOrDefault(VoiceInfo.KeySubtitleField);
+                TimelineObject? subtitle = null;
+                string? text = null;
+                foreach (var x in audio.GroupId == null ? Enumerable.Empty<TimelineObject>() : scene.Objects.Where(x => x.GroupId == audio.GroupId && x != audio))
+                {
+                    if (x.Main.DefinitionId == EffectRegistry.Text) { subtitle = x; text = x.Main.Values.GetValueOrDefault("text"); break; }
+                    if (field != null && context.TemplateFields(x).FirstOrDefault(f => f.Label == field) is { } f) { subtitle = x; text = f.Value; break; }
+                }
+                result.Add(new Target(audio, subtitle, info, text is { Length: > 0 } ? text : info.Text, subtitle != null && subtitle.Main.DefinitionId != EffectRegistry.Text ? field : null));
             }
         }
         return result.OrderBy(t => t.Audio.Start).ThenBy(t => t.Audio.Layer).ToList();
@@ -161,7 +174,9 @@ public static class VoicePlacer
                 VoiceInfo.Write(audio, clip);
                 if (t.Subtitle != null && e.Scene.Find(t.Subtitle.Id) is { } caption)
                 {
-                    caption.Main.Values["text"] = clip.Text;
+                    if (t.SubtitleField != null) e.SetTemplateValues(caption, new Dictionary<string, string> { [t.SubtitleField] = clip.Text });
+                    else caption.Main.Values["text"] = clip.Text;
+                    // テンプレートのシーンオブジェクトは「長さに合わせて伸縮」がオンなので、長さを変えるだけでよい
                     caption.SetRange(caption.Start, caption.Start + length - 1);
                 }
             }

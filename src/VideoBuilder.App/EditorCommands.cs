@@ -26,7 +26,7 @@ public static class EditorCommands
 
     /// <summary>プラグインのコマンドに渡す窓口を作る。</summary>
     public static PluginCommandContext PluginContext(VideoBuilder.Rendering.PluginCommandEntry entry) =>
-        new(Session, Main, entry.PluginId, AppPaths.PluginDataDir);
+        new(Session, Main, entry.PluginId, AppPaths.PluginDataDir, Svc.Templates, Svc.Settings.FitTemplateResolution);
 
     /// <summary>プラグインのコマンドを実行する (「プラグイン」メニューから)。</summary>
     public static Task RunPluginCommandAsync(VideoBuilder.Rendering.PluginCommandEntry entry)

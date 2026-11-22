@@ -1,4 +1,4 @@
-# プラグイン API (バージョン 3)
+# プラグイン API (バージョン 4)
 
 video-builder のプラグインは .NET のクラスライブラリです。見本は `samples/SamplePlugin`。
 
@@ -8,11 +8,12 @@ video-builder のプラグインは .NET のクラスライブラリです。見
 - `plugin.json`:
 
   ```json
-  { "id": "my.plugin", "name": "わたしのプラグイン", "version": "1.0.0", "apiVersion": 3, "assembly": "MyPlugin.dll" }
+  { "id": "my.plugin", "name": "わたしのプラグイン", "version": "1.0.0", "apiVersion": 4, "assembly": "MyPlugin.dll" }
   ```
 
-  `apiVersion` は `PluginApi.MinimumVersion` (1) 〜 `PluginApi.Version` (3) なら読み込みます。バージョン 1・2 で作ったプラグインは作り直さずにそのまま動きます。
-  メニューのコマンド (`RegisterCommand`) を使うときは 3 にします。古いアプリでも動かしたいなら、`host.ApiVersion >= 3` のときだけ登録します。
+  `apiVersion` は `PluginApi.MinimumVersion` (1) 〜 `PluginApi.Version` (4) なら読み込みます。古いバージョンで作ったプラグインは作り直さずにそのまま動きます。
+  メニューのコマンド (`RegisterCommand`) を使うときは 3 以上、テンプレート (`ListTemplates` など) を使うときは 4 にします。
+  古いアプリでも動かしたいなら、`host.ApiVersion` を見て、使える機能だけを登録します。
 
 ## 登録できるもの
 
@@ -169,6 +170,22 @@ public sealed class InsertCaption : IPluginCommand
 | `PluginCheckField` | チェックボックス |
 
 フォームの画面は本体が作るので、プラグインは UI のライブラリに依存しません。文字はプラグインが付けたまま表示します (英語表示でも訳しません)。
+
+### テンプレート (バージョン 4)
+
+テンプレートのライブラリ (`.vbtemplate`) を、プラグインから使えます。字幕の見た目を利用者がテンプレートで決める、といった使い方です。
+
+| メンバー | 内容 |
+|---|---|
+| `context.ListTemplates()` | ライブラリ (自分のもの・共有フォルダのもの) の一覧。`Id` は版が変わっても同じ。同じテンプレートの古い版は含めない |
+| `context.LoadTemplate(id)` | いちばん新しい版を読み込む (なければ null)。`Fields` は公開項目 (表示名・文字の項目か・保存された値) |
+| `editor.AddTemplate(テンプレート, レイヤー, フレーム, 長さ, 値)` | シーンオブジェクト 1 つとして置く。「長さに合わせて伸縮」をオンにするので、入りと抜けの動きはそのままで中間が伸び縮みする。値は公開項目の表示名 → 値 |
+| `context.TemplateFields(置いたもの)` | テンプレートから置いたもの (シーンオブジェクト、または「複数のオブジェクト」として置いたもののどれか) の公開項目と今の値 |
+| `editor.SetTemplateValues(置いたもの, 値)` | 置いたものの公開項目に値を入れる |
+
+- 公開項目は、作った人が付けた**表示名**で指します。同じ表示名の項目には同じ値が入ります。
+- 値は文字列です。数値 (トラックバー) は不変の書式の数値 (`"72.5"`)、チェックは `"1"` / `"0"`。数値の項目に値を入れると、動き (中間点の移動) は消えてその値で止まります。
+- テンプレートの置き方の既定が「複数のオブジェクト」でも、`AddTemplate` はシーンオブジェクトとして置きます (長さを合わせるため)。置いたものは、通常の挿入と同じく、新しい版への更新もできます。
 
 ### オブジェクトに情報を残す (TimelineObject.PluginData)
 

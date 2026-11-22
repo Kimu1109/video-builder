@@ -20,13 +20,19 @@ public sealed class PluginCommandContext : IPluginCommandContext
     private readonly EditorSession _session;
     private readonly Window? _owner;
     private readonly string _dataRoot;
+    private readonly TemplateStore? _templates;
+    private readonly bool _fitTemplates;
 
-    public PluginCommandContext(EditorSession session, Window? owner, string pluginId, string dataRoot)
+    /// <param name="templates">テンプレートのライブラリ。null ならテンプレートは 1 つもない扱い。</param>
+    /// <param name="fitTemplateResolution">テンプレートを置くとき、作った解像度との違いに合わせて位置と大きさを直すか (環境設定)。</param>
+    public PluginCommandContext(EditorSession session, Window? owner, string pluginId, string dataRoot, TemplateStore? templates = null, bool fitTemplateResolution = false)
     {
         _session = session;
         _owner = owner;
         PluginId = pluginId;
         _dataRoot = dataRoot;
+        _templates = templates;
+        _fitTemplates = fitTemplateResolution;
     }
 
     public string PluginId { get; }
@@ -101,6 +107,59 @@ public sealed class PluginCommandContext : IPluginCommandContext
         return await task;
     }
 
+    // ---------------- テンプレート ----------------
+
+    public IReadOnlyList<PluginTemplateInfo> ListTemplates()
+    {
+        if (_templates == null) return Array.Empty<PluginTemplateInfo>();
+        // 同じテンプレート (同じ Id) は、いちばん新しい版だけにする
+        var latest = new Dictionary<string, (TemplateEntry Entry, TemplateMeta Meta)>();
+        foreach (var e in _templates.List())
+        {
+            if (e.Legacy || TemplatePackage.ReadMeta(e.Path) is not { } m) continue;
+            if (!latest.TryGetValue(m.Id, out var cur) || m.Version > cur.Meta.Version) latest[m.Id] = (e, m);
+        }
+        return latest.Values.Select(x => new PluginTemplateInfo(x.Meta.Id, x.Entry.Name, x.Entry.Category, x.Entry.Description))
+            .OrderBy(t => t.Category, StringComparer.CurrentCulture).ThenBy(t => t.Name, StringComparer.CurrentCulture).ToList();
+    }
+
+    public IPluginTemplate? LoadTemplate(string id)
+    {
+        if (_templates?.FindLatest(id) is not { } latest) return null;
+        var pkg = _templates.Load(latest.Entry);
+        return new HostTemplate(pkg);
+    }
+
+    public IReadOnlyList<PluginTemplateField> TemplateFields(TimelineObject placed) =>
+        _session.ExposedOfPlaced(placed) is { } x ? Fields(x.Items, x.Objects) : Array.Empty<PluginTemplateField>();
+
+    private static List<PluginTemplateField> Fields(IEnumerable<ExposedParam> items, IReadOnlyList<TimelineObject> objects)
+    {
+        var result = new List<PluginTemplateField>();
+        foreach (var x in items)
+            if (ExposedValues.Resolve(objects, x) is var (_, p))
+                result.Add(new PluginTemplateField(x.Label, x.Group, ExposedValues.IsText(p), ExposedValues.Get(objects, x) ?? ""));
+        return result;
+    }
+
+    private static int SetValues(IEnumerable<ExposedParam> items, IReadOnlyList<TimelineObject> objects, IReadOnlyDictionary<string, string> values)
+    {
+        int n = 0;
+        foreach (var x in items)
+            if (values.TryGetValue(x.Label, out var v) && ExposedValues.Set(objects, x, v)) n++;
+        return n;
+    }
+
+    /// <summary>LoadTemplate で読み込んだテンプレート。</summary>
+    private sealed class HostTemplate(TemplatePackage package) : IPluginTemplate
+    {
+        public TemplatePackage Package => package;
+        public string Id => package.Meta.Id;
+        public string Name => package.Meta.Name;
+        public int Version => package.Meta.Version;
+        public IReadOnlyList<PluginTemplateField> Fields { get; } = PluginCommandContext.Fields(package.Body.Exposed ?? new(), package.Body.Objects);
+    }
+
     /// <summary>Edit の中で渡す書き換え口。</summary>
     private sealed class Editor(EditorSession session, PluginCommandContext context) : IPluginEditor
     {
@@ -140,6 +199,18 @@ public sealed class PluginCommandContext : IPluginCommandContext
             session.Scene.Objects.Add(o);
             return o;
         }
+
+        public TimelineObject? AddTemplate(IPluginTemplate template, int layer, int frame, int lengthFrames, IReadOnlyDictionary<string, string>? values = null)
+        {
+            if (template is not HostTemplate host) throw new ArgumentException("LoadTemplate で読み込んだテンプレートを渡してください", nameof(template));
+            var store = context._templates ?? throw new InvalidOperationException("テンプレートのライブラリがありません");
+            var inst = host.Package.Instantiate(session.Project, store.AssetDirectory, TemplateInsertMode.Scene, context._fitTemplates);
+            if (values != null && inst.Scenes.Count > 0) SetValues(inst.Scenes[0].Exposed ?? new(), inst.Scenes[0].Objects, values);
+            return session.PlaceTemplateScene(inst, layer, frame, lengthFrames);
+        }
+
+        public int SetTemplateValues(TimelineObject placed, IReadOnlyDictionary<string, string> values) =>
+            session.ExposedOfPlaced(placed) is { } x ? SetValues(x.Items, x.Objects, values) : 0;
 
         public void Group(IEnumerable<TimelineObject> objects)
         {

@@ -418,6 +418,7 @@ public class PluginApiTests
         Assert.Contains(("voicevox.settings", "VOICEVOX"), commands);
         Assert.Contains(("voicevox.script", "VOICEVOX"), commands);
         Assert.Contains(("voicevox.regenerate", "VOICEVOX"), commands);
+        Assert.Contains(("voicevox.subtitleTemplate", "VOICEVOX"), commands);
 
         // アプリに同梱したもの (plugins/voicevox) は、同じ ID が読み込まれていれば、何も言わずに飛ばす
         var root = Path.Combine(Path.GetTempPath(), $"vb-bundled-{Guid.NewGuid():N}");

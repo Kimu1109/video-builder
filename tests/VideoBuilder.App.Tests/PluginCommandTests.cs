@@ -222,4 +222,85 @@ public class PluginCommandTests
         }
         finally { foreach (var id in ids) PluginCommands.Unregister(id); }
     }
+
+    // ---------------- テンプレート (API バージョン 4) ----------------
+
+    [AvaloniaFact]
+    public void Templates_are_listed_loaded_and_placed_as_a_stretching_scene_object()
+    {
+        using var lib = new TemplateFixture();
+        var id = lib.Add("字幕の帯");
+        lib.Add("見出し", category: "見出し");
+        lib.Add("字幕の帯");   // 同じ名前で保存し直す → 版が 2 になる (一覧には 1 つだけ)
+        var session = new EditorSession();
+        var ctx = new PluginCommandContext(session, null, "test.plugin", TempDir(), lib.Store);
+
+        var list = ctx.ListTemplates();
+        // 並び順 (分類・名前の順) は表示言語の並べ方によるので、ここでは中身だけを比べる
+        Assert.Equal(new[] { ("字幕", "字幕の帯"), ("見出し", "見出し") }.OrderBy(x => x.Item2, StringComparer.Ordinal),
+            list.Select(t => (t.Category, t.Name)).OrderBy(x => x.Name, StringComparer.Ordinal));
+        Assert.Empty(new PluginCommandContext(session, null, "test.plugin", TempDir()).ListTemplates());   // ライブラリなし
+        Assert.Null(ctx.LoadTemplate("no-such-id"));
+
+        var template = ctx.LoadTemplate(id)!;
+        Assert.Equal((id, "字幕の帯", 2), (template.Id, template.Name, template.Version));
+        Assert.Equal(new[] { ("セリフ", true, "見本の文字"), ("帯の色", false, "#203040") }, template.Fields.Select(f => (f.Label, f.IsText, f.Value)));
+
+        // 置く: 既定の置き方が「複数のオブジェクト」でも、シーンオブジェクト 1 つ。長さに合わせて伸縮する
+        int scenes = session.Project.Scenes.Count;
+        TimelineObject? placed = null;
+        ctx.Edit("字幕", e => placed = e.AddTemplate(template, 2, 30, 100, new Dictionary<string, string> { ["セリフ"] = "こんにちは", ["帯の色"] = "#FF0000", ["ない項目"] = "x" }));
+        Assert.NotNull(placed);
+        Assert.Equal(EffectRegistry.SceneRef, placed!.Main.DefinitionId);
+        Assert.Equal((2, 30, 100), (placed.Layer, placed.Start, placed.Length));
+        Assert.True(placed.Main.GetBool("stretch"));
+        Assert.Equal(scenes + 1, session.Project.Scenes.Count);
+        Assert.Equal("字幕の帯", session.TemplateOf(placed)!.Name);   // 新しい版への更新もできる
+
+        // テンプレートの長さ (60 フレーム) より長く伸ばしても、後半まで帯が描かれる (伸縮しないと 60 フレームで消える)
+        using (var engine = new VideoBuilder.Rendering.RenderEngine())
+        {
+            var project = session.SnapshotForRead();
+            foreach (int frame in new[] { 40, 120 })
+            {
+                using var image = engine.RenderImage(project, project.Root, frame);
+                using var bmp = SkiaSharp.SKBitmap.FromImage(image);
+                var px = bmp.GetPixel(bmp.Width / 2, bmp.Height / 2);
+                Assert.True(px.Red > 200 && px.Green < 60, $"{frame} フレーム目に帯がありません: {px}");
+            }
+        }
+
+        // 置いたものの項目を読み書きする
+        Assert.Equal(new[] { ("セリフ", "こんにちは"), ("帯の色", "#FF0000") }, ctx.TemplateFields(placed).Select(f => (f.Label, f.Value)));
+        int n = 0;
+        ctx.Edit("直す", e => n = e.SetTemplateValues(placed, new Dictionary<string, string> { ["セリフ"] = "さようなら" }));
+        Assert.Equal(1, n);
+        Assert.Equal("さようなら", ctx.TemplateFields(placed)[0].Value);
+        Assert.Empty(ctx.TemplateFields(ObjectFactory.Create(EffectRegistry.Text, 0, 0, 10)));   // テンプレートでないもの
+
+        // 取り消すと、足したシーンも消える
+        session.Undo();
+        Assert.Equal("こんにちは", ctx.TemplateFields(session.Scene.Find(placed.Id)!)[0].Value);
+        session.Undo();
+        Assert.Null(session.Scene.Find(placed.Id));
+        Assert.Equal(scenes, session.Project.Scenes.Count);
+    }
+
+    [Fact]
+    public void Exposed_values_are_read_and_written_as_text()
+    {
+        var o = ObjectFactory.Create(EffectRegistry.Text, 0, 0, 60);
+        o.AddKeyFrame(30);
+        var objects = new[] { o };
+        var size = new ExposedParam { ObjectId = o.Id, Effect = 0, Key = "size", Label = "大きさ" };
+        Assert.True(ExposedValues.Set(objects, size, "72.5"));
+        Assert.Equal("72.5", ExposedValues.Get(objects, size));
+        Assert.Equal(3, o.Main.Tracks["size"].Values.Count);   // 中間点の区間ぶん
+        Assert.False(ExposedValues.Set(objects, size, "大きい"));
+        var text = new ExposedParam { ObjectId = o.Id, Effect = 0, Key = "text", Label = "文字" };
+        Assert.True(ExposedValues.Set(objects, text, "あ\nい"));
+        Assert.Equal("あ\nい", ExposedValues.Get(objects, text));
+        Assert.True(ExposedValues.IsText(ExposedValues.Resolve(objects, text)!.Value.Param));
+        Assert.Null(ExposedValues.Get(objects, new ExposedParam { ObjectId = "nothing", Key = "text" }));
+    }
 }

@@ -634,4 +634,176 @@ public class VoicevoxPluginTests
             try { Directory.Delete(dataRoot, true); } catch { }
         }
     }
+
+    // ---------------- 字幕のテンプレート ----------------
+
+    [AvaloniaFact]
+    public void Subtitle_plan_uses_speaker_templates_then_the_default()
+    {
+        using var lib = new TemplateFixture();
+        var band = lib.Add("字幕の帯");
+        var green = lib.Add("緑の帯", textLabel: "本文");
+        var noText = lib.Add("文字なし", textLabel: null);
+        var ctx = new PluginCommandContext(new EditorSession(), null, "voicevox", TempDir(), lib.Store);
+        var settings = new VoiceSettings
+        {
+            SubtitleTemplate = new SubtitleTemplate { Id = band, Name = "字幕の帯" },
+            SpeakerTemplates =
+            {
+                ["ずんだもん"] = new SubtitleTemplate { Id = green, Name = "緑の帯" },
+                ["四国めたん"] = new SubtitleTemplate(),   // テンプレートを使わない
+            },
+        };
+        var plan = SubtitlePlan.Resolve(ctx, settings, new[] { "ずんだもん", "四国めたん", "春日部つむぎ" });
+        Assert.Equal(("緑の帯", "本文"), (plan.For(new VoiceStyle(3, "ずんだもん", "ノーマル"))!.Template.Name, plan.For(new VoiceStyle(3, "ずんだもん", "ノーマル"))!.Field));
+        Assert.Null(plan.For(new VoiceStyle(2, "四国めたん", "ノーマル")));
+        Assert.Equal(("字幕の帯", "セリフ"), (plan.For(new VoiceStyle(8, "春日部つむぎ", "ノーマル"))!.Template.Name, plan.For(new VoiceStyle(8, "春日部つむぎ", "ノーマル"))!.Field));
+        Assert.Null(SubtitlePlan.Plain.For(new VoiceStyle(3, "ずんだもん", "ノーマル")));
+
+        // 文字の項目がない・指定した項目がない・ライブラリにない → 先に知らせる
+        settings.SubtitleTemplate = new SubtitleTemplate { Id = noText, Name = "文字なし" };
+        Assert.Contains("文字の公開項目がありません", Assert.Throws<VoicevoxException>(() => SubtitlePlan.Resolve(ctx, settings, new[] { "春日部つむぎ" })).Message);
+        settings.SubtitleTemplate = new SubtitleTemplate { Id = band, Name = "字幕の帯", Field = "名前" };
+        var missingField = Assert.Throws<VoicevoxException>(() => SubtitlePlan.Resolve(ctx, settings, new[] { "春日部つむぎ" }));
+        Assert.Contains("セリフ、帯の色", missingField.Message);
+        settings.SubtitleTemplate = new SubtitleTemplate { Id = "gone", Name = "消したテンプレート" };
+        Assert.Contains("消したテンプレート", Assert.Throws<VoicevoxException>(() => SubtitlePlan.Resolve(ctx, settings, new[] { "春日部つむぎ" })).Message);
+        // 字幕を置かないなら、テンプレートは確かめない
+        Assert.Same(SubtitlePlan.Plain, Plugin.PlanSubtitles(ctx, settings, false, Styles));
+    }
+
+    [AvaloniaFact]
+    public void Template_subtitles_are_placed_and_regenerated()
+    {
+        using var lib = new TemplateFixture();
+        var band = lib.Add("字幕の帯");
+        var session = new EditorSession();
+        var ctx = new PluginCommandContext(session, null, "voicevox", TempDir(), lib.Store);
+        int F(double sec) => (int)Math.Ceiling(sec * session.Project.Settings.Fps.Value - 1e-6);
+        var settings = new VoiceSettings { SubtitleTemplate = new SubtitleTemplate { Id = band, Name = "字幕の帯" }, SpeakerTemplates = { ["四国めたん"] = new SubtitleTemplate() } };
+        var clips = new[] { Clip("いち", 1.0, 3), Clip("に", 0.5, 2) };
+        var plan = SubtitlePlan.Resolve(ctx, settings, clips.Select(c => c.Style.Speaker));
+
+        var placed = VoicePlacer.PlaceMany(ctx, clips, 0, subtitle: true, "台本", plan)!;
+        // ずんだもん: テンプレート (シーンオブジェクト)、四国めたん: 文字だけ。どちらも字幕のレイヤーに並ぶ
+        var first = placed[0];
+        Assert.Equal(EffectRegistry.SceneRef, first.Subtitle!.Main.DefinitionId);
+        Assert.Equal((0, F(1.0)), (first.Subtitle.Layer, first.Subtitle.Length));
+        Assert.Equal("いち", ctx.TemplateFields(first.Subtitle).Single(f => f.Label == "セリフ").Value);
+        Assert.Equal("セリフ", first.Audio.PluginData![VoiceInfo.KeySubtitleField]);
+        Assert.Equal(first.Subtitle.GroupId, first.Audio.GroupId);
+        Assert.Equal(EffectRegistry.Text, placed[1].Subtitle!.Main.DefinitionId);
+        Assert.False(placed[1].Audio.PluginData!.ContainsKey(VoiceInfo.KeySubtitleField));
+
+        // テンプレートの項目でセリフを直してから、字幕を選んで作り直す
+        ctx.Edit("直す", e => e.SetTemplateValues(first.Subtitle, new Dictionary<string, string> { ["セリフ"] = "いちばん" }));
+        session.Select(first.Subtitle.Id);
+        var target = Assert.Single(VoicePlacer.FindTargets(ctx));
+        Assert.Equal(("いちばん", "セリフ"), (target.CurrentText, target.SubtitleField));
+        Assert.Empty(VoicePlacer.Replace(ctx, new[] { (target, Clip("いちばんなのだ", 0.6, 3)) }));
+        var caption = session.Scene.Find(first.Subtitle.Id)!;
+        Assert.Equal(F(0.6), caption.Length);
+        Assert.Equal(F(0.6), session.Scene.Find(first.Audio.Id)!.Length);
+        Assert.Equal("いちばんなのだ", ctx.TemplateFields(caption).Single(f => f.Label == "セリフ").Value);
+        Assert.Equal("#203040", ctx.TemplateFields(caption).Single(f => f.Label == "帯の色").Value);   // ほかの項目はそのまま
+
+        // 文字だけの字幕も、これまでどおり
+        session.Select(placed[1].Audio.Id);
+        Assert.Null(Assert.Single(VoicePlacer.FindTargets(ctx)).SubtitleField);
+    }
+
+    [AvaloniaFact]
+    public void Template_command_forms_save_default_and_speaker_choices()
+    {
+        using var lib = new TemplateFixture();
+        var band = lib.Add("字幕の帯");
+        var ctx = new PluginCommandContext(new EditorSession(), null, "voicevox", TempDir(), lib.Store);
+        var templates = ctx.ListTemplates();
+        var settings = new VoiceSettings();
+
+        // 既定: テンプレートを選ぶ
+        var form = SubtitleTemplateCommand.BuildTemplateForm(settings, SubtitleTemplateCommand.DefaultTarget, templates);
+        Assert.Equal(SubtitleTemplateCommand.PlainText, form.Get<PluginChoiceField>("template").Value);
+        Assert.DoesNotContain(form.Get<PluginChoiceField>("template").Options, o => o.Value == SubtitleTemplateCommand.FollowDefault);
+        form.Get<PluginChoiceField>("template").Value = band;
+        SubtitleTemplateCommand.Apply(ctx, settings, SubtitleTemplateCommand.DefaultTarget, form, templates);
+        Assert.Equal((band, "字幕の帯", ""), (settings.SubtitleTemplate!.Id, settings.SubtitleTemplate.Name, settings.SubtitleTemplate.Field));
+
+        // キャラクター: 文字だけ → 既定に従う (指定を消す)
+        var zunda = SubtitleTemplateCommand.BuildTemplateForm(settings, "ずんだもん", templates);
+        Assert.Equal(SubtitleTemplateCommand.FollowDefault, zunda.Get<PluginChoiceField>("template").Value);
+        zunda.Get<PluginChoiceField>("template").Value = SubtitleTemplateCommand.PlainText;
+        SubtitleTemplateCommand.Apply(ctx, settings, "ずんだもん", zunda, templates);
+        Assert.True(settings.SpeakerTemplates["ずんだもん"].IsPlain);
+        zunda.Get<PluginChoiceField>("template").Value = SubtitleTemplateCommand.FollowDefault;
+        SubtitleTemplateCommand.Apply(ctx, settings, "ずんだもん", zunda, templates);
+        Assert.False(settings.SpeakerTemplates.ContainsKey("ずんだもん"));
+
+        // ない項目を指定すると保存しない
+        var bad = SubtitleTemplateCommand.BuildTemplateForm(settings, "四国めたん", templates);
+        bad.Get<PluginChoiceField>("template").Value = band;
+        bad.Get<PluginTextField>("field").Value = "名前";
+        Assert.Throws<VoicevoxException>(() => SubtitleTemplateCommand.Apply(ctx, settings, "四国めたん", bad, templates));
+        Assert.False(settings.SpeakerTemplates.ContainsKey("四国めたん"));
+
+        // 今の設定が 1 つ目のフォームに出る。保存して読み直しても残る
+        var target = SubtitleTemplateCommand.BuildTargetForm(settings, new[] { "ずんだもん" }, null);
+        Assert.Contains("すべての話者の既定: 字幕の帯", target.Message);
+        var dir = TempDir();
+        settings.SpeakerTemplates["四国めたん"] = new SubtitleTemplate { Id = band, Name = "字幕の帯", Field = "セリフ" };
+        settings.Save(dir);
+        var loaded = VoiceSettings.Load(dir);
+        Assert.Equal(band, loaded.SubtitleTemplate!.Id);
+        Assert.Equal("セリフ", loaded.SpeakerTemplates["四国めたん"].Field);
+    }
+
+    [AvaloniaFact]
+    public async Task Template_command_and_synthesis_use_the_chosen_template_end_to_end()
+    {
+        using var engine = new FakeEngine();
+        using var lib = new TemplateFixture();
+        var band = lib.Add("字幕の帯");
+        var owner = new Window();
+        owner.Show();
+        var session = new EditorSession();
+        var dataRoot = TempDir();
+        var ctx = new PluginCommandContext(session, owner, "voicevox", dataRoot, lib.Store);
+        new VoiceSettings { EngineUrl = engine.Url, StyleId = 3 }.Save(ctx.DataDirectory);
+        try
+        {
+            // 字幕のテンプレート: ずんだもん → 字幕の帯
+            var run = new SubtitleTemplateCommand().RunAsync(ctx);
+            await Until(() => owner.OwnedWindows.OfType<PluginFormDialog>().Any());
+            var first = owner.OwnedWindows.OfType<PluginFormDialog>().Single();
+            var combo = first.GetLogicalDescendants().OfType<ComboBox>().Single();
+            combo.SelectedIndex = combo.ItemsSource!.Cast<string>().ToList().FindIndex(x => x == "ずんだもん");
+            Click(first, "次へ");
+            await Until(() => owner.OwnedWindows.OfType<PluginFormDialog>().Any(d => d != first));
+            var second = owner.OwnedWindows.OfType<PluginFormDialog>().Single();
+            var pick = second.GetLogicalDescendants().OfType<ComboBox>().Single();
+            pick.SelectedIndex = pick.ItemsSource!.Cast<string>().ToList().FindIndex(x => x.EndsWith("字幕の帯"));
+            Click(second, "保存");
+            await Until(() => run.IsCompleted);
+            await run;
+            Assert.Equal(band, VoiceSettings.Load(ctx.DataDirectory).SpeakerTemplates["ずんだもん"].Id);
+
+            // セリフから音声を作ると、字幕はテンプレートで置かれる
+            var synth = new SynthesizeCommand().RunAsync(ctx);
+            await Until(() => owner.OwnedWindows.OfType<PluginFormDialog>().Any());
+            var form = owner.OwnedWindows.OfType<PluginFormDialog>().Single();
+            form.GetLogicalDescendants().OfType<TextBox>().First(t => t is not NumberBox).Text = "テンプレートなのだ";
+            Click(form, "作って置く");
+            await Until(() => synth.IsCompleted);
+            await synth;
+            Assert.Empty(owner.OwnedWindows);
+            var caption = Assert.Single(session.Scene.Objects, o => o.Main.DefinitionId == EffectRegistry.SceneRef);
+            Assert.Equal("テンプレートなのだ", ctx.TemplateFields(caption).Single(f => f.Label == "セリフ").Value);
+            Assert.Equal("字幕の帯", session.TemplateOf(caption)!.Name);
+        }
+        finally
+        {
+            owner.Close();
+            try { Directory.Delete(dataRoot, true); } catch { }
+        }
+    }
 }
