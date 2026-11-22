@@ -394,7 +394,14 @@ public sealed class ObjectSettingsView : UserControl
         string collapseKey = index + "/" + def.Id;
 
         var rows = new StackPanel { Margin = new Thickness(8, 4, 18, 8), Spacing = 2 };
-        foreach (var p in def.Params) rows.Children.Add(Exposable(BuildParam(MainSlot(index), p), index, p));
+        foreach (var p in def.Params)
+        {
+            var row = Exposable(BuildParam(MainSlot(index), p), index, p);
+            rows.Children.Add(row);
+            // 図形の種類などで使わないパラメータは隠す
+            if (p.ShowWhenKey != null)
+                _refreshers.Add(() => { if (EffectAt(index) is { } e) row.IsVisible = p.IsShown(e); });
+        }
         if (def.Id == "filter.script")
         {
             // スクリプトのエラーを入力欄の下に出す

@@ -269,54 +269,8 @@ public static class Generators
     }
 
     /// <param name="type">EffectRegistry.ShapeTypes の番号。</param>
-    public static SKImage? RenderShape(int type, float size, float aspect, float line, SKColor color, int screenW, int screenH)
-    {
-        float w, h;
-        if (type == 0) { w = screenW; h = screenH; }
-        else
-        {
-            if (size <= 0) return null;
-            w = h = size;
-            // 縦横比: 正で横を縮め、負で縦を縮める (AviUtl と同じ向き)
-            if (aspect > 0) w *= 1 - aspect / 100f; else h *= 1 + aspect / 100f;
-        }
-        int iw = (int)MathF.Ceiling(w), ih = (int)MathF.Ceiling(h);
-        if (iw <= 0 || ih <= 0 || iw > 16384 || ih > 16384) return null;
-        using var surface = SKSurface.Create(Effects.Info(iw, ih));
-        var c = surface.Canvas;
-        c.Clear(SKColors.Transparent);
-        bool fill = type == 0 || line <= 0 || line >= Math.Min(w, h) / 2;
-        using var paint = new SKPaint { Color = color, IsAntialias = type != 0 && type != 2, Style = fill ? SKPaintStyle.Fill : SKPaintStyle.Stroke, StrokeWidth = line, StrokeJoin = SKStrokeJoin.Miter };
-        float inset = fill ? 0 : line / 2;
-        var rect = new SKRect(inset, inset, w - inset, h - inset);
-        using var path = new SKPath();
-        switch (type)
-        {
-            case 0: case 2: path.AddRect(rect); break;
-            case 1: path.AddOval(rect); break;
-            case 3: Polygon(path, rect, 3, 1); break;
-            case 4: Polygon(path, rect, 5, 1); break;
-            case 5: Polygon(path, rect, 6, 1); break;
-            default: Polygon(path, rect, 10, 0.382f); break;
-        }
-        // 線のときは図形の外にはみ出さないよう内側だけ描く
-        if (!fill) { c.Save(); }
-        c.DrawPath(path, paint);
-        return surface.Snapshot();
-    }
-
-    private static void Polygon(SKPath path, SKRect rect, int points, float innerRatio)
-    {
-        float cx = rect.MidX, cy = rect.MidY, rx = rect.Width / 2, ry = rect.Height / 2;
-        for (int i = 0; i < points; i++)
-        {
-            float ratio = innerRatio < 1 && i % 2 == 1 ? innerRatio : 1;
-            double ang = -Math.PI / 2 + i * 2 * Math.PI / points;
-            float x = cx + (float)Math.Cos(ang) * rx * ratio, y = cy + (float)Math.Sin(ang) * ry * ratio;
-            if (i == 0) path.MoveTo(x, y); else path.LineTo(x, y);
-        }
-        path.Close();
-    }
+    public static SKImage? RenderShape(int type, float size, float aspect, float line, SKColor color, int screenW, int screenH, ShapeStyle? style = null) =>
+        Shapes.Render(type, size, aspect, line, color, style ?? ShapeStyle.Default, screenW, screenH);
 
     internal static string F(double v) => v.ToString("R", CultureInfo.InvariantCulture);
 }
