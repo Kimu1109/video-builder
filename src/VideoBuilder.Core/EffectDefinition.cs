@@ -31,6 +31,16 @@ public sealed class ParamDefinition
     public double? SoftMin { get; init; }
     public double? SoftMax { get; init; }
 
+    /// <summary>
+    /// 別のパラメータ (選択肢・チェック) の値が ShowWhenValues のどれかのときだけ、設定画面に出す。
+    /// null なら常に出す。値は残るので、隠れている間も保存・テンプレートの公開はそのまま。
+    /// </summary>
+    public string? ShowWhenKey { get; init; }
+    public int[] ShowWhenValues { get; init; } = Array.Empty<int>();
+
+    /// <summary>この効果の今の値で、設定画面に出すか。</summary>
+    public bool IsShown(Effect e) => ShowWhenKey == null || ShowWhenValues.Contains(e.GetInt(ShowWhenKey));
+
     public double Step => Math.Pow(10, -Decimals);
     public double SliderMin => SoftMin ?? Min;
     public double SliderMax => SoftMax ?? Max;

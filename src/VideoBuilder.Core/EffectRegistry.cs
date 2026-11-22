@@ -11,7 +11,17 @@ public static class EffectRegistry
         "通常", "加算", "減算", "乗算", "スクリーン", "オーバーレイ", "比較(明)", "比較(暗)", "輝度", "カラー", "焼き込みカラー", "ハードライト", "差分",
     };
 
-    public static readonly string[] ShapeTypes = { "背景", "円", "四角形", "三角形", "五角形", "六角形", "星型" };
+    /// <summary>図形の種類。番号はプロジェクトファイルに残るので、増やすときは末尾に足す (ShapeType と同じ並び)。</summary>
+    public static readonly string[] ShapeTypes =
+    {
+        "背景", "円", "四角形", "三角形", "五角形", "六角形", "星型",
+        "ひし形", "台形", "平行四辺形", "多角形", "矢印", "両矢印", "山形矢印", "十字", "ハート",
+        "吹き出し (四角)", "吹き出し (丸)", "扇形", "角括弧", "直線",
+    };
+    public static readonly string[] ShapeFills = { "単色", "線形グラデーション", "円形グラデーション" };
+    public static readonly string[] LineStyles = { "実線", "破線", "点線" };
+    public static readonly string[] LineJoins = { "とがらせる", "丸める", "面取り" };
+    public static readonly string[] LineEnds = { "なし", "矢印", "三角", "円", "四角" };
     public static readonly string[] MaskShapes = { "四角形", "円", "角丸四角形" };
     public static readonly string[] TextAnimations = { "なし", "1 文字ずつ表示", "1 文字ずつフェードイン", "1 文字ずつ下から", "1 文字ずつ拡大" };
     public static readonly string[] TransitionTypes =
@@ -105,7 +115,7 @@ public static class EffectRegistry
                 T("line", "ライン幅", 0, 4000, 4000, 0, 0, 500),
                 new ParamDefinition { Key = "type", Name = "図形の種類", Kind = ParamKind.Choice, Choices = ShapeTypes, Default = 2 },
                 Col("color", "色", "#FFFFFF"),
-            },
+            }.Concat(ShapeStyleParams()).ToArray(),
         });
         Register(new EffectDefinition
         {
@@ -222,6 +232,55 @@ public static class EffectRegistry
             T("amount", "下げる量 (dB)", 0, 60, 12, 1), T("threshold", "反応する大きさ (dB)", -80, 0, -40, 1),
             T("attack", "下げる速さ (秒)", 0.001, 5, 0.05, 3, 0.001, 1), T("release", "戻す速さ (秒)", 0.01, 10, 0.4, 2, 0.01, 3));
         Builtin = Map.Keys.ToHashSet();
+    }
+
+    /// <summary>図形の形ごとの設定と、塗り・線の設定。図形の種類で使わないものは設定画面に出さない。</summary>
+    private static IEnumerable<ParamDefinition> ShapeStyleParams()
+    {
+        static ParamDefinition S(string key, string name, double min, double max, double def, int dec, double? softMin, double? softMax, params ShapeType[] types) =>
+            new()
+            {
+                Key = key, Name = name, Min = min, Max = max, Default = def, Decimals = dec, SoftMin = softMin, SoftMax = softMax,
+                ShowWhenKey = types.Length == 0 ? null : "type", ShowWhenValues = types.Select(t => (int)t).ToArray(),
+            };
+        var all = Enum.GetValues<ShapeType>();
+        // 角を丸められるのは、直線でできた形
+        var cornered = all.Except(new[] { ShapeType.Background, ShapeType.Circle, ShapeType.Heart, ShapeType.BubbleOval, ShapeType.Line }).ToArray();
+        var arrows = new[] { ShapeType.Arrow, ShapeType.DoubleArrow };
+
+        // ---- 形 ----
+        yield return S("corner", "角の丸み", 0, 4000, 0, 0, 0, 200, cornered);
+        yield return S("points", "頂点の数", 3, 100, 5, 0, 3, 24, ShapeType.Star, ShapeType.Polygon);
+        yield return S("inner", "へこみ (%)", 1, 100, 38.2, 1, null, null, ShapeType.Star);
+        yield return S("slant", "傾き (%)", -100, 100, 25, 1, null, null, ShapeType.Trapezoid, ShapeType.Parallelogram);
+        yield return S("head", "矢じりの長さ (%)", 0, 100, 40, 1, null, null, ShapeType.Arrow, ShapeType.DoubleArrow, ShapeType.Chevron);
+        yield return S("headWidth", "矢じりの幅 (%)", 0, 100, 100, 1, null, null, arrows);
+        yield return S("thickness", "太さ (%)", 1, 100, 40, 1, null, null, ShapeType.Arrow, ShapeType.DoubleArrow, ShapeType.Cross, ShapeType.Bracket, ShapeType.Line);
+        yield return S("tailX", "しっぽの位置 (%)", -100, 100, -40, 1, null, null, ShapeType.BubbleRect, ShapeType.BubbleOval);
+        yield return S("tailLength", "しっぽの長さ (%)", 0, 90, 25, 1, null, null, ShapeType.BubbleRect, ShapeType.BubbleOval);
+        yield return S("tailWidth", "しっぽの幅 (%)", 1, 100, 20, 1, null, null, ShapeType.BubbleRect, ShapeType.BubbleOval);
+        yield return S("startAngle", "開始角度", -3600, 3600, 0, 1, -360, 360, ShapeType.Pie);
+        yield return S("sweep", "中心角", 0, 360, 270, 1, null, null, ShapeType.Pie);
+        yield return S("hole", "穴の大きさ (%)", 0, 99, 0, 1, null, null, ShapeType.Pie, ShapeType.Circle);
+        yield return new ParamDefinition { Key = "startCap", Name = "始点の形", Kind = ParamKind.Choice, Choices = LineEnds, Default = 0, ShowWhenKey = "type", ShowWhenValues = new[] { (int)ShapeType.Line } };
+        yield return new ParamDefinition { Key = "endCap", Name = "終点の形", Kind = ParamKind.Choice, Choices = LineEnds, Default = 1, ShowWhenKey = "type", ShowWhenValues = new[] { (int)ShapeType.Line } };
+
+        // ---- 塗り ----
+        yield return new ParamDefinition { Key = "fill", Name = "塗り", Kind = ParamKind.Choice, Choices = ShapeFills, Default = 0 };
+        yield return new ParamDefinition { Key = "color2", Name = "色 2", Kind = ParamKind.Color, DefaultText = "#000000", ShowWhenKey = "fill", ShowWhenValues = new[] { 1, 2 } };
+        yield return new() { Key = "gradAngle", Name = "グラデーションの角度", Min = -3600, Max = 3600, Default = 90, Decimals = 1, SoftMin = -360, SoftMax = 360, ShowWhenKey = "fill", ShowWhenValues = new[] { 1 } };
+        yield return new() { Key = "gradCenter", Name = "グラデーションの中心 (%)", Min = 1, Max = 99, Default = 50, Decimals = 1, ShowWhenKey = "fill", ShowWhenValues = new[] { 1, 2 } };
+
+        // ---- 縁の線 (塗りの上に重ねる) ----
+        yield return new() { Key = "border", Name = "縁の幅", Min = 0, Max = 1000, Default = 0, Decimals = 1, SoftMin = 0, SoftMax = 50 };
+        yield return new ParamDefinition { Key = "borderColor", Name = "縁の色", Kind = ParamKind.Color, DefaultText = "#000000" };
+
+        // ---- 線の描き方 (ライン幅で線にしたとき・縁の線・直線) ----
+        yield return new ParamDefinition { Key = "dash", Name = "線の種類", Kind = ParamKind.Choice, Choices = LineStyles, Default = 0 };
+        yield return new() { Key = "dashLength", Name = "破線の長さ", Min = 0, Max = 2000, Default = 20, Decimals = 1, SoftMin = 0, SoftMax = 200, ShowWhenKey = "dash", ShowWhenValues = new[] { 1 } };
+        yield return new() { Key = "dashGap", Name = "破線の間隔", Min = 0, Max = 2000, Default = 12, Decimals = 1, SoftMin = 0, SoftMax = 200, ShowWhenKey = "dash", ShowWhenValues = new[] { 1, 2 } };
+        yield return new() { Key = "dashOffset", Name = "破線のずらし", Min = -100000, Max = 100000, Default = 0, Decimals = 1, SoftMin = -200, SoftMax = 200, ShowWhenKey = "dash", ShowWhenValues = new[] { 1, 2 } };
+        yield return new ParamDefinition { Key = "join", Name = "角の形", Kind = ParamKind.Choice, Choices = LineJoins, Default = 0 };
     }
 
     // 組み込みのエフェクトの ID (ここに入っていないものはプラグインが追加したもの)

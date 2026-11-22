@@ -218,20 +218,40 @@ public class UiTests
 
         var boxes = w.GetVisualDescendants().OfType<NumberBox>().ToList();
         Assert.True(boxes.Count >= 12, $"NumberBox が {boxes.Count} 個しかない");
-        // 標準描画の X の左側の入力欄を探す: 図形 (サイズ・縦横比・ライン幅) の 3 行 × 2 個のあと
-        var xLeft = boxes[6];
+        // 標準描画の X の左側の入力欄を探す: 図形のトラックバー (隠れているものも含む) の行 × 2 個のあと
+        int shapeTracks = EffectRegistry.Get(EffectRegistry.Shape).Params.Count(p => p.Kind == ParamKind.Track);
+        var xLeft = boxes[shapeTracks * 2];
         xLeft.Focus();
         xLeft.Text = "100+23";
         w.KeyPressQwerty(PhysicalKey.Enter, RawInputModifiers.None);
         Pump();
         var x = s.Scene.Find(o.Id)!.Draw!.Tracks["x"];
         Assert.Equal(new[] { 0.0, 123.0, 0.0 }, x.Values);
-        Assert.False(boxes[7].IsEnabled);    // 移動方法なしのとき、右側は使えない
+        Assert.False(boxes[shapeTracks * 2 + 1].IsEnabled);    // 移動方法なしのとき、右側は使えない
 
         s.Undo();
         Pump();
         Assert.Equal(0, s.Scene.Find(o.Id)!.Draw!.Tracks["x"].Values[1]);
         Assert.Equal("0.0", xLeft.Text);
+    }
+
+    [AvaloniaFact]
+    public void Shape_settings_show_only_the_params_of_the_selected_type()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        var o = s.AddObject(EffectRegistry.Shape, 0, 0, 100)!;
+        Pump();
+        bool Shown(string caption) => w.GetVisualDescendants().OfType<TextBlock>()
+            .Where(t => t.Text == caption || t.Text == L.T(caption))   // 英語表示のときは訳した名前
+            .Any(t => t.GetVisualAncestors().OfType<Control>().Prepend(t).TakeWhile(c => c is not ObjectSettingsView).All(c => c.IsVisible));
+        Assert.True(Shown("角の丸み"));
+        Assert.False(Shown("矢じりの長さ (%)"));
+
+        s.Edit("test", () => s.Scene.Find(o.Id)!.Main.Values["type"] = ((int)ShapeType.Arrow).ToString());
+        Pump();
+        Assert.True(Shown("矢じりの長さ (%)"));
+        Assert.False(Shown("中心角"));
     }
 
     [AvaloniaFact]
