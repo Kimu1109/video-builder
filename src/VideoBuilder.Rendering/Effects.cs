@@ -675,18 +675,17 @@ public static partial class Effects
         public Sprite Apply(Sprite s, EffectArgs a)
         {
             var p = a.Context.Project;
-            double t = p.FrameToSeconds(a.Context.Frame - a.Object.Start);
-            double rest = p.FrameToSeconds(a.Object.End + 1 - a.Context.Frame);
-            double fin = a.Track("in"), fout = a.Track("out");
-            double progress = 1;
-            if (fin > 0) progress = Math.Min(progress, t / fin);
-            if (fout > 0) progress = Math.Min(progress, rest / fout);
-            progress = Math.Clamp(progress, 0, 1);
+            var (progress, leaving) = Phase(a);
             if (progress >= 1) return s;
-            float e = (float)(progress * progress * (3 - 2 * progress));
+            int type = a.Effect.GetInt("type");
+            // アウトだけ別の種類にできる (0 = インと同じ)
+            int outType = a.Effect.GetInt("outType");
+            if (leaving && outType > 0) type = outType - 1;
+            if (type >= EffectRegistry.PairedTransitionStart) return PairedTransition(s, a, type, progress, leaving);
+            float e = (float)TransitionEase(progress, a.Effect.GetInt("ease"));
             float feather = a.Track("feather");
             int W = p.Settings.Width, H = p.Settings.Height;
-            switch (a.Effect.GetInt("type"))
+            switch (type)
             {
                 case 0:   // フェード
                     a.Context.Modifiers.Alpha *= e;
@@ -750,7 +749,7 @@ public static partial class Effects
                 case 15 or 16:  // ブラインド (横・縦): 帯ごとに少しずつ開く
                 {
                     const int Slats = 8;
-                    bool horizontal = a.Effect.GetInt("type") == 15;
+                    bool horizontal = type == 15;
                     float m = feather * 2 + 1;
                     using var path = new SKPath();
                     if (horizontal)
@@ -817,7 +816,7 @@ public static partial class Effects
                     return s;
                 case 26:  // 弾んで登場: 右から、ぴょんぴょん跳ねながら入ってくる (アウトでは左へ跳ねながら出ていく)
                 {
-                    var (q, leaving) = Phase(a);
+                    var q = progress;
                     float height = a.Track("height"), bounces = Math.Max(1, a.Track("bounces"));
                     float dist = W / 2f + s.Width * s.Scale / 2f;
                     a.Context.Modifiers.Ox += (leaving ? -dist : dist) * (float)(1 - q);

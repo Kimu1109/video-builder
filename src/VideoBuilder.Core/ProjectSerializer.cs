@@ -38,7 +38,12 @@ public static class ProjectSerializer
             if (EffectRegistry.Exists(e.DefinitionId))
             {
                 foreach (var d in e.Definition.Params)
-                    if (d.Kind == ParamKind.Track && !e.Tracks.ContainsKey(d.Key)) e.Tracks[d.Key] = new AnimatedValue(d.Default, o.Sections);
+                {
+                    if (d.Kind == ParamKind.Track) { if (!e.Tracks.ContainsKey(d.Key)) e.Tracks[d.Key] = new AnimatedValue(d.Default, o.Sections); }
+                    // 選択・チェックなども補う (新しく作ったオブジェクトと同じ内容になり、ストーリーボードとの比較がずれない)
+                    else if (!e.Values.ContainsKey(d.Key))
+                        e.Values[d.Key] = d.Kind is ParamKind.Check or ParamKind.Choice ? ((int)d.Default).ToString(System.Globalization.CultureInfo.InvariantCulture) : d.DefaultText;
+                }
             }
             foreach (var v in e.Tracks.Values) v.EnsureSections(o.Sections);
         }

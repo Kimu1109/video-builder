@@ -32,7 +32,31 @@ public static class EffectRegistry
         "ぼかし", "回転ズーム", "ポップ", "時計回りワイプ", "ブラインド (横)", "ブラインド (縦)", "ひし形ワイプ",
         "ランダム方向から", "縮小して登場", "落ちて登場 (ランダムな間隔)", "落ちて弾む", "広がって登場", "起き上がって登場",
         "集まって登場", "点滅して登場", "弾んで登場", "何処からともなく登場",
+        // 28〜: 入り (イン) と出 (アウト) で別の動きをする。ストーリーボードでは、入ってくるクリップと出ていくクリップの両方にかける
+        "プッシュ (左から)", "プッシュ (右から)", "プッシュ (上から)", "プッシュ (下から)",
+        "カバー (左から)", "カバー (右から)", "カバー (上から)", "カバー (下から)",
+        "アンカバー (左へ)", "アンカバー (右へ)", "アンカバー (上へ)", "アンカバー (下へ)",
+        "ホイップパン (左から)", "ホイップパン (右から)", "ホイップパン (上から)", "ホイップパン (下から)",
+        "クロスズーム", "白で切り替え (フラッシュ)", "黒で切り替え (暗転)",
+        "ワイプ (左上から)", "ワイプ (右上から)", "ワイプ (左下から)", "ワイプ (右下から)", "ワイプ (角度指定)",
+        "中央から開く (横)", "中央から開く (縦)", "中央へ閉じる (横)", "中央へ閉じる (縦)",
+        "四角形ワイプ (中心から)", "四角形ワイプ (外から)", "円形ワイプ (外から)", "星型ワイプ", "ハート型ワイプ",
+        "反時計回りワイプ", "扇形ワイプ", "チェッカーボード", "ランダムブロック", "ディゾルブ (粒)", "ルールワイプ (画像)",
+        "扉 (観音開き)", "ドア (片開き)",
+        "キューブ回転 (右から)", "キューブ回転 (左から)", "キューブ回転 (上から)", "キューブ回転 (下から)",
+        "カードを裏返す (横)", "カードを裏返す (縦)", "ページめくり",
+        "グリッチ", "色収差", "光漏れ", "ピクセル化", "波紋", "渦巻き", "焼けて消える", "フィルム焼け",
+        "重力で落下", "飛び去る", "溶ける",
     };
+    /// <summary>トランジションの「動き方」(進み具合のかけ方)。0 (加減速) が以前からの動き。</summary>
+    public static readonly string[] TransitionEasings = { "加減速", "直線", "加速", "減速", "行き過ぎて戻る", "弾む", "ばね" };
+    /// <summary>入りと出で別の動きをする (ストーリーボードで両方のクリップにかける) トランジションの最初の番号。</summary>
+    public const int PairedTransitionStart = 28;
+    /// <summary>境界線を引ける (形で切り替える) トランジション。</summary>
+    public static readonly int[] TransitionEdgeTypes = Enumerable.Range(47, 18).ToArray();
+    /// <summary>「画面全体を基準にする」が効くトランジション (形・位置を絵ではなく画面の大きさで決めるもの)。</summary>
+    public static readonly int[] TransitionScreenTypes =
+        Enumerable.Range(32, 8).Concat(Enumerable.Range(47, 22)).Concat(new[] { 75, 82, 86 }).ToArray();
     /// <summary>エフェクト「アニメーション効果」の種類。番号はプロジェクトファイルに残るので、増やすときは末尾に足す。</summary>
     public static readonly string[] AnimationTypes =
     {
@@ -258,7 +282,20 @@ public static class EffectRegistry
             new() { Key = "bounces", Name = "回数", Min = 1, Max = 20, Default = 4, Decimals = 1, ShowWhenKey = "type", ShowWhenValues = new[] { 26 } },
             // 何処からともなく登場 (27)
             new() { Key = "range", Name = "位置", Min = 0, Max = 5, Default = 1.5, Decimals = 2, ShowWhenKey = "type", ShowWhenValues = new[] { 27 } },
-            new() { Key = "jumpBlur", Name = "移動のぼかし", Min = 0, Max = 5, Default = 1, Decimals = 2, ShowWhenKey = "type", ShowWhenValues = new[] { 27 } });
+            new() { Key = "jumpBlur", Name = "移動のぼかし", Min = 0, Max = 5, Default = 1, Decimals = 2, ShowWhenKey = "type", ShowWhenValues = new[] { 27 } },
+            // ワイプ (角度指定) (51)
+            new() { Key = "angle", Name = "角度", Min = -3600, Max = 3600, Default = 45, Decimals = 1, SoftMin = -180, SoftMax = 180, ShowWhenKey = "type", ShowWhenValues = new[] { 51 } },
+            // ルールワイプ (66): 画像の暗い所から切り替わる
+            new ParamDefinition { Key = "rule", Name = "ルール画像", Kind = ParamKind.File, FileExtensions = ImageExtensions, ShowWhenKey = "type", ShowWhenValues = new[] { 66 } },
+            new ParamDefinition { Key = "ruleInvert", Name = "明るい所から切り替える", Kind = ParamKind.Check, ShowWhenKey = "type", ShowWhenValues = new[] { 66 } },
+            // 形で切り替えるもの: 境界線
+            new() { Key = "edge", Name = "境界線の幅", Min = 0, Max = 1000, Default = 0, Decimals = 0, SoftMin = 0, SoftMax = 50, ShowWhenKey = "type", ShowWhenValues = TransitionEdgeTypes },
+            new ParamDefinition { Key = "edgeColor", Name = "境界線の色", Kind = ParamKind.Color, DefaultText = "#FFFFFF", ShowWhenKey = "type", ShowWhenValues = TransitionEdgeTypes },
+            new ParamDefinition { Key = "screen", Name = "画面全体を基準にする", Kind = ParamKind.Check, ShowWhenKey = "type", ShowWhenValues = TransitionScreenTypes },
+            // ストーリーボードが、重なった 2 つのクリップの奥の方に付ける (切り抜くだけの役なら、手前の絵が切り抜かれるので何もしない)。設定画面には出さない
+            new ParamDefinition { Key = "under", Name = "奥のクリップ", Kind = ParamKind.Check, ShowWhenKey = "type", ShowWhenValues = Array.Empty<int>() },
+            new ParamDefinition { Key = "ease", Name = "動き方", Kind = ParamKind.Choice, Choices = TransitionEasings },
+            new ParamDefinition { Key = "outType", Name = "アウトの種類", Kind = ParamKind.Choice, Choices = new[] { "インと同じ" }.Concat(TransitionTypes).ToArray() });
         // ---- ぼかし・光 (重い処理は複数スレッド・縮小計算で速くしている) ----
         F("filter.glow", "グロー", "Icon.LightMode",
             T("strength", "強さ", 0, 400, 100, 1, 0, 300), T("radius", "拡散", 0, 1000, 20, 0, 0, 200),

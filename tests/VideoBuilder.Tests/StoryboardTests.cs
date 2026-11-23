@@ -312,4 +312,104 @@ public class StoryboardTests
         Assert.Equal(3, clip.TrimEnd - clip.TrimStart);
         Assert.Equal(60, ed.Layout.VideoLength);
     }
+
+    /// <summary>赤から緑へ、type (TransitionTypes の番号) で切り替わる 2 つのクリップ。切り替えは 30〜59 フレーム。</summary>
+    private static Project Paired(int type)
+    {
+        var p = Small();
+        p.Storyboard = new Storyboard();
+        p.Storyboard.Clips.Add(Title("#FF0000"));
+        p.Storyboard.Clips.Add(Title("#00FF00", transition: type + 1, transitionSeconds: 1));
+        StoryboardCompiler.Apply(p);
+        return p;
+    }
+
+    [Fact]
+    public void Paired_transitions_go_on_both_clips_and_survive_a_reload()
+    {
+        var p = Paired(28);   // プッシュ (左から)
+        var filters = p.Root.Objects.Select(o => o.FindEffect("filter.transition")).Where(e => e != null).ToList();
+        Assert.Equal(2, filters.Count);
+        Assert.All(filters, e => Assert.Equal("1", e!.Values["screen"]));
+        // 奥のクリップ (レーン 0 = 先のクリップ) にだけ印が付く
+        Assert.Equal(1, filters.Count(e => e!.GetBool("under")));
+        Assert.True(StoryboardCompiler.IsInSync(ProjectSerializer.FromJson(ProjectSerializer.ToJson(p))));
+
+        // プッシュの途中: 左に入ってくる緑、右に押し出される赤
+        using var engine = new RenderEngine();
+        using var img = engine.RenderImage(p, p.Root, 45);
+        using var bmp = SKBitmap.FromImage(img);
+        Assert.True(bmp.GetPixel(20, 120).Green > 200 && bmp.GetPixel(20, 120).Red < 50, "左が緑でない: " + bmp.GetPixel(20, 120));
+        Assert.True(bmp.GetPixel(300, 120).Red > 200 && bmp.GetPixel(300, 120).Green < 50, "右が赤でない: " + bmp.GetPixel(300, 120));
+    }
+
+    [Fact]
+    public void Shape_wipes_split_the_screen_between_both_clips_without_gaps()
+    {
+        // 形で切り替えるもの: 途中は、どのピクセルも赤か緑 (か、その混ざった色) で、黒い隙間がない (境目の 1 ピクセルの少しの暗さは許す)。両方の色が見えている
+        var types = Enumerable.Range(32, 8).Concat(Enumerable.Range(47, 20)).Append(86);
+        using var engine = new RenderEngine();
+        foreach (int type in types)
+        {
+            var p = Paired(type);
+            foreach (int frame in new[] { 38, 45, 52 })
+            {
+                using var img = engine.RenderImage(p, p.Root, frame);
+                using var bmp = SKBitmap.FromImage(img);
+                int red = 0, green = 0;
+                for (int y = 2; y < 240; y += 6)
+                for (int x = 2; x < 320; x += 6)
+                {
+                    var c = bmp.GetPixel(x, y);
+                    Assert.True(c.Red + c.Green >= 150, $"{EffectRegistry.TransitionTypes[type]} の {frame} フレーム目 ({x}, {y}) に隙間: {c}");
+                    if (c.Red > 200) red++;
+                    if (c.Green > 200) green++;
+                }
+                if (frame == 45) Assert.True(red > 0 && green > 0, $"{EffectRegistry.TransitionTypes[type]}: 途中で両方が見えていない ({red}, {green})");
+            }
+        }
+    }
+
+    [Fact]
+    public void Half_and_half_transitions_show_the_old_clip_first_and_the_new_clip_after()
+    {
+        using var engine = new RenderEngine();
+        foreach (int type in new[] { 44, 45, 46, 73, 74, 76, 77, 78, 79, 80, 81, 83 })
+        {
+            var p = Paired(type);
+            SKColor At(int frame)
+            {
+                using var img = engine.RenderImage(p, p.Root, frame);
+                using var bmp = SKBitmap.FromImage(img);
+                return bmp.GetPixel(160, 120);
+            }
+            string name = EffectRegistry.TransitionTypes[type];
+            var early = At(31);
+            Assert.True(early.Red > early.Green, $"{name}: 始めに赤 (前のクリップ) が見えていない: {early}");
+            var late = At(58);
+            Assert.True(late.Green > late.Red, $"{name}: 終わりに緑 (次のクリップ) が見えていない: {late}");
+            Assert.Equal(new SKColor(0, 255, 0), At(62));
+        }
+    }
+
+    [Fact]
+    public void Out_type_replaces_the_movement_when_leaving()
+    {
+        var p = Small();
+        var o = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 60);
+        o.Main.Values["type"] = "0";
+        o.Main.Values["color"] = "#FFFFFF";
+        p.Root.Objects.Add(o);
+        var e = ObjectFactory.AddFilter(o, "filter.transition");
+        e.Values["type"] = "0";                       // イン: フェード
+        e.Values["outType"] = (6 + 1).ToString();     // アウト: スライド (左から) の逆 = 左へ出ていく
+        e.Tracks["in"] = new AnimatedValue(0);
+        e.Tracks["out"] = new AnimatedValue(1);
+        using var engine = new RenderEngine();
+        using var img = engine.RenderImage(p, p.Root, 45);
+        using var bmp = SKBitmap.FromImage(img);
+        // フェードなら全体が半透明になるが、スライドなので右側が空いて、左側は真っ白のまま
+        Assert.Equal(SKColors.White, bmp.GetPixel(10, 120));
+        Assert.Equal(SKColors.Black, bmp.GetPixel(310, 120));
+    }
 }
