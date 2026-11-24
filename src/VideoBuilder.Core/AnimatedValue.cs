@@ -46,6 +46,13 @@ public sealed class AnimatedValue
     public int Interval { get; set; } = 10;
     /// <summary>プラグインの移動方法の ID。設定されていれば Mode より優先する。</summary>
     public string? Custom { get; set; }
+    /// <summary>動き方 (イージング)。null なら加速・減速のチェックで決める (以前からの動き)。</summary>
+    public Easing? Ease { get; set; }
+    /// <summary>
+    /// 区間ごとの動き方。null の要素は Ease (なければ加速・減速) を使う。要素数は区間数 (足りない分は null とみなす)。
+    /// 中間点の追加・削除・分割に合わせて、TimelineObject が並びを保つ。
+    /// </summary>
+    public List<Easing?>? SectionEases { get; set; }
 
     public AnimatedValue() { }
 
@@ -60,13 +67,54 @@ public sealed class AnimatedValue
     {
         if (a.Mode != b.Mode || a.Accel != b.Accel || a.Decel != b.Decel || a.Interval != b.Interval || a.Custom != b.Custom || a.Values.Count != b.Values.Count) return false;
         for (int i = 0; i < a.Values.Count; i++) if (!a.Values[i].Equals(b.Values[i])) return false;
+        if (!Easing.Same(a.Ease, b.Ease)) return false;
+        int n = Math.Max(a.SectionEases?.Count ?? 0, b.SectionEases?.Count ?? 0);
+        for (int i = 0; i < n; i++) if (!Easing.Same(a.SectionEaseAt(i), b.SectionEaseAt(i))) return false;
         return true;
     }
 
     public AnimatedValue Clone() => new()
     {
         Values = new List<double>(Values), Mode = Mode, Accel = Accel, Decel = Decel, Interval = Interval, Custom = Custom,
+        Ease = Ease?.Clone(), SectionEases = SectionEases?.Select(e => e?.Clone()).ToList(),
     };
+
+    /// <summary>区間 section だけの動き方 (なければ null)。</summary>
+    public Easing? SectionEaseAt(int section) =>
+        SectionEases != null && section >= 0 && section < SectionEases.Count ? SectionEases[section] : null;
+
+    /// <summary>区間 section の動き方を決める (null で区間ごとの設定を消す)。</summary>
+    public void SetSectionEase(int section, Easing? ease)
+    {
+        if (section < 0) return;
+        SectionEases ??= new List<Easing?>();
+        while (SectionEases.Count <= section) SectionEases.Add(null);
+        SectionEases[section] = ease;
+        if (SectionEases.All(e => e == null)) SectionEases = null;
+    }
+
+    /// <summary>区間 section を 2 つに分けた (中間点を足した)。後ろの区間も同じ動き方にする。</summary>
+    public void SplitSection(int section)
+    {
+        if (SectionEases == null || section < 0 || section >= SectionEases.Count) return;
+        SectionEases.Insert(section + 1, SectionEases[section]?.Clone());
+    }
+
+    /// <summary>区間 section と次の区間を 1 つにした (中間点を消した)。前の区間の動き方を残す。</summary>
+    public void MergeSections(int section)
+    {
+        if (SectionEases == null || section + 1 >= SectionEases.Count) return;
+        SectionEases.RemoveAt(section + 1);
+        if (SectionEases.All(e => e == null)) SectionEases = null;
+    }
+
+    /// <summary>区間 first から count 個だけを残す (オブジェクトの分割)。</summary>
+    public void KeepSections(int first, int count)
+    {
+        if (SectionEases == null) return;
+        SectionEases = SectionEases.Skip(first).Take(count).ToList();
+        if (SectionEases.All(e => e == null)) SectionEases = null;
+    }
 
     /// <summary>区間数に合わせて Values の長さを揃える。</summary>
     public void EnsureSections(int sections)
@@ -74,6 +122,7 @@ public sealed class AnimatedValue
         if (Values.Count == 0) Values.Add(0);
         while (Values.Count < sections + 1) Values.Add(Values[^1]);
         while (Values.Count > sections + 1) Values.RemoveAt(Values.Count - 1);
+        if (SectionEases != null && SectionEases.Count > sections) SectionEases.RemoveRange(sections, SectionEases.Count - sections);
     }
 
     /// <param name="bounds">区間境界 (開始, 中間点..., 終了)。要素数 = 区間数 + 1。</param>
@@ -94,7 +143,7 @@ public sealed class AnimatedValue
         {
             // プラグインが入っていない環境では直線移動で代用する
             var custom = Interpolators.Find(Custom);
-            return custom != null ? custom.Evaluate(V(i), V(i + 1), ApplyEase(t)) : Lerp(V(i), V(i + 1), ApplyEase(t));
+            return custom != null ? custom.Evaluate(V(i), V(i + 1), ApplyEase(t, i)) : Lerp(V(i), V(i + 1), ApplyEase(t, i));
         }
         switch (Mode)
         {
@@ -102,16 +151,16 @@ public sealed class AnimatedValue
             case MovementMode.Jump:
                 return V(i);
             case MovementMode.Linear:
-                return Lerp(V(i), V(i + 1), ApplyEase(t));
+                return Lerp(V(i), V(i + 1), ApplyEase(t, i));
             case MovementMode.Ease:
                 return Lerp(V(i), V(i + 1), SmoothStep(t));
             case MovementMode.Curve:
-                return CatmullRom(V(i - 1), V(i), V(i + 1), V(i + 2), ApplyEase(t));
+                return CatmullRom(V(i - 1), V(i), V(i + 1), V(i + 2), ApplyEase(t, i));
             case MovementMode.IgnoreMid:
             {
                 int total = bounds[^1] - bounds[0];
                 double g = total <= 0 ? 0 : (double)(frame - bounds[0]) / total;
-                return Lerp(V(0), V(sections), ApplyEase(g));
+                return Lerp(V(0), V(sections), ApplyEase(g, -1));
             }
             case MovementMode.Delta:
                 return V(i) + V(i + 1) * (frame - bounds[i]);
@@ -128,14 +177,17 @@ public sealed class AnimatedValue
                 double p = (double)(frame - bounds[i]) / step;
                 double frac = p % 2.0;
                 double tri = frac <= 1 ? frac : 2 - frac;
-                return Lerp(V(i), V(i + 1), ApplyEase(tri));
+                return Lerp(V(i), V(i + 1), ApplyEase(tri, i));
             }
         }
         return V(i);
     }
 
-    private double ApplyEase(double t)
+    /// <summary>区間 section (-1 なら区間によらない) の動き方で、進み具合 t を変える。</summary>
+    private double ApplyEase(double t, int section)
     {
+        var ease = SectionEaseAt(section) ?? Ease;
+        if (ease != null) return ease.Apply(t);
         if (Accel && Decel) return SmoothStep(t);
         if (Accel) return t * t;
         if (Decel) return 1 - (1 - t) * (1 - t);

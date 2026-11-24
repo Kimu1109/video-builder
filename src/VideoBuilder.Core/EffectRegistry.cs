@@ -250,6 +250,12 @@ public static class EffectRegistry
                 T("scale", "拡大率", 0, 5000, 100, 2, 0, 800), T("alpha", "透明度", 0, 100, 0), T("rotation", "回転", -3600, 3600, 0, 2, -360, 360),
                 T("rx", "X軸回転", -3600, 3600, 0, 2, -360, 360), T("ry", "Y軸回転", -3600, 3600, 0, 2, -360, 360),
                 new ParamDefinition { Key = "blend", Name = "合成モード", Kind = ParamKind.Choice, Choices = BlendModes },
+                // 動いている向き (X・Y の動き) に合わせて回す。回転の値はそこに足す
+                C("orient", "進む向きに回転"),
+                // 親: そのレイヤー (表示の番号) にあるオブジェクトの位置に付いていく。遅れを付けると、少し前の親の位置を追いかける
+                T("parent", "親のレイヤー (0 でなし)", 0, 1000, 0, 0, 0, 30),
+                T("parentDelay", "親を追いかける遅れ (秒)", 0, 60, 0, 2, 0, 3),
+                C("parentInherit", "親の回転・拡大も受け継ぐ"),
             },
         });
         Register(new EffectDefinition
