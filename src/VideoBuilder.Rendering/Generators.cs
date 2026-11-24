@@ -47,8 +47,29 @@ public static class Generators
 
     private readonly record struct Run(string Text, SKTypeface Face, float Width);
 
-    /// <summary>1 文字ごとの描き方 (透明度 0〜1・下へのずれ px・拡大率)。</summary>
-    public readonly record struct CharStyle(float Alpha, float Dy, float Scale);
+    /// <summary>
+    /// 1 文字ごとの描き方 (透明度 0〜1・下へのずれ px・拡大率)。
+    /// 増えた項目 (横のずれ・回転・ぼかし・差し替える文字・塗る色・輪郭線) は init で指定する (既定は何もしない)。
+    /// </summary>
+    public readonly record struct CharStyle(float Alpha, float Dy, float Scale)
+    {
+        /// <summary>右へのずれ (px)。</summary>
+        public float Dx { get; init; }
+        /// <summary>文字の中心を軸にした回転 (度、時計回り)。</summary>
+        public float Rotation { get; init; }
+        /// <summary>ぼかし (px)。</summary>
+        public float Blur { get; init; }
+        /// <summary>この文字の代わりに描く文字 (文字化け)。null ならそのまま。</summary>
+        public string? Text { get; init; }
+        /// <summary>FillColor で塗る割合 (0〜1)。行の向きに、文字の始めから塗る (カラオケ)。</summary>
+        public float Fill { get; init; }
+        public SKColor FillColor { get; init; }
+        /// <summary>
+        /// 0 より大きければ、文字の輪郭線を描く。値は線を描き終えた割合 (0〜1。書き順ではなく輪郭に沿って伸びる)。
+        /// 塗りは Alpha で決める。
+        /// </summary>
+        public float Outline { get; init; }
+    }
 
     /// <summary>テキストの飾り (縦書き・下線・取り消し線)。既定は横書きで線なし。</summary>
     public readonly record struct TextDecor(bool Vertical, bool Underline, bool Strike)
@@ -203,10 +224,12 @@ public static class Generators
         if (vertical) return BuildVertical(text, size, align, spacing, lineHeight, animated, italic, baseFace, font.Embolden, font.SkewX, faces, FaceFor, MeasureRaw, m);
         float maxWidth = lines.Max(l => l.Width);
         const int pad = 2;
-        int padY = pad + (animated ? (int)MathF.Ceiling(size * 0.7f) : 0);
-        int w = (int)MathF.Ceiling(maxWidth) + pad * 2 + (italic ? (int)(size * 0.25f) : 0);
+        // アニメーションでは、文字が動いても絵からはみ出さないよう余白を足す (中心は変わらない)
+        int padX = pad + (animated ? (int)MathF.Ceiling(size * 1.6f) : 0);
+        int padY = pad + (animated ? (int)MathF.Ceiling(size * 2.0f) : 0);
+        int w = (int)MathF.Ceiling(maxWidth) + padX * 2 + (italic ? (int)(size * 0.25f) : 0);
         int h = (int)MathF.Ceiling(lineHeight * lines.Count - leading) + padY * 2;
-        if (w <= pad * 2 || h <= 0 || w > 16384 || h > 16384) return null;
+        if (w <= padX * 2 || h <= 0 || w > 16384 || h > 16384) return null;
 
         var runList = new List<(string, SKTypeface, float, float)>();
         var chars = new List<Glyph>();
@@ -215,7 +238,7 @@ public static class Generators
         int index = 0, lineNo = 0;
         foreach (var (runs, width) in lines)
         {
-            float x = pad + align switch { 1 => (maxWidth - width) / 2, 2 => maxWidth - width, _ => 0 };
+            float x = padX + align switch { 1 => (maxWidth - width) / 2, 2 => maxWidth - width, _ => 0 };
             foreach (var run in runs)
             {
                 runList.Add((run.Text, run.Face, x, y));
@@ -261,17 +284,19 @@ public static class Generators
         // 列の幅は、右側に引く傍線 (下線) が入るよう、文字の大きさの 1.25 倍以上にする
         float colWidth = Math.Max(size * 1.25f, columnPitch);
         const int pad = 2;
-        int padY = pad + (animated ? (int)MathF.Ceiling(size * 0.7f) : 0);
-        int w = (int)MathF.Ceiling(colWidth * columns.Count) + pad * 2 + (italic ? (int)(size * 0.25f) : 0);
+        // アニメーションでは、文字が動いても絵からはみ出さないよう余白を足す (中心は変わらない)
+        int padX = pad + (animated ? (int)MathF.Ceiling(size * 1.6f) : 0);
+        int padY = pad + (animated ? (int)MathF.Ceiling(size * 2.0f) : 0);
+        int w = (int)MathF.Ceiling(colWidth * columns.Count) + padX * 2 + (italic ? (int)(size * 0.25f) : 0);
         int h = (int)MathF.Ceiling(maxHeight) + padY * 2;
-        if (w <= pad * 2 || h <= padY * 2 || w > 16384 || h > 16384) return null;
+        if (w <= padX * 2 || h <= padY * 2 || w > 16384 || h > 16384) return null;
 
         float middle = (m.Ascent + m.Descent) / 2;
         var chars = new List<Glyph>();
         int index = 0;
         for (int c = 0; c < columns.Count; c++)
         {
-            float centerX = w - pad - colWidth * c - colWidth / 2;
+            float centerX = w - padX - colWidth * c - colWidth / 2;
             float colH = Height(columns[c].Count);
             float top = padY + align switch { 1 => (maxHeight - colH) / 2, 2 => maxHeight - colH, _ => 0 };
             for (int k = 0; k < columns[c].Count; k++)
@@ -323,16 +348,38 @@ public static class Generators
             if (perChar != null)
             {
                 // 1 文字ずつ、決めた透明度・ずれ・拡大率で描く (線も 1 文字ずつ、その文字の透明度で)
-                foreach (var g in layout.Chars)
+                foreach (var g0 in layout.Chars)
                 {
-                    var st = perChar(g.Index);
-                    if (st.Alpha <= 0 || st.Scale <= 0) continue;
-                    paint.Color = color.WithAlpha((byte)Math.Clamp(color.Alpha * st.Alpha, 0, 255));
+                    var st = perChar(g0.Index);
+                    if ((st.Alpha <= 0 && st.Outline <= 0) || st.Scale <= 0) continue;
+                    var g = st.Text != null ? g0 with { Text = st.Text } : g0;
                     canvas.Save();
-                    canvas.Translate(0, st.Dy);
+                    canvas.Translate(st.Dx, st.Dy);
+                    if (st.Rotation != 0) canvas.RotateDegrees(st.Rotation, g.CenterX, g.CenterY);
                     if (st.Scale != 1) canvas.Scale(st.Scale, st.Scale, g.CenterX, g.CenterY);
-                    DrawGlyph(canvas, font, paint, g, layout);
-                    if (lines) DrawLines(canvas, paint, layout, decor, g.Span0, g.Span1 + (layout.Vertical ? 0 : spacing), g.Pos);
+                    using var blur = st.Blur > 0.3f ? SKMaskFilter.CreateBlur(SKBlurStyle.Normal, st.Blur / 2) : null;
+                    paint.MaskFilter = blur;
+                    if (st.Alpha > 0)
+                    {
+                        paint.Color = color.WithAlpha((byte)Math.Clamp(color.Alpha * st.Alpha, 0, 255));
+                        DrawGlyph(canvas, font, paint, g, layout);
+                        if (lines) DrawLines(canvas, paint, layout, decor, g.Span0, g.Span1 + (layout.Vertical ? 0 : spacing), g.Pos);
+                        if (st.Fill > 0)
+                        {
+                            // 行の向きに、文字の始めから塗る色で塗る (カラオケ)
+                            canvas.Save();
+                            float edge = g.Span0 + (g.Span1 - g.Span0) * Math.Clamp(st.Fill, 0, 1);
+                            var big = SKRect.Create(-1e5f, -1e5f, 2e5f, 2e5f);
+                            canvas.ClipRect(layout.Vertical ? new SKRect(big.Left, big.Top, big.Right, edge) : new SKRect(big.Left, big.Top, edge, big.Bottom));
+                            var fill = st.FillColor;
+                            paint.Color = fill.WithAlpha((byte)Math.Clamp(fill.Alpha * st.Alpha, 0, 255));
+                            DrawGlyph(canvas, font, paint, g, layout);
+                            if (lines) DrawLines(canvas, paint, layout, decor, g.Span0, g.Span1 + (layout.Vertical ? 0 : spacing), g.Pos);
+                            canvas.Restore();
+                        }
+                    }
+                    if (st.Outline > 0) DrawOutline(canvas, font, color, g, layout, st.Outline);
+                    paint.MaskFilter = null;
                     canvas.Restore();
                 }
             }
@@ -347,6 +394,27 @@ public static class Generators
             canvas.Flush();
         }
         return PixelPool.ToImage(buffer, info, rowBytes);
+    }
+
+    /// <summary>文字の輪郭線を、輪郭に沿って progress (0〜1) の割合だけ描く (線で描いてから塗る)。</summary>
+    private static void DrawOutline(SKCanvas canvas, SKFont font, SKColor color, Glyph g, TextLayout layout, float progress)
+    {
+        // 文字の形は SKPaint から取り出す (書体・大きさ・太字・斜体は描くときと同じにする)
+        using var shape = new SKPaint { Typeface = g.Face, TextSize = font.Size, FakeBoldText = font.Embolden, TextSkewX = font.SkewX, IsAntialias = true };
+        using var path = g.Rotate
+            ? shape.GetTextPath(g.Text, g.CenterX - g.Advance / 2, g.CenterY - layout.MiddleFromBaseline)
+            : shape.GetTextPath(g.Text, g.X, g.Y);
+        if (path == null || path.IsEmpty) return;
+        using var trim = progress < 1 ? SKPathEffect.CreateTrim(0, Math.Clamp(progress, 0, 1)) : null;
+        using var stroke = new SKPaint
+        {
+            Color = color, IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = Math.Max(1, layout.Size * 0.035f),
+            StrokeCap = SKStrokeCap.Round, StrokeJoin = SKStrokeJoin.Round, PathEffect = trim,
+        };
+        canvas.Save();
+        if (g.Rotate) canvas.RotateDegrees(90, g.CenterX, g.CenterY);
+        canvas.DrawPath(path, stroke);
+        canvas.Restore();
     }
 
     private static void DrawGlyph(SKCanvas canvas, SKFont font, SKPaint paint, Glyph g, TextLayout layout)

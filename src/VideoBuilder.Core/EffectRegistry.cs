@@ -23,7 +23,19 @@ public static class EffectRegistry
     public static readonly string[] LineJoins = { "とがらせる", "丸める", "面取り" };
     public static readonly string[] LineEnds = { "なし", "矢印", "三角", "円", "四角" };
     public static readonly string[] MaskShapes = { "四角形", "円", "角丸四角形" };
-    public static readonly string[] TextAnimations = { "なし", "1 文字ずつ表示", "1 文字ずつフェードイン", "1 文字ずつ下から", "1 文字ずつ拡大" };
+    /// <summary>テキストの「文字の出し方」。番号はプロジェクトファイルに残るので、増やすときは末尾に足す。</summary>
+    public static readonly string[] TextAnimations =
+    {
+        "なし", "1 文字ずつ表示", "1 文字ずつフェードイン", "1 文字ずつ下から", "1 文字ずつ拡大",
+        "1 文字ずつ上から", "1 文字ずつ左から", "1 文字ずつ右から", "1 文字ずつ回転して登場", "1 文字ずつ弾んで登場",
+        "1 文字ずつぼかしから", "1 文字ずつ縮小して登場", "1 文字ずつ落ちてくる", "文字化けから表示 (デコード)",
+        "波打つ (繰り返し)", "カラオケ (色が変わる)", "線で描いてから塗る", "数字のカウントアップ",
+    };
+    /// <summary>テキストの「消え方」(オブジェクトの終わりに、文字の出し方と同じ順番・間隔で消える)。</summary>
+    public static readonly string[] TextExits = { "なし", "1 文字ずつフェードアウト", "1 文字ずつ上へ消える", "1 文字ずつ下へ落ちる", "1 文字ずつ縮んで消える", "散らばって消える" };
+    /// <summary>テキストアニメーションの単位と順番。</summary>
+    public static readonly string[] TextAnimUnits = { "文字", "単語", "行" };
+    public static readonly string[] TextAnimOrders = { "先頭から", "ランダム", "中央から", "両端から" };
     public static readonly string[] TransitionTypes =
     {
         "フェード", "ワイプ (左から)", "ワイプ (右から)", "ワイプ (上から)", "ワイプ (下から)", "円形ワイプ",
@@ -147,6 +159,14 @@ public static class EffectRegistry
                 new ParamDefinition { Key = "anim", Name = "文字の出し方", Kind = ParamKind.Choice, Choices = TextAnimations },
                 T("interval", "文字の間隔 (秒)", 0, 10, 0.05, 3, 0, 0.5), T("duration", "1 文字の長さ (秒)", 0, 10, 0.3, 2, 0, 2),
                 C("reverse", "逆順 (最後の文字から)"),
+                new ParamDefinition { Key = "unit", Name = "単位", Kind = ParamKind.Choice, Choices = TextAnimUnits },
+                new ParamDefinition { Key = "order", Name = "順番", Kind = ParamKind.Choice, Choices = TextAnimOrders },
+                new ParamDefinition { Key = "exit", Name = "消え方", Kind = ParamKind.Choice, Choices = TextExits },
+                // 波打つ (14): 1 回の周期・高さ / カラオケ (15): 塗る色 / カウントアップ (17): 数える時間
+                new() { Key = "period", Name = "波の周期 (秒)", Min = 0.05, Max = 60, Default = 1, Decimals = 2, SoftMin = 0.1, SoftMax = 5, ShowWhenKey = "anim", ShowWhenValues = new[] { 14 } },
+                new() { Key = "waveHeight", Name = "波の高さ (%)", Min = 0, Max = 200, Default = 25, Decimals = 1, ShowWhenKey = "anim", ShowWhenValues = new[] { 14 } },
+                new ParamDefinition { Key = "color2", Name = "塗る色", Kind = ParamKind.Color, DefaultText = "#FFD040", ShowWhenKey = "anim", ShowWhenValues = new[] { 15 } },
+                new() { Key = "countTime", Name = "数える時間 (秒)", Min = 0, Max = 3600, Default = 1.5, Decimals = 2, SoftMin = 0, SoftMax = 10, ShowWhenKey = "anim", ShowWhenValues = new[] { 17 } },
                 new ParamDefinition { Key = "text", Name = "テキスト", Kind = ParamKind.MultilineText, DefaultText = "テキスト" },
             },
         });
