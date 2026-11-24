@@ -1117,3 +1117,26 @@ Z軸回転 = Z rotation
 動き方 = Easing
 アウトの種類 = Out type
 インと同じ = Same as in
+# アニメーション効果の追加
+円運動 = Circle
+楕円軌道 = Ellipse orbit
+8 の字 = Figure eight
+ぷるぷる (ゼリー) = Jelly wobble
+呼吸 = Breathe
+色相が回る = Hue cycle
+虹色が流れる = Flowing rainbow
+明るさの脈動 = Brightness pulse
+心臓の鼓動 (2 拍) = Heartbeat (double beat)
+首振り = Head turn
+旗のようになびく = Waving flag
+跳ねながら往復 = Hop back and forth
+手ぶれ = Handheld camera
+ゆっくりズーム・パン = Slow zoom and pan (Ken Burns)
+カーソル点滅 = Blinking cursor
+明るさの変化 (%) = Brightness change (%)
+戻るときに向きを変える = Turn around on the way back
+開始の遅延 (秒) = Start delay (s)
+位相 (度) = Phase (degrees)
+繰り返す回数 (0 で無限) = Repeat count (0 = forever)
+中心X (回転・拡大の中心) = Center X (for rotation and scale)
+中心Y (回転・拡大の中心) = Center Y (for rotation and scale)

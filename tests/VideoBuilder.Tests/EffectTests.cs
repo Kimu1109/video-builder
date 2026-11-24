@@ -653,4 +653,104 @@ public class EffectTests
             }
         }
     }
+
+    /// <summary>白い正方形 (40) に、アニメーション効果 type をかける。</summary>
+    private static (Project P, Effect E, int Fps) Animated(int type, int size = 40)
+    {
+        var p = Small();
+        var o = AddShape(p, 0, "#FFFFFF", size, length: 600);
+        var e = ObjectFactory.AddFilter(o, "filter.anim");
+        e.Values["type"] = type.ToString();
+        return (p, e, (int)Math.Round(p.Settings.Fps.Value));
+    }
+
+    [Fact]
+    public void Animation_delay_count_phase_and_anchor_apply_to_every_type()
+    {
+        // 円運動 (半径 100): 遅延の間は元の位置、遅延のあとは円の上
+        var (p, e, fps) = Animated(14);
+        e.Tracks["strength"] = new AnimatedValue(100);
+        e.Tracks["delay"] = new AnimatedValue(1);
+        using (var bmp = Render(p, fps / 2)) Assert.Equal(SKColors.White, bmp.GetPixel(160, 120));
+        using (var bmp = Render(p, fps)) Assert.Equal(SKColors.White, bmp.GetPixel(260, 120));   // 位相 0 は右端
+
+        // 位相 90 度: 始めから円の下にいる
+        e.Tracks["delay"] = new AnimatedValue(0);
+        e.Tracks["phase"] = new AnimatedValue(90);
+        using (var bmp = Render(p, 0)) Assert.Equal(SKColors.White, bmp.GetPixel(160, 220));
+
+        // 繰り返す回数: 横揺れ 1 回 (1 秒) で止まり、元の位置に戻る
+        var (q, f, qfps) = Animated(7);
+        f.Tracks["strength"] = new AnimatedValue(100);
+        f.Tracks["count"] = new AnimatedValue(1);
+        using (var moving = Render(q, qfps / 4)) Assert.Equal(SKColors.Black, moving.GetPixel(160, 120));
+        using (var stopped = Render(q, qfps * 5 / 4)) Assert.Equal(SKColors.White, stopped.GetPixel(160, 120));
+
+        // 回転・拡大の中心: 正方形 (80) を左上の角を中心に 90 度 (時計回り) 回すと、角の左下へ回り込む
+        var (r, g, rfps) = Animated(2, 80);
+        g.Tracks["speed"] = new AnimatedValue(0.25);
+        g.Tracks["ax"] = new AnimatedValue(-40);
+        g.Tracks["ay"] = new AnimatedValue(-40);
+        using (var bmp = Render(r, rfps))
+        {
+            Assert.Equal(SKColors.White, bmp.GetPixel(120 - 40, 80 + 40));   // 角の左下 (回り込んだ先)
+            Assert.Equal(SKColors.Black, bmp.GetPixel(160, 120));            // 元の中心はもう覆っていない
+        }
+    }
+
+    [Fact]
+    public void Jelly_keeps_the_anchor_point_fixed_while_stretching()
+    {
+        var (p, e, fps) = Animated(17, 80);
+        e.Tracks["strength"] = new AnimatedValue(50);
+        e.Tracks["ay"] = new AnimatedValue(40);                      // 下の端を中心にする
+        using var bmp = Render(p, fps / 4);                          // いちばん横に伸びたところ (1.5 倍)
+        int top = -1, bottom = -1, left = 999;
+        for (int y = 0; y < 240; y++) if (bmp.GetPixel(160, y).Red > 128) { if (top < 0) top = y; bottom = y; }
+        for (int x = 0; x < 320; x++) if (bmp.GetPixel(x, 150).Red > 128) { left = x; break; }
+        Assert.InRange(bottom, 158, 160);                            // 下の端は動かない
+        Assert.InRange(top, 104, 110);                               // 高さは 80 / 1.5 ≒ 53
+        Assert.InRange(left, 99, 102);                               // 幅は 120
+    }
+
+    [Fact]
+    public void Color_animations_change_the_colors_and_the_cursor_follows_the_text()
+    {
+        // 色相が回る: 赤が 1/3 回ると緑になる
+        var p = Small();
+        var o = AddShape(p, 0, "#FF0000", 80, length: 600);
+        var e = Filter(o, "filter.anim", ("speed", 1.0 / 3));
+        e.Values["type"] = "19";
+        int fps = (int)Math.Round(p.Settings.Fps.Value);
+        using (var bmp = Render(p, fps))
+        {
+            var c = bmp.GetPixel(160, 120);
+            Assert.True(c.Green > 90 && c.Red < 30 && c.Blue < 30, "緑になっていない: " + c);   // 明るさを保つので暗めの緑
+        }
+        // 明るさの脈動: 半周期で白に近づく
+        e.Values["type"] = "21";
+        e.Tracks["strength"] = new AnimatedValue(100);
+        e.Tracks["speed"] = new AnimatedValue(1);
+        using (var bmp = Render(p, fps / 2)) Assert.True(bmp.GetPixel(160, 120).Green > 200, "明るくなっていない");
+
+        // カーソル点滅: 文字の右に棒が出て、後半は消える
+        var q = Small();
+        var t = ObjectFactory.Create(EffectRegistry.Text, 0, 0, 600);
+        t.Main.Values["text"] = "ABC";
+        t.Main.Values["color"] = "#000000";       // 文字は黒 (背景と同じ) にして、棒だけを見る
+        p = q;
+        q.Root.Objects.Add(t);
+        var c2 = Filter(t, "filter.anim");
+        c2.Values["type"] = "28";
+        c2.Values["color"] = "#FFFFFF";
+        int White(SKBitmap b) { int n = 0; for (int y = 0; y < 240; y++) for (int x = 0; x < 320; x++) if (b.GetPixel(x, y).Red > 200) n++; return n; }
+        using (var on = Render(q, 0))
+        {
+            int rightmost = -1;
+            for (int y = 0; y < 240; y++) for (int x = 0; x < 320; x++) if (on.GetPixel(x, y).Red > 200) rightmost = Math.Max(rightmost, x);
+            Assert.True(White(on) > 50, "カーソルが描かれていない");
+            Assert.True(rightmost > 180, "カーソルが文字の右にない: " + rightmost);
+        }
+        using (var off = Render(q, fps * 3 / 4)) Assert.Equal(0, White(off));
+    }
 }

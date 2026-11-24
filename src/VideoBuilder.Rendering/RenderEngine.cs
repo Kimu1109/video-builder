@@ -684,7 +684,7 @@ public sealed class RenderEngine : IDisposable
                 "filter.transition" => e.GetInt("type") is 0 or (>= 6 and <= 10) or 12 or 13 or (>= 18 and <= 26)
                     // プッシュ・白 / 黒で切り替え・キューブ回転・カードを裏返す・重力で落下・飛び去る
                     or (>= 28 and <= 31) or 45 or 46 or (>= 69 and <= 74) or 84 or 85,
-                "filter.anim" => e.GetInt("type") != 13,   // リール回転はぼかしの長さがピクセル単位
+                "filter.anim" => e.GetInt("type") is not (13 or 24 or 28),   // リール回転のぼかし・旗の波・カーソルの棒はピクセル単位
                 _ => false,
             };
             if (!independent) return true;
