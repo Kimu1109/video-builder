@@ -121,6 +121,7 @@ public static class EffectRegistry
                 T("position", "開始位置", 0, 36000, 0, 2, 0, 600),
                 T("speed", "再生速度", 0, 2000, 100, 1, 0, 400),
                 C("loop", "ループ再生"),
+                C("reverse", "逆再生"),
                 // アニメーション WebP・GIF も動画として選べる
                 new ParamDefinition { Key = "file", Name = "ファイル", Kind = ParamKind.File, FileExtensions = VideoExtensions.Concat(AnimatedImageFiles.Extensions).ToArray() },
             },
@@ -511,6 +512,82 @@ public static class EffectRegistry
         F("filter.script", "スクリプト制御", "Icon.Code",
             new ParamDefinition { Key = "code", Name = "Lua スクリプト", Kind = ParamKind.MultilineText, DefaultText = "-- obj.ox, obj.oy : 位置のずれ   obj.zoom : 拡大率 (1 = 等倍)\n-- obj.rz : 回転   obj.alpha : 不透明度 (1 = そのまま)\nobj.oy = math.sin(obj.time * 4) * 20" });
 
+        // ---- 色 (追加) ----
+        static ParamDefinition Ch(string key, string name, string[] choices, int def = 0) => new() { Key = key, Name = name, Kind = ParamKind.Choice, Choices = choices, Default = def };
+        F("filter.lut", "LUT (カラーグレーディング)", "Icon.Palette",
+            new ParamDefinition { Key = "file", Name = "LUT ファイル (.cube)", Kind = ParamKind.File, FileExtensions = new[] { "cube" } },
+            T("strength", "強さ (%)", 0, 100, 100, 1));
+        F("filter.curves", "トーンカーブ", "Icon.Tune",
+            Ch("channel", "チャンネル", new[] { "RGB", "赤", "緑", "青" }),
+            T("p0", "黒 (入力 0)", 0, 255, 0, 0), T("p1", "暗部 (入力 64)", 0, 255, 64, 0), T("p2", "中間 (入力 128)", 0, 255, 128, 0),
+            T("p3", "明部 (入力 192)", 0, 255, 192, 0), T("p4", "白 (入力 255)", 0, 255, 255, 0));
+        F("filter.whitebalance", "色温度・色かぶり", "Icon.Palette",
+            T("temperature", "色温度 (− 青 / + 黄)", -100, 100, 0, 1), T("tint", "色かぶり (− 緑 / + 赤紫)", -100, 100, 0, 1));
+        F("filter.shadowhighlight", "シャドウ・ハイライト", "Icon.Tune",
+            T("shadows", "暗部を明るく", -100, 100, 30, 1), T("highlights", "明部を暗く", -100, 100, 30, 1));
+        F("filter.gradmap", "グラデーションマップ", "Icon.Gradient",
+            Col("dark", "暗い所の色", "#1B2A6B"), Col("mid", "中間の色", "#D4507A"), C("useMid", "中間の色を使う (3 色)", true), Col("light", "明るい所の色", "#FFE29A"),
+            T("strength", "強さ (%)", 0, 100, 100, 1));
+        F("filter.look", "カラープリセット", "Icon.Palette",
+            Ch("preset", "プリセット", LookPresets), T("strength", "強さ (%)", 0, 100, 100, 1));
+        // ---- 質感 ----
+        F("filter.grain", "フィルム粒子", "Icon.GridOn",
+            T("amount", "強さ", 0, 100, 30, 1), T("size", "粒の大きさ", 0.5, 10, 1.5, 1), C("color", "色の粒"), C("animate", "毎フレーム変える", true), T("seed", "乱数シード", 0, 99999, 0, 0, 0, 100));
+        F("filter.vhs", "VHS", "Icon.Movie",
+            T("strength", "強さ", 0, 200, 100, 1), T("noise", "ノイズ", 0, 100, 30, 1), T("wobble", "揺れ", 0, 100, 30, 1), T("seed", "乱数シード", 0, 99999, 0, 0, 0, 100));
+        F("filter.crt", "ブラウン管", "Icon.Movie",
+            T("scanline", "走査線", 0, 100, 50, 1), T("mask", "RGB の格子", 0, 100, 40, 1), T("curvature", "画面の丸み", 0, 100, 20, 1), T("vignette", "周辺減光", 0, 100, 30, 1));
+        F("filter.glitch", "グリッチ", "Icon.GridOn",
+            T("strength", "強さ", 0, 100, 50, 1), T("frequency", "頻度 (%)", 0, 100, 30, 1), T("block", "ブロックの大きさ", 1, 500, 30, 0, 1, 200), T("seed", "乱数シード", 0, 99999, 0, 0, 0, 100));
+        F("filter.halftone", "ハーフトーン (網点)", "Icon.GridOn",
+            T("size", "網点の間隔", 2, 200, 8, 1, 2, 50), T("angle", "角度", -3600, 3600, 45, 1, -180, 180),
+            Ch("mode", "色", new[] { "白黒", "元の色", "CMY (4 色刷り風)" }));
+        F("filter.paint", "油絵・水彩", "Icon.Palette",
+            Ch("type", "種類", new[] { "油絵", "水彩" }), T("radius", "筆の大きさ", 1, 30, 8, 0));
+        F("filter.sketch", "スケッチ (鉛筆画)", "Icon.BorderStyle",
+            T("strength", "線の濃さ", 0, 400, 100, 1, 0, 200), C("color", "色を残す"), Col("paper", "紙の色", "#F6F1E7"));
+        F("filter.pixelart", "ドット絵化", "Icon.GridOn",
+            T("size", "ドットの大きさ", 1, 200, 6, 0, 1, 40), T("levels", "色の段階", 2, 32, 5, 0), C("dither", "ディザ (網目で中間色を表す)", true));
+        F("filter.ascii", "ASCII アート", "Icon.Title",
+            T("size", "文字の大きさ", 4, 100, 10, 0, 4, 40), C("color", "元の色で描く", true), Col("background", "背景色", "#000000"),
+            Ch("chars", "文字", new[] { "記号", "ブロック", "数字" }));
+        // ---- 光 (追加) ----
+        F("filter.lensflare", "レンズフレア", "Icon.LightMode",
+            T("x", "光源X", -99999.9, 99999.9, -200, 1, -2000, 2000), T("y", "光源Y", -99999.9, 99999.9, -150, 1, -2000, 2000),
+            T("strength", "強さ (%)", 0, 400, 100, 1, 0, 200), T("size", "大きさ (%)", 1, 1000, 100, 1, 10, 300), Col("color", "光の色", "#FFD8A0"));
+        F("filter.lightleak", "光漏れ", "Icon.LightMode",
+            T("strength", "強さ (%)", 0, 200, 60, 1), T("speed", "動く速さ", 0, 10, 0.3, 2), T("seed", "乱数シード", 0, 99999, 0, 0, 0, 100));
+        // ---- 変形 (追加) ----
+        F("filter.swirl", "渦巻き", "Icon.Gradient",
+            T("angle", "ねじれ (度)", -3600, 3600, 180, 1, -720, 720), T("radius", "範囲", 1, 16384, 300, 0, 1, 2000),
+            T("x", "中心X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "中心Y", -99999.9, 99999.9, 0, 1, -2000, 2000));
+        F("filter.bulge", "膨張・収縮", "Icon.Gradient",
+            T("amount", "強さ (− 縮む / + ふくらむ)", -100, 100, 50, 1), T("radius", "範囲", 1, 16384, 300, 0, 1, 2000),
+            T("x", "中心X", -99999.9, 99999.9, 0, 1, -2000, 2000), T("y", "中心Y", -99999.9, 99999.9, 0, 1, -2000, 2000));
+        F("filter.fisheye", "魚眼レンズ", "Icon.Gradient",
+            T("strength", "強さ (− 糸巻き・補正 / + 魚眼)", -100, 100, 50, 1));
+        F("filter.mirrortile", "ミラータイル", "Icon.GridOn",
+            T("countX", "横の数", 1, 50, 2, 0, 1, 10), T("countY", "縦の数", 1, 50, 2, 0, 1, 10), C("mirror", "交互に反転する", true));
+        // ---- 時間・合成 ----
+        F("filter.strobe", "コマ落とし", "Icon.Movie", T("step", "何フレームごとに動かすか", 1, 600, 3, 0, 1, 30));
+        F("filter.trail", "残像", "Icon.Movie",
+            T("count", "残像の数", 1, 30, 5, 0), T("interval", "間隔 (フレーム)", 1, 60, 2, 0, 1, 10), T("fade", "薄くなる割合 (%)", 0, 100, 70, 1));
+        F("filter.trackmatte", "トラックマット", "Icon.Image",
+            T("layer", "マットのレイヤー (0 で 1 つ上)", 0, 1000, 0, 0, 0, 30),
+            Ch("mode", "使い方", new[] { "アルファ (形で切り抜く)", "アルファ反転", "ルミナンス (明るさで切り抜く)", "ルミナンス反転" }));
+        // ---- 生成 ----
+        F("filter.particles", "パーティクル", "Icon.Category",
+            Ch("type", "種類", ParticleTypes), T("count", "数", 1, 2000, 80, 0, 1, 500), T("speed", "速さ (%)", 0, 1000, 100, 1, 0, 300),
+            T("size", "大きさ (%)", 1, 1000, 100, 1, 10, 300), T("wind", "風 (横の流れ)", -1000, 1000, 0, 1, -300, 300),
+            Col("color", "色 (空欄で種類ごとの色)", ""), T("seed", "乱数シード", 0, 99999, 0, 0, 0, 100));
+        F("filter.speedlines", "集中線・スピード線", "Icon.Category",
+            Ch("type", "種類", new[] { "集中線", "横のスピード線", "縦のスピード線" }), T("count", "本数", 1, 1000, 80, 0, 1, 300),
+            T("inner", "空ける範囲 (%)", 0, 100, 45, 1), T("thickness", "太さ (%)", 1, 1000, 100, 1, 10, 300), Col("color", "線の色", "#FFFFFF"),
+            C("animate", "毎フレーム変える", true), T("seed", "乱数シード", 0, 99999, 0, 0, 0, 100));
+        F("filter.frame", "枠", "Icon.BorderStyle",
+            Ch("type", "種類", new[] { "額縁", "ポラロイド", "映画の黒帯", "角丸" }), T("width", "幅", 0, 4000, 30, 0, 0, 300),
+            Col("color", "色", "#FFFFFF"), T("radius", "角の丸み", 0, 4000, 24, 0, 0, 300), C("shadow", "影を付ける", true));
+
         // ---- 音声のエフェクト ----
         void A(string id, string name, string icon, params ParamDefinition[] ps) =>
             Register(new EffectDefinition { Id = id, Name = name, Category = EffectCategory.AudioFilter, Icon = icon, Color = "#7A7A7A", Params = ps });
@@ -575,8 +652,15 @@ public static class EffectRegistry
     /// <summary>エフェクトを追加するメニューの分類 (この順に並べる)。</summary>
     public static readonly string[] FilterGroups =
     {
-        "色", "ぼかし", "光", "縁・輪郭", "キー (透過)", "変形", "切り抜き・マスク", "動き・配置", "切り替え・その他",
+        "色", "ぼかし", "光", "縁・輪郭", "キー (透過)", "変形", "切り抜き・マスク", "動き・配置", "質感", "時間・合成", "生成", "切り替え・その他",
     };
+    /// <summary>カラープリセットの種類。番号はプロジェクトファイルに残るので、増やすときは末尾に足す。</summary>
+    public static readonly string[] LookPresets =
+    {
+        "セピア", "ティール & オレンジ (映画風)", "褪色 (ノスタルジー)", "クール", "ウォーム", "白黒 (高コントラスト)", "ビビッド", "ブリーチバイパス", "夕焼け", "月明かり",
+    };
+    /// <summary>パーティクルの種類。</summary>
+    public static readonly string[] ParticleTypes = { "紙吹雪", "雪", "雨", "火花", "泡", "きらめき" };
 
     private static string FilterGroupOf(string id) => id switch
     {
@@ -591,6 +675,12 @@ public static class EffectRegistry
             or "filter.freeform" => "変形",
         "filter.clip" or "filter.diagclip" or "filter.mask" => "切り抜き・マスク",
         "filter.anim" or "filter.basic" or "filter.shake" or "filter.loop" or "filter.shatter" or "filter.scatter" or "filter.circle" or "filter.random" => "動き・配置",
+        "filter.lut" or "filter.curves" or "filter.whitebalance" or "filter.shadowhighlight" or "filter.gradmap" or "filter.look" => "色",
+        "filter.grain" or "filter.vhs" or "filter.crt" or "filter.glitch" or "filter.halftone" or "filter.paint" or "filter.sketch" or "filter.pixelart" or "filter.ascii" => "質感",
+        "filter.lensflare" or "filter.lightleak" => "光",
+        "filter.swirl" or "filter.bulge" or "filter.fisheye" or "filter.mirrortile" => "変形",
+        "filter.strobe" or "filter.trail" or "filter.trackmatte" => "時間・合成",
+        "filter.particles" or "filter.speedlines" or "filter.frame" => "生成",
         _ => "切り替え・その他",
     };
 
