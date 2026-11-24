@@ -62,6 +62,8 @@ public static class EffectRegistry
     {
         "震える", "点滅", "回転", "鼓動 (拡大縮小)", "揺れ (傾く)", "浮遊 (上下)", "弾む", "横揺れ",
         "振り子", "反復移動", "回転 (X軸)", "回転 (Y軸)", "立方体の面", "リール回転",
+        "円運動", "楕円軌道", "8 の字", "ぷるぷる (ゼリー)", "呼吸", "色相が回る", "虹色が流れる", "明るさの脈動",
+        "心臓の鼓動 (2 拍)", "首振り", "旗のようになびく", "跳ねながら往復", "手ぶれ", "ゆっくりズーム・パン", "カーソル点滅",
     };
     /// <summary>エフェクト「アニメーション効果」の立方体の面。</summary>
     public static readonly string[] CubeFaces = { "前", "後ろ", "右", "左", "上", "下" };
@@ -456,18 +458,30 @@ public static class EffectRegistry
             new() { Key = key, Name = name, Min = min, Max = max, Default = def, Decimals = dec, SoftMin = softMin, SoftMax = softMax, ShowWhenKey = "type", ShowWhenValues = types };
         F("filter.anim", "アニメーション効果", "Icon.Play",
             new ParamDefinition { Key = "type", Name = "種類", Kind = ParamKind.Choice, Choices = AnimationTypes },
-            AT("strength", "強さ", -99999, 99999, 20, 1, 0, 200, 0, 3, 4, 5, 6, 7, 8),
-            AT("speed", "速さ (回/秒)", -100, 100, 1, 2, -10, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
-            AT("dx", "移動量X", -99999, 99999, 200, 1, -2000, 2000, 9), AT("dy", "移動量Y", -99999, 99999, 0, 1, -2000, 2000, 9),
+            AT("strength", "強さ", -99999, 99999, 20, 1, 0, 200, 0, 3, 4, 5, 6, 7, 8, 14, 17, 18, 21, 22, 23, 24, 25, 26, 27),
+            AT("speed", "速さ (回/秒)", -100, 100, 1, 2, -10, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28),
+            AT("dx", "移動量X", -99999, 99999, 200, 1, -2000, 2000, 9, 15, 16, 25, 27), AT("dy", "移動量Y", -99999, 99999, 0, 1, -2000, 2000, 9, 15, 16, 25, 27),
             new ParamDefinition { Key = "face", Name = "面", Kind = ParamKind.Choice, Choices = CubeFaces, ShowWhenKey = "type", ShowWhenValues = new[] { 12 } },
             AT("cube", "立方体の大きさ (0 で幅)", 0, 99999, 0, 0, 0, 2000, 12),
             AT("turns", "回転数", -50, 50, 1, 1, -10, 10, 13), AT("reelBlur", "ブラー", 0, 200, 100, 0, null, null, 13),
             new ParamDefinition { Key = "reelHorizontal", Name = "横回転", Kind = ParamKind.Check, ShowWhenKey = "type", ShowWhenValues = new[] { 13 } },
             AT("rate", "揺れる回数 (回/秒)", 0.1, 240, 30, 1, 0.1, 60, 0),
-            AT("rotation", "回転の揺れ", 0, 360, 0, 1, 0, 45, 0),
-            AT("seed", "乱数シード", 0, 99999, 0, 0, 0, 100, 0),
-            AT("depth", "消える濃さ (%)", 0, 100, 100, 1, null, null, 1),
-            new ParamDefinition { Key = "smooth", Name = "なめらかに揺らす", Kind = ParamKind.Check, ShowWhenKey = "type", ShowWhenValues = new[] { 0 } });
+            AT("rotation", "回転の揺れ", 0, 360, 0, 1, 0, 45, 0, 26),
+            AT("seed", "乱数シード", 0, 99999, 0, 0, 0, 100, 0, 26),
+            AT("depth", "消える濃さ (%)", 0, 100, 100, 1, null, null, 1, 28),
+            new ParamDefinition { Key = "smooth", Name = "なめらかに揺らす", Kind = ParamKind.Check, ShowWhenKey = "type", ShowWhenValues = new[] { 0 } },
+            // 呼吸: 明るさの変化 / 旗: 波長 / 跳ねながら往復: 向きを変える / カーソル点滅: 色・太さ
+            AT("glow", "明るさの変化 (%)", -100, 100, 15, 1, -50, 50, 18),
+            AT("wavelength", "波長", 1, 10000, 240, 0, 10, 1000, 24),
+            new ParamDefinition { Key = "turn", Name = "戻るときに向きを変える", Kind = ParamKind.Check, Default = 1, ShowWhenKey = "type", ShowWhenValues = new[] { 25 } },
+            new ParamDefinition { Key = "color", Name = "色", Kind = ParamKind.Color, DefaultText = "#FFFFFF", ShowWhenKey = "type", ShowWhenValues = new[] { 28 } },
+            AT("width", "太さ (%)", 1, 100, 8, 1, 1, 30, 28),
+            // どの種類にも効く
+            T("delay", "開始の遅延 (秒)", 0, 3600, 0, 2, 0, 10),
+            T("phase", "位相 (度)", -3600, 3600, 0, 1, -360, 360),
+            T("count", "繰り返す回数 (0 で無限)", 0, 10000, 0, 0, 0, 20),
+            T("ax", "中心X (回転・拡大の中心)", -99999.9, 99999.9, 0, 1, -1000, 1000),
+            T("ay", "中心Y (回転・拡大の中心)", -99999.9, 99999.9, 0, 1, -1000, 1000));
         F("filter.script", "スクリプト制御", "Icon.Code",
             new ParamDefinition { Key = "code", Name = "Lua スクリプト", Kind = ParamKind.MultilineText, DefaultText = "-- obj.ox, obj.oy : 位置のずれ   obj.zoom : 拡大率 (1 = 等倍)\n-- obj.rz : 回転   obj.alpha : 不透明度 (1 = そのまま)\nobj.oy = math.sin(obj.time * 4) * 20" });
 

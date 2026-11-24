@@ -417,11 +417,29 @@ public static partial class Effects
 
         public Sprite Apply(Sprite s, EffectArgs a)
         {
-            double t = a.Time;
-            float strength = a.Track("strength"), speed = a.Track("speed");
+            int type = a.Effect.GetInt("type");
+            float speed = a.Track("speed");
+            // 開始の遅延・繰り返す回数・位相 (どの種類にも効く)
+            double t = a.Time - a.Track("delay");
+            if (t < 0) return s;
+            if (IsPeriodicAnimation(type) && speed != 0)
+            {
+                int count = (int)a.Track("count");
+                if (count > 0) t = Math.Min(t, count / Math.Abs(speed));
+                t += a.Track("phase") / 360.0 / speed;
+            }
+            var before = a.Context.Modifiers;
+            var result = type >= 14 ? MoreAnimation(s, a, type, t, speed) : Core(s, a, type, t, speed);
+            ApplyAnimationAnchor(s, a, before);
+            return result;
+        }
+
+        private static Sprite Core(Sprite s, EffectArgs a, int type, double t, float speed)
+        {
+            float strength = a.Track("strength");
             double phase = 2 * Math.PI * speed * t;
             ref var m = ref a.Context.Modifiers;
-            switch (a.Effect.GetInt("type"))
+            switch (type)
             {
                 case 0:   // 振動
                 {
