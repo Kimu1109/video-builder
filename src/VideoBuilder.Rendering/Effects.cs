@@ -18,6 +18,7 @@ public static partial class Effects
         Register(new Flip()); Register(new Fade()); Register(new ScriptEffect());
         Register(new Mask()); Register(new Transition());
         RegisterMore();
+        RegisterFilters();
         RegisterExtra();
         RegisterText();
     }

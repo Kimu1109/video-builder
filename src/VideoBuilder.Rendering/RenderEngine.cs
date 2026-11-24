@@ -219,12 +219,50 @@ public sealed class RenderEngine : IDisposable
                         break;
                     case EffectCategory.VideoSource:
                     {
+                        // トラックマット: マットのレイヤーのオブジェクトを別に描いておき、その形 (明るさ) で切り抜く
+                        using var matte = TrackMatteOf(ctx, scene, obj, bounds, frame, surface, depth);
+                        if (matte != null) FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth, surface);
+                        // コマ落とし・残像: 別の時刻のオブジェクトも描く (古いものから)
+                        foreach (var (of, fade, copy) in ObjectFrames(obj, bounds, frame))
+                        {
+                            var octx = of == frame ? ctx : new RenderContext
+                            {
+                                Project = project, Frame = of, Draft = ctx.Draft, Gpu = ctx.Gpu, LoadImage = ctx.LoadImage, LoadVideoFrame = ctx.LoadVideoFrame,
+                            };
+                            _decoderKeySuffix = copy == 0 ? "" : "#trail" + copy;
+                            try { DrawVideoObject(octx, obj, of, fade, matte); }
+                            finally
+                            {
+                                _decoderKeySuffix = "";
+                                // 別の時刻の文脈で作った絵は、待たせて描くことがあるので、フレームの終わりまで残す
+                                if (!ReferenceEquals(octx, ctx)) { ctx.Temporaries.AddRange(octx.Temporaries); octx.Temporaries.Clear(); }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth, surface);
+        }
+        finally
+        {
+            if (depth != 0) ctx.DisposeTemporaries();
+        }
+
+        // 映像のオブジェクトを 1 つ描く (frame はオブジェクトを評価する時刻。コマ落とし・残像では今のフレームと違う)
+        void DrawVideoObject(RenderContext ctx, TimelineObject obj, int frame, float fade, SKImage? matte)
+        {
+            var bounds = obj.Bounds;
+            var def = obj.Main.Definition;
+            {
+                {
+                    {
                         _sourceScale = 1;
                         _sourceAnimated = false;
                         _sourceStatic = false;
                         _detail = Detail(ctx, obj, bounds, frame, groups, cameras.Count > 0);
                         var src = GetSource(ctx, obj, bounds, frame, depth);
-                        if (src == null) break;
+                        if (src == null) return;
                         var sprite = Sprite.Centered(src);
                         if (_sourceScale != 1)
                         {
@@ -237,27 +275,106 @@ public sealed class RenderEngine : IDisposable
                         int next = ApplyCachedFilters(ctx, obj, bounds, frame, depth, ref sprite);
                         sprite = Effects.ApplyRange(sprite, obj, bounds, ctx, next, obj.Effects.Count);
                         bool changes = def.Id == EffectRegistry.Video || (def.Id == EffectRegistry.SceneRef && !_sourceStatic) || (def.Id == EffectRegistry.Vector && _sourceAnimated);
-                        if (Place(sprite, obj, bounds, frame, groups, cameras, W, H, ctx.Modifiers, scene, ctx.Project) is not { } place) break;
+                        if (Place(sprite, obj, bounds, frame, groups, cameras, W, H, ctx.Modifiers, scene, ctx.Project) is not { } place) return;
+                        if (fade < 1) place = place with { Alpha = place.Alpha * fade };
+                        // 残像は選択枠に入れない (今の時刻のものだけ)
+                        var quads = depth == 0 && fade >= 1 ? LastQuads : null;
+                        if (matte != null)
+                        {
+                            // トラックマット: 層に描いてから、マットの形で切り抜いて重ねる
+                            int mode = obj.Effects.First(e => e.Enabled && e.DefinitionId == "filter.trackmatte").GetInt("mode");
+                            canvas.SaveLayer(null);
+                            DrawPlaced(canvas, ApplyDepthOfField(ctx, sprite, obj, place, cameras, depth), sprite, obj, place, W, quads, Draft, null, changes, surface);
+                            using (var cf = mode >= 2 ? SKColorFilter.CreateLumaColor() : null)
+                            using (var mp = new SKPaint { BlendMode = mode % 2 == 0 ? SKBlendMode.DstIn : SKBlendMode.DstOut, ColorFilter = cf })
+                            {
+                                canvas.Save();
+                                canvas.ResetMatrix();
+                                canvas.DrawImage(matte, 0, 0, mp);
+                                canvas.Restore();
+                            }
+                            canvas.Restore();
+                            return;
+                        }
                         if (place.Camera >= 0 && cameras[place.Camera].ZSort)
                         {
                             // 奥行きで並べ替える: 同じカメラのものが続く間は描かずに待たせる
                             if (deferred.Count > 0 && deferred[0].Place.Camera != place.Camera)
                                 FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth, surface);
                             deferred.Add(new DeferredDraw(sprite, obj, place, deferred.Count, changes));
-                            break;
+                            return;
                         }
                         FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth, surface);
-                        DrawPlaced(canvas, ApplyDepthOfField(ctx, sprite, obj, place, cameras, depth), sprite, obj, place, W, depth == 0 ? LastQuads : null, Draft, target, changes, surface);
-                        break;
+                        DrawPlaced(canvas, ApplyDepthOfField(ctx, sprite, obj, place, cameras, depth), sprite, obj, place, W, quads, Draft, target, changes, surface);
                     }
                 }
             }
-            FlushDeferred(canvas, deferred, cameras, W, H, depth == 0 ? LastQuads : null, target, ctx, depth, surface);
         }
-        finally
+    }
+
+    /// <summary>GetSource で動画を読むときのデコーダのキーに足す文字 (残像は、今の時刻とは別のデコーダで読む)。</summary>
+    private string _decoderKeySuffix = "";
+
+    /// <summary>
+    /// オブジェクトを描く時刻 (と不透明度・残像の番号) の並び。普通は今のフレーム 1 つ。
+    /// コマ落としがあれば、何フレームかごとの時刻に止める。残像があれば、間隔ずつ前の時刻を薄くして先に描く。
+    /// </summary>
+    private static List<(int Frame, float Fade, int Copy)> ObjectFrames(TimelineObject obj, int[] bounds, int frame)
+    {
+        var result = new List<(int, float, int)>();
+        Effect? strobe = null, trail = null;
+        foreach (var e in obj.Effects)
         {
-            if (depth != 0) ctx.DisposeTemporaries();
+            if (!e.Enabled) continue;
+            if (e.DefinitionId == "filter.strobe") strobe = e;
+            else if (e.DefinitionId == "filter.trail") trail = e;
         }
+        int Quantize(int f)
+        {
+            if (strobe == null) return f;
+            int step = Math.Max(1, (int)Math.Round(strobe.Eval("step", bounds, frame)));
+            return obj.Start + (f - obj.Start) / step * step;
+        }
+        if (trail != null)
+        {
+            int count = Math.Clamp((int)Math.Round(trail.Eval("count", bounds, frame)), 0, 30);
+            int interval = Math.Max(1, (int)Math.Round(trail.Eval("interval", bounds, frame)));
+            float fadeOut = (float)Math.Clamp(trail.Eval("fade", bounds, frame) / 100, 0, 1);
+            for (int k = count; k >= 1; k--)
+            {
+                int f = frame - k * interval;
+                if (f < obj.Start) continue;
+                result.Add((Quantize(f), 0.6f * (1 - fadeOut * k / Math.Max(1, count)), k));
+            }
+        }
+        result.Add((Quantize(frame), 1, 0));
+        return result;
+    }
+
+    /// <summary>
+    /// トラックマットのマット (描画先と同じ大きさの絵)。マットのレイヤー (表示の番号。0 なら 1 つ上のレイヤー) に今いるオブジェクトを、
+    /// そのレイヤーが非表示でも描く。トラックマットがない・マットのオブジェクトがいなければ null。
+    /// </summary>
+    private SKImage? TrackMatteOf(RenderContext ctx, Scene scene, TimelineObject obj, int[] bounds, int frame, SKSurface surface, int depth)
+    {
+        var tm = obj.Effects.FirstOrDefault(e => e.Enabled && e.DefinitionId == "filter.trackmatte");
+        if (tm == null || depth >= MaxSceneDepth) return null;
+        int n = (int)Math.Round(tm.Eval("layer", bounds, frame));
+        int layer = n <= 0 ? obj.Layer - 1 : n - 1;
+        if (layer < 0 || layer == obj.Layer) return null;
+        var matteObj = scene.ObjectsAt(frame).FirstOrDefault(o => o.Layer == layer && o.Enabled);
+        if (matteObj == null) return null;
+        var size = surface.Canvas.DeviceClipBounds;
+        using var ms = ctx.CreateSurface(size.Width, size.Height);
+        if (ms == null) return null;
+        ms.Canvas.Clear(SKColors.Transparent);
+        var m = surface.Canvas.TotalMatrix;
+        ms.Canvas.SetMatrix(m);
+        // マットだけのシーンを描く (レイヤーの表示・非表示によらない)
+        var only = new Scene { Objects = { matteObj } };
+        RenderScene(ctx, only, frame, ms, depth + 1);
+        ms.Canvas.Flush();
+        return ms.Snapshot();
     }
 
     /// <summary>待たせていたものを、奥 (カメラから遠い) から順に描く。同じ距離ならレイヤー順。</summary>
@@ -686,7 +803,9 @@ public sealed class RenderEngine : IDisposable
             {
                 // 色だけを変えるもの・描く位置だけを変えるもの・絵の大きさに対する割合で決まるもの
                 "filter.color" or "filter.mono" or "filter.fade" or "filter.levels" or "filter.posterize" or "filter.vignette"
-                    or "filter.extcolor" or "filter.hueconvert" or "filter.colorkey" or "filter.lumakey" or "filter.basic" or "filter.shake" => true,
+                    or "filter.extcolor" or "filter.hueconvert" or "filter.colorkey" or "filter.lumakey" or "filter.basic" or "filter.shake"
+                    or "filter.lut" or "filter.curves" or "filter.whitebalance" or "filter.shadowhighlight" or "filter.gradmap" or "filter.look"
+                    or "filter.strobe" or "filter.trail" or "filter.trackmatte" => true,
                 // フェード・スライド・ズーム・回転ズーム・ポップ (ワイプ・ぼかしはぼかしの幅がピクセル単位)
                 "filter.transition" => e.GetInt("type") is 0 or (>= 6 and <= 10) or 12 or 13 or (>= 18 and <= 26)
                     // プッシュ・白 / 黒で切り替え・キューブ回転・カードを裏返す・重力で落下・飛び去る
@@ -980,7 +1099,7 @@ public sealed class RenderEngine : IDisposable
             case EffectRegistry.Video:
             {
                 double t = SourceTime(p, obj, bounds, frame);
-                var image = Media.GetVideoFrame(obj.Id, main.GetString("file"), t, main.GetBool("loop"), out var scale, _detail);
+                var image = Media.GetVideoFrame(obj.Id + _decoderKeySuffix, main.GetString("file"), t, main.GetBool("loop"), out var scale, _detail);
                 _sourceScale = scale;
                 return image;
             }
@@ -1160,6 +1279,8 @@ public sealed class RenderEngine : IDisposable
         if (!o.Enabled || o.Effects.Count == 0) return true;
         // 親に付いていくものは、自分の値が変わらなくても親が動けば動く
         if (o.Draw?.Tracks.GetValueOrDefault("parent") is { } parent && parent.Values.Any(v => v >= 0.5)) return false;
+        // トラックマット (マットが動くと変わる)・残像・コマ落としは、ほかの時刻やオブジェクトを見る
+        if (o.Effects.Any(e => e.Enabled && e.DefinitionId is "filter.trackmatte" or "filter.trail" or "filter.strobe")) return false;
         var main = o.Main;
         switch (main.Definition.Category)
         {
@@ -1224,9 +1345,36 @@ public sealed class RenderEngine : IDisposable
     public static double SourceTime(Project p, TimelineObject obj, int[] bounds, int frame)
     {
         var main = obj.Main;
-        double speed = main.Eval("speed", bounds, frame) / 100.0;
-        double local = p.FrameToSeconds(frame - obj.Start + obj.SourceOffsetFrames);
-        return Math.Max(0, main.Eval("position", bounds, obj.Start) + local * speed);
+        double played = Played(p, obj, bounds, frame);
+        // 逆再生: オブジェクトの終わりで素材の始め (開始位置) になるように、後ろから再生する
+        if (main.GetBool("reverse")) played = Math.Max(0, Played(p, obj, bounds, obj.End + 1) - played);
+        return Math.Max(0, main.Eval("position", bounds, obj.Start) + played);
+    }
+
+    /// <summary>
+    /// オブジェクトの先頭から frame までに再生した素材の長さ (秒)。
+    /// 再生速度が一定なら 経過時間 × 速度。速度が途中で変わるとき (移動・中間点ごとの値) は、フレームごとの速度を足し合わせる
+    /// (スピードランプ。速度 0 の区間は止まる)。足し合わせは台形公式で、細かさは最大 2000 区間。
+    /// </summary>
+    private static double Played(Project p, TimelineObject obj, int[] bounds, int frame)
+    {
+        var main = obj.Main;
+        var sp = main.Tracks.GetValueOrDefault("speed");
+        bool varies = sp != null && (sp.IsMoving || sp.Values.Any(v => !v.Equals(sp.Values[0])));
+        if (!varies)
+            return p.FrameToSeconds(frame - obj.Start + obj.SourceOffsetFrames) * main.Eval("speed", bounds, frame) / 100.0;
+        double offset = p.FrameToSeconds(obj.SourceOffsetFrames) * sp!.Evaluate(bounds, obj.Start) / 100.0;
+        int n = frame - obj.Start;
+        if (n <= 0) return offset;
+        int steps = Math.Min(n, 2000);
+        double h = n / (double)steps, sum = 0, prev = sp.Evaluate(bounds, obj.Start);
+        for (int i = 1; i <= steps; i++)
+        {
+            double v = sp.Evaluate(bounds, obj.Start + (int)Math.Round(i * h));
+            sum += (prev + v) / 2 * h;
+            prev = v;
+        }
+        return offset + p.FrameToSeconds(1) * sum / 100.0;
     }
 
     private static SKColor ParseColor(string s) => SKColor.TryParse(s, out var c) ? c : SKColors.White;

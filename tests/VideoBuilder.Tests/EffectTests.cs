@@ -48,6 +48,10 @@ public class EffectTests
         "filter.ripple", "filter.polar", "filter.displace", "filter.mirror", "filter.kaleido", "filter.sphere", "filter.freeform",
         "filter.basic", "filter.shake", "filter.loop", "filter.imageblend", "filter.videoblend", "filter.deinterlace",
         "filter.shatter", "filter.scatter", "filter.circle", "filter.random",
+        "filter.lut", "filter.curves", "filter.whitebalance", "filter.shadowhighlight", "filter.gradmap", "filter.look",
+        "filter.grain", "filter.vhs", "filter.crt", "filter.glitch", "filter.halftone", "filter.paint", "filter.sketch", "filter.pixelart", "filter.ascii",
+        "filter.lensflare", "filter.lightleak", "filter.swirl", "filter.bulge", "filter.fisheye", "filter.mirrortile",
+        "filter.strobe", "filter.trail", "filter.trackmatte", "filter.particles", "filter.speedlines", "filter.frame",
     };
 
     [Fact]
