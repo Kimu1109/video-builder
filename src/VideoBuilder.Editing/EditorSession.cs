@@ -578,6 +578,8 @@ public sealed class EditorSession
                 e.Tracks[key == "in" ? "out" : "in"] = new AnimatedValue(0, o.Sections);
             }
             e.Tracks[key] = new AnimatedValue(Math.Round(seconds, 2), o.Sections);
+            // 音声のクロスフェードは等パワーのカーブにする (つなぎ目で音量が下がらない)
+            if (definitionId == "audio.fade") e.Values["curve"] = "1";
         }
     }
 
