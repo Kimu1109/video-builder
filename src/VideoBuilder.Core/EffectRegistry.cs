@@ -591,12 +591,34 @@ public static class EffectRegistry
         // ---- 音声のエフェクト ----
         void A(string id, string name, string icon, params ParamDefinition[] ps) =>
             Register(new EffectDefinition { Id = id, Name = name, Category = EffectCategory.AudioFilter, Icon = icon, Color = "#7A7A7A", Params = ps });
-        A("audio.fade", "音声フェード", "Icon.VolumeUp", T("in", "イン", 0, 30, 0.5, 2), T("out", "アウト", 0, 30, 0.5, 2));
+        A("audio.fade", "音声フェード", "Icon.VolumeUp", T("in", "イン", 0, 30, 0.5, 2), T("out", "アウト", 0, 30, 0.5, 2),
+            // 等パワーは、2 つの音を重ねて切り替える (クロスフェード) ときに、つなぎ目で音量が下がらない
+            new ParamDefinition { Key = "curve", Name = "カーブ", Kind = ParamKind.Choice, Choices = new[] { "直線", "等パワー (クロスフェード向け)", "なめらか (S 字)" } });
         A("audio.echo", "エコー", "Icon.MusicNote", T("delay", "遅延 (ms)", 1, 2000, 250, 0, 1, 1000), T("feedback", "繰り返し", 0, 95, 40, 0), T("mix", "混ぜる量", 0, 100, 40, 0));
         A("audio.eq", "イコライザ", "Icon.Tune", T("low", "低音 (dB)", -24, 24, 0, 1), T("mid", "中音 (dB)", -24, 24, 0, 1), T("high", "高音 (dB)", -24, 24, 0, 1));
         A("audio.duck", "自動音量調整 (ダッキング)", "Icon.VolumeUp",
             T("amount", "下げる量 (dB)", 0, 60, 12, 1), T("threshold", "反応する大きさ (dB)", -80, 0, -40, 1),
             T("attack", "下げる速さ (秒)", 0.001, 5, 0.05, 3, 0.001, 1), T("release", "戻す速さ (秒)", 0.01, 10, 0.4, 2, 0.01, 3));
+        A("audio.reverb", "リバーブ", "Icon.MusicNote",
+            T("room", "部屋の大きさ (%)", 0, 100, 60, 0), T("damping", "高音の吸収 (%)", 0, 100, 50, 0), T("mix", "混ぜる量 (%)", 0, 100, 30, 0),
+            T("width", "広がり (%)", 0, 100, 100, 0), T("predelay", "初期反射までの時間 (ms)", 0, 200, 20, 0));
+        A("audio.compressor", "コンプレッサー", "Icon.VolumeUp",
+            T("threshold", "しきい値 (dB)", -60, 0, -20, 1), T("ratio", "圧縮比 (:1)", 1, 20, 4, 1), T("attack", "アタック (ms)", 0.1, 200, 10, 1),
+            T("release", "リリース (ms)", 5, 2000, 150, 0), T("knee", "ニー (dB)", 0, 24, 6, 1), T("makeup", "音量の持ち上げ (dB)", 0, 30, 0, 1));
+        A("audio.limiter", "リミッター", "Icon.VolumeUp",
+            T("ceiling", "上限 (dB)", -30, 0, -1, 1), T("gain", "入力の音量 (dB)", 0, 30, 0, 1), T("release", "戻す速さ (ms)", 5, 2000, 80, 0));
+        A("audio.gate", "ノイズゲート", "Icon.VolumeUp",
+            T("threshold", "しきい値 (dB)", -90, 0, -45, 1), T("reduction", "下げる量 (dB)", 0, 90, 30, 1), T("attack", "開く速さ (ms)", 0.1, 100, 2, 1),
+            T("hold", "保持 (ms)", 0, 1000, 60, 0), T("release", "閉じる速さ (ms)", 5, 2000, 150, 0));
+        A("audio.denoise", "ノイズ除去", "Icon.Tune",
+            T("amount", "強さ (%)", 0, 100, 60, 0), T("floor", "最大で下げる量 (dB)", 0, 60, 24, 1));
+        A("audio.pitch", "ピッチ変更", "Icon.MusicNote",
+            T("semitones", "半音", -24, 24, 0, 1, -12, 12), T("cents", "セント (半音の 1/100)", -100, 100, 0, 0), T("mix", "混ぜる量 (%)", 0, 100, 100, 0));
+        A("audio.filter", "フィルタ (ローパス・ハイパス)", "Icon.Tune",
+            new ParamDefinition { Key = "type", Name = "種類", Kind = ParamKind.Choice, Choices = new[] { "ローパス (高音を切る)", "ハイパス (低音を切る)", "バンドパス", "ノッチ (1 つの音を消す)" } },
+            T("frequency", "周波数 (Hz)", 20, 20000, 1000, 0, 20, 10000), T("q", "鋭さ (Q)", 0.1, 20, 0.71, 2, 0.1, 10), C("steep", "急な傾き (24 dB/oct)"));
+        A("audio.loudness", "ラウドネスの正規化", "Icon.VolumeUp",
+            T("target", "目標 (LUFS)", -60, 0, -14, 1, -30, -5), T("maxGain", "最大で上げる量 (dB)", 0, 40, 20, 1));
         Builtin = Map.Keys.ToHashSet();
     }
 

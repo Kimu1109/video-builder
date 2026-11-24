@@ -4,7 +4,7 @@ using VideoBuilder.Plugins;
 namespace VideoBuilder.Rendering;
 
 /// <summary>音声のエフェクト (組み込み + プラグイン) の実装の登録先。</summary>
-public static class AudioEffects
+public static partial class AudioEffects
 {
     private static readonly Dictionary<string, IAudioEffect> Map = new();
 
@@ -13,6 +13,7 @@ public static class AudioEffects
         Register(new Fade());
         Register(new Echo());
         Register(new Equalizer());
+        RegisterMore();
     }
 
     /// <summary>自動音量調整 (ダッキング)。ほかの音声を見て音量を決めるので、AudioMixer が直接処理する。</summary>
@@ -32,6 +33,7 @@ public static class AudioEffects
             long first = b.ObjectSample, last = first + b.FrameCount;
             // このブロックがフェードにかからなければ何もしない
             if ((fin <= 0 || first >= fin) && (fout <= 0 || last <= b.ObjectLength - fout)) return;
+            int curve = b.Effect.GetInt("curve");
             var s = b.Samples;
             for (int i = 0; i < b.FrameCount; i++)
             {
@@ -39,6 +41,12 @@ public static class AudioEffects
                 double g = 1;
                 if (fin > 0 && pos < fin) g = pos / fin;
                 if (fout > 0 && b.ObjectLength - pos < fout) g = Math.Min(g, Math.Max(0, b.ObjectLength - pos) / fout);
+                g = curve switch
+                {
+                    1 => Math.Sin(g * Math.PI / 2),      // 等パワー: 2 つを重ねたとき、音の強さ (2 乗の和) が一定
+                    2 => g * g * (3 - 2 * g),            // なめらか (S 字)
+                    _ => g,
+                };
                 s[i * 2] *= (float)g;
                 s[i * 2 + 1] *= (float)g;
             }
