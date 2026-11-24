@@ -625,6 +625,8 @@ public sealed class ObjectSettingsView : UserControl
             // 移動方法を設定したパラメータは、名前のボタンを強調する
             name.Classes.Set("accent", moving);
             string modeName = t.Custom != null ? Interpolators.Find(t.Custom)?.DisplayName ?? $"{t.Custom} (プラグインがありません)" : ModeName(t.Mode);
+            if (t.Ease != null) modeName += " / " + L.T(EasingDialog.KindNames[(int)t.Ease.Kind]);
+            if (t.SectionEases?.Any(e => e != null) == true) modeName += " / " + L.T("区間ごとの動き方あり");
             ToolTip.SetTip(name, moving ? $"移動方法: {modeName}" : "クリックで移動方法を選択");
         });
         return grid;
@@ -663,12 +665,65 @@ public sealed class ObjectSettingsView : UserControl
             menu.Items.Add(item);
         }
         menu.Items.Add(Menus.Sep());
-        menu.Items.Add(Menus.Item("加速", null, () => Change("加速の切替", v => v.Accel = !v.Accel), isChecked: t.Accel));
-        menu.Items.Add(Menus.Item("減速", null, () => Change("減速の切替", v => v.Decel = !v.Decel), isChecked: t.Decel));
+        menu.Items.Add(Menus.Item("加速", null, () => Change("加速の切替", v => v.Accel = !v.Accel), isChecked: t.Accel, enabled: t.Ease == null));
+        menu.Items.Add(Menus.Item("減速", null, () => Change("減速の切替", v => v.Decel = !v.Decel), isChecked: t.Decel, enabled: t.Ease == null));
+        // 動き方 (イージング): 種類と向き。標準は加速・減速のチェックで決める (以前からの動き)
+        var kinds = new List<object>
+        {
+            Menus.Item("標準 (加速・減速のチェック)", null, () => Change("動き方の変更", v => v.Ease = null), isChecked: t.Ease == null),
+            Menus.Sep(),
+        };
+        for (int k = 0; k < EasingDialog.KindNames.Length; k++)
+        {
+            var kind = (EasingKind)k;
+            kinds.Add(Menus.Item(EasingDialog.KindNames[k], null, () => Change("動き方の変更", v =>
+            {
+                var e = v.Ease?.Clone() ?? new Easing { Direction = v.Accel && v.Decel ? EasingDirection.InOut : v.Accel ? EasingDirection.In : EasingDirection.Out };
+                e.Kind = kind;
+                v.Ease = e;
+            }), isChecked: t.Ease?.Kind == kind));
+        }
+        menu.Items.Add(Menus.Sub("動き方 (イージング)", null, kinds));
+        if (t.Ease != null && t.Ease.Kind != EasingKind.Bezier)
+        {
+            menu.Items.Add(Menus.Sub("動きの向き", null, Enumerable.Range(0, EasingDialog.DirectionNames.Length).Select(d =>
+                (object)Menus.Item(EasingDialog.DirectionNames[d], null, () => Change("動きの向きの変更", v => { if (v.Ease != null) v.Ease.Direction = (EasingDirection)d; }),
+                    isChecked: (int)t.Ease.Direction == d))));
+        }
+        menu.Items.Add(Menus.Item("動き方の編集...", null, () => _ = EditEasingAsync(anchor, slot, p, -1)));
+        // 今の位置の区間だけ、別の動き方にする
+        var owner = slot.Owner();
+        int section = owner == null ? 0 : owner.SectionAt(Math.Clamp(slot.Frame(), owner.Start, owner.End));
+        bool hasSections = owner != null && owner.Sections > 1;
+        menu.Items.Add(Menus.Item($"この区間 ({section + 1} 番目) の動き方...", null, () => _ = EditEasingAsync(anchor, slot, p, section), enabled: hasSections));
+        if (t.SectionEases?.Any(e => e != null) == true)
+            menu.Items.Add(Menus.Item("区間ごとの動き方をすべて消す", null, () => Change("区間ごとの動き方を消す", v => v.SectionEases = null)));
         menu.Items.Add(Menus.Sep());
         menu.Items.Add(Menus.Sub($"間隔 ({t.Interval} フレーム)", null, new[] { 1, 2, 5, 10, 15, 30, 60, 120 }.Select(n =>
             (object)Menus.Item($"{n} フレーム", null, () => Change("間隔の変更", v => v.Interval = n), isChecked: t.Interval == n))));
         menu.Open(anchor);
+    }
+
+    /// <summary>動き方の編集ダイアログ。section が 0 以上なら、その区間だけの動き方を決める。</summary>
+    private async Task EditEasingAsync(Control anchor, Slot slot, ParamDefinition p, int section)
+    {
+        var t = slot.Effect()?.Tracks.GetValueOrDefault(p.Key);
+        if (t == null || TopLevel.GetTopLevel(anchor) is not Window owner) return;
+        var current = section >= 0 ? t.SectionEaseAt(section) ?? t.Ease : t.Ease;
+        string title = section >= 0 ? L.T($"{p.Name} の {section + 1} 番目の区間の動き方") : L.T($"{p.Name} の動き方");
+        var dialog = new EasingDialog(title, current, section >= 0 ? "区間の設定を消す" : "標準に戻す");
+        await dialog.ShowDialog(owner);
+        if (dialog.Result == null && !dialog.Cleared) return;
+        var track = slot.Effect()?.Tracks.GetValueOrDefault(p.Key);
+        if (track == null) return;
+        var chosen = dialog.Cleared ? null : dialog.Result;
+        _session.Edit("動き方の変更", () =>
+        {
+            if (section >= 0) track.SetSectionEase(section, chosen);
+            else track.Ease = chosen;
+            // 動き方を決めても動かないパラメータなら、直線移動にする (動き方が効くように)
+            if (chosen != null && !track.IsMoving) track.Mode = MovementMode.Linear;
+        });
     }
 
     // ---------------- その他の入力 ----------------

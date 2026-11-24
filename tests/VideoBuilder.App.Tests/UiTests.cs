@@ -517,6 +517,78 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public void Easing_dialog_switches_the_kind_and_drags_the_bezier_handles()
+    {
+        var w = Open();
+        var d = new EasingDialog("X の動き方", new Easing { Kind = EasingKind.Back }, "標準に戻す");
+        d.Show(w);
+        Pump();
+        var kind = d.GetVisualDescendants().OfType<ComboBox>().First();
+        kind.SelectedIndex = (int)EasingKind.Bezier;
+        Pump();
+        d.CaptureRenderedFrame()?.Dispose();   // 描画して、位置を確定させる
+        // グラフの 1 つ目の制御点 (既定の ease: 0.25, 0.1) をつかんで、右上へ動かす
+        var graph = d.GetVisualDescendants().OfType<Control>().First(c => c.GetType().Name == "EasingGraph");
+        double pw = graph.Bounds.Width - 40, ph = graph.Bounds.Height - 16;
+        var handle = graph.TranslatePoint(new Point(28 + 0.25 * pw, 8 + ph - (0.1 + 0.5) / 2 * ph), d)!.Value;
+        d.MouseDown(handle, MouseButton.Left);
+        d.MouseMove(new Point(handle.X + 30, handle.Y - 70));
+        d.MouseUp(new Point(handle.X + 30, handle.Y - 70), MouseButton.Left);
+        Pump();
+        Shot(d, "easing-dialog");
+        var ok = d.GetVisualDescendants().OfType<Button>().First(b => b.Content as string == "OK");
+        ok.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        Pump();
+        Assert.NotNull(d.Result);
+        Assert.Equal(EasingKind.Bezier, d.Result!.Kind);
+        Assert.True(d.Result.X1 > 0.3 && d.Result.Y1 > 0.3, $"制御点が動いていない: {d.Result.X1}, {d.Result.Y1}");
+    }
+
+    [AvaloniaFact]
+    public async Task Motion_path_is_drawn_for_the_selected_object_and_its_points_can_be_dragged()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        var o = s.AddObject(EffectRegistry.Shape, 0, 0, 60, x =>
+        {
+            x.Main.Values["color"] = "#FF0000";
+            x.Main.Tracks["size"] = new AnimatedValue(80);
+            var tx = x.Draw!.Tracks["x"]; tx.Mode = MovementMode.Curve; tx.Values[0] = -600; tx.Values[1] = 600;
+            var ty = x.Draw.Tracks["y"]; ty.Mode = MovementMode.Curve; ty.Values[0] = 200; ty.Values[1] = 200;
+            x.AddKeyFrame(30);
+            ty.Values[1] = -250;   // 真ん中で上へ山なりに
+        })!;
+        s.Select(o.Id);
+        s.CurrentFrame = 15;
+        for (int i = 0; i < 100 && !Svc.Preview.HasFrame; i++) { await Task.Delay(20); Pump(); }
+        await Task.Delay(100); Pump();
+        var preview = w.GetVisualDescendants().OfType<PreviewView>().Single();
+        preview.InvalidateVisual(); preview.Selection.InvalidateVisual();
+        w.CaptureRenderedFrame()?.Dispose();
+        Shot(w, "motion-path");
+
+        // 真ん中の中間点 (X はほぼ 0、Y は -250) をつかんで、右へ 40px 動かす
+        double before = s.Scene.Find(o.Id)!.Draw!.Tracks["x"].Values[1];
+        var settings = s.Project.Settings;
+        double scale = Math.Min((preview.Bounds.Width - 16) / settings.Width, (preview.Bounds.Height - 16) / settings.Height);
+        double dw = Math.Round(settings.Width * scale), dh = Math.Round(settings.Height * scale);
+        double left = Math.Round((preview.Bounds.Width - dw) / 2), top = Math.Round((preview.Bounds.Height - dh) / 2);
+        var mid = preview.TranslatePoint(new Point(left + (settings.Width / 2.0 + before) * scale, top + (settings.Height / 2.0 - 250) * scale), w)!.Value;
+        w.MouseDown(mid, MouseButton.Left);
+        w.MouseMove(new Point(mid.X + 5, mid.Y));
+        w.MouseMove(new Point(mid.X + 40, mid.Y));
+        w.MouseUp(new Point(mid.X + 40, mid.Y), MouseButton.Left);
+        Pump();
+        var x = s.Scene.Find(o.Id)!.Draw!.Tracks["x"];
+        Assert.True(x.Values[1] > before + 20, $"中間点の X が動いていない: {x.Values[1]}");
+        Assert.Equal(-600, x.Values[0]);                                     // ほかの点はそのまま
+        Assert.Equal(-250, s.Scene.Find(o.Id)!.Draw!.Tracks["y"].Values[1]); // 横に動かしただけ
+        s.Undo();
+        Assert.Equal(before, s.Scene.Find(o.Id)!.Draw!.Tracks["x"].Values[1], 1);
+    }
+
+
+    [AvaloniaFact]
     public void Preferences_are_split_into_categories_that_fit_the_window()
     {
         var w = Open();

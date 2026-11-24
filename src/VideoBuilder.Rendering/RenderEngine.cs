@@ -237,7 +237,7 @@ public sealed class RenderEngine : IDisposable
                         int next = ApplyCachedFilters(ctx, obj, bounds, frame, depth, ref sprite);
                         sprite = Effects.ApplyRange(sprite, obj, bounds, ctx, next, obj.Effects.Count);
                         bool changes = def.Id == EffectRegistry.Video || (def.Id == EffectRegistry.SceneRef && !_sourceStatic) || (def.Id == EffectRegistry.Vector && _sourceAnimated);
-                        if (Place(sprite, obj, bounds, frame, groups, cameras, W, H, ctx.Modifiers) is not { } place) break;
+                        if (Place(sprite, obj, bounds, frame, groups, cameras, W, H, ctx.Modifiers, scene, ctx.Project) is not { } place) break;
                         if (place.Camera >= 0 && cameras[place.Camera].ZSort)
                         {
                             // 奥行きで並べ替える: 同じカメラのものが続く間は描かずに待たせる
@@ -332,7 +332,7 @@ public sealed class RenderEngine : IDisposable
 
     /// <summary>オブジェクトの変形・グループ制御・カメラから、画面への変換を求める。描かないもの (カメラの後ろ) は null。</summary>
     private static Placement? Place(Sprite sprite, TimelineObject obj, int[] bounds, int frame,
-        List<GroupState> groups, List<CameraState> cameras, int W, int H, DrawModifiers mod)
+        List<GroupState> groups, List<CameraState> cameras, int W, int H, DrawModifiers mod, Scene? scene = null, Project? project = null)
     {
         var draw = obj.Draw;
         float x = 0, y = 0, z = 0, scale = 1, rot = 0, rx = 0, ry = 0, alpha = 1;
@@ -345,6 +345,7 @@ public sealed class RenderEngine : IDisposable
             rot = E("rotation"); rx = E("rx"); ry = E("ry");
             alpha = 1 - E("alpha") / 100f;
             blend = draw.GetInt("blend");
+            if (draw.GetBool("orient")) rot += ObjectMotion.OrientAngle(obj, bounds, frame);
         }
         x += mod.Ox; y += mod.Oy; z += mod.Oz;
         rot += mod.Rz; rx += mod.Rx; ry += mod.Ry;
@@ -355,6 +356,9 @@ public sealed class RenderEngine : IDisposable
         if (rx != 0) model *= Matrix4x4.CreateRotationX(rx * Rad);
         if (ry != 0) model *= Matrix4x4.CreateRotationY(ry * Rad);
         model *= Matrix4x4.CreateTranslation(x, y, z);
+        // 親オブジェクトに付いていく (グループ制御より内側)
+        if (scene != null && project != null && draw != null && draw.Eval("parent", bounds, frame) >= 0.5)
+            model *= ObjectMotion.ParentTransform(scene, project, obj, frame);
         for (int i = groups.Count - 1; i >= 0; i--)
         {
             var g = groups[i];
@@ -1154,6 +1158,8 @@ public sealed class RenderEngine : IDisposable
     private static bool IsStill(TimelineObject o)
     {
         if (!o.Enabled || o.Effects.Count == 0) return true;
+        // 親に付いていくものは、自分の値が変わらなくても親が動けば動く
+        if (o.Draw?.Tracks.GetValueOrDefault("parent") is { } parent && parent.Values.Any(v => v >= 0.5)) return false;
         var main = o.Main;
         switch (main.Definition.Category)
         {

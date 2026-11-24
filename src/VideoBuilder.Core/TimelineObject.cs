@@ -140,6 +140,7 @@ public sealed class TimelineObject
             v.EnsureSections(Sections);
             double value = v.IsMoving && (v.Custom != null || v.Mode != MovementMode.Delta) ? v.Evaluate(bounds, frame) : v.Values[index];
             v.Values.Insert(index + 1, value);
+            v.SplitSection(index);
         }
         KeyFrames.Insert(index, frame);
         return true;
@@ -153,6 +154,7 @@ public sealed class TimelineObject
         {
             v.EnsureSections(Sections);
             v.Values.RemoveAt(index + 1);
+            v.MergeSections(index);
         }
         KeyFrames.RemoveAt(index);
     }
@@ -189,13 +191,19 @@ public sealed class TimelineObject
         second.KeyFrames = KeyFrames.Skip(k + 1).ToList();
         foreach (var e in second.Effects)
         foreach (var v in e.Tracks.Values)
+        {
             v.Values = v.Values.Skip(k + 1).ToList();
+            v.KeepSections(k + 1, int.MaxValue);
+        }
         // 前半: 区間 0..k
         int firstEnd = frame - 1;
         var keep = KeyFrames.Take(k).ToList();
         foreach (var e in Effects)
         foreach (var v in e.Tracks.Values)
+        {
             v.Values = v.Values.Take(k + 2).ToList();
+            v.KeepSections(0, k + 1);
+        }
         KeyFrames = keep;
         End = firstEnd;
         // 動画・音声は再生位置をずらして、分割後も同じ絵・音が続くようにする
