@@ -681,7 +681,9 @@ public sealed class RenderEngine : IDisposable
                 "filter.color" or "filter.mono" or "filter.fade" or "filter.levels" or "filter.posterize" or "filter.vignette"
                     or "filter.extcolor" or "filter.hueconvert" or "filter.colorkey" or "filter.lumakey" or "filter.basic" or "filter.shake" => true,
                 // フェード・スライド・ズーム・回転ズーム・ポップ (ワイプ・ぼかしはぼかしの幅がピクセル単位)
-                "filter.transition" => e.GetInt("type") is 0 or (>= 6 and <= 10) or 12 or 13 or (>= 18 and <= 26),
+                "filter.transition" => e.GetInt("type") is 0 or (>= 6 and <= 10) or 12 or 13 or (>= 18 and <= 26)
+                    // プッシュ・白 / 黒で切り替え・キューブ回転・カードを裏返す・重力で落下・飛び去る
+                    or (>= 28 and <= 31) or 45 or 46 or (>= 69 and <= 74) or 84 or 85,
                 "filter.anim" => e.GetInt("type") != 13,   // リール回転はぼかしの長さがピクセル単位
                 _ => false,
             };

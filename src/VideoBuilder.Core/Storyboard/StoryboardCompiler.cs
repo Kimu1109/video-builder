@@ -194,7 +194,15 @@ public static class StoryboardCompiler
             if (span.Clip.Transition <= 0 || span.FadeIn <= 0) continue;
             int type = span.Clip.Transition - 1;
             double seconds = project.FrameToSeconds(span.FadeIn);
-            if (span.Index == 0 || span.Lane == 1) AddTransition(visuals[span.Index], type, seconds, 0);
+            if (type >= EffectRegistry.PairedTransitionStart)
+            {
+                // 入りと出で別の動きをするもの: 入ってくるクリップと出ていくクリップの両方にかける (どちらが手前でも同じ見え方)
+                // 奥のクリップには印を付ける (形で切り抜くだけの役なら、手前のクリップが切り抜かれるので切り抜かない。境目に線が出ない)
+                bool incomingOnTop = span.Index == 0 || span.Lane > layout.Clips[span.Index - 1].Lane;
+                AddTransition(visuals[span.Index], type, seconds, 0, true, under: !incomingOnTop);
+                if (span.Index > 0) AddTransition(visuals[span.Index - 1], type, 0, seconds, true, under: incomingOnTop);
+            }
+            else if (span.Index == 0 || span.Lane == 1) AddTransition(visuals[span.Index], type, seconds, 0);
             else AddTransition(visuals[span.Index - 1], Mirror(type), 0, seconds);
         }
 
@@ -311,9 +319,11 @@ public static class StoryboardCompiler
         }
     }
 
-    private static void AddTransition(TimelineObject o, int type, double fadeIn, double fadeOut)
+    private static void AddTransition(TimelineObject o, int type, double fadeIn, double fadeOut, bool screen = false, bool under = false)
     {
         var e = ObjectFactory.AddFilter(o, "filter.transition");
+        if (screen) e.Values["screen"] = "1";
+        if (under) e.Values["under"] = "1";
         e.Values["type"] = type.ToString(CultureInfo.InvariantCulture);
         e.Tracks["in"] = new AnimatedValue(Round(fadeIn));
         e.Tracks["out"] = new AnimatedValue(Round(fadeOut));

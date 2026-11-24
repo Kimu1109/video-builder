@@ -366,7 +366,7 @@ public static class Shapes
         path.Close();
     }
 
-    private static void Heart(SKPath path, SKRect r)
+    internal static void Heart(SKPath path, SKRect r)
     {
         SKPoint P(float x, float y) => new(r.Left + x * r.Width, r.Top + y * r.Height);
         path.MoveTo(P(0.5f, 0.22f));
