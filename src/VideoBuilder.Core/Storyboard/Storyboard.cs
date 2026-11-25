@@ -17,6 +17,10 @@ public sealed class Storyboard
     public List<MusicClip> Music { get; set; } = new();
     /// <summary>音楽を、映像 (クリップ) の終わりで切る。</summary>
     public bool FitMusicToVideo { get; set; } = true;
+    /// <summary>最後のクリップの終わりで、黒い画面へフェードアウトする長さ (秒)。0 ならしない。</summary>
+    public double EndFadeSeconds { get; set; }
+    /// <summary>写真・動画の周りの余白 (画面に収めたときにできる帯) の色。空なら黒 (何も置かない)。</summary>
+    public string Background { get; set; } = "";
 
     public StoryClip? FindClip(string id) => Clips.FirstOrDefault(c => c.Id == id);
     public MusicClip? FindMusic(string id) => Music.FirstOrDefault(m => m.Id == id);
@@ -26,6 +30,8 @@ public sealed class Storyboard
         Clips = Clips.Select(c => c.Clone()).ToList(),
         Music = Music.Select(m => m.Clone()).ToList(),
         FitMusicToVideo = FitMusicToVideo,
+        EndFadeSeconds = EndFadeSeconds,
+        Background = Background,
     };
 
     internal static string NewId() => Guid.NewGuid().ToString("N")[..8];
@@ -34,7 +40,8 @@ public sealed class Storyboard
 public enum StoryClipKind { Video, Photo, Title }
 
 /// <summary>クリップの動き (写真などをゆっくり拡大・移動させる、いわゆるケン・バーンズ効果)。</summary>
-public enum ClipMotion { None, ZoomIn, ZoomOut, PanLeft, PanRight }
+/// <para><see cref="ScrollUp"/> はタイトル用 (文字を下から上へ流す、エンドロール)。</para>
+public enum ClipMotion { None, ZoomIn, ZoomOut, PanLeft, PanRight, ScrollUp }
 
 /// <summary>クリップの見た目の効果。</summary>
 public enum ClipLook { None, Mono, Sepia, Blur, Bright, Dark, Vivid }
@@ -86,15 +93,29 @@ public sealed class StoryClip
     public ClipLook Look { get; set; }
     /// <summary>回転 (0・90・180・270 度、時計回り)。</summary>
     public int Rotation { get; set; }
+    /// <summary>画面いっぱいに広げる (はみ出た所は切れる)。false なら画面に収める。</summary>
+    public bool Fill { get; set; }
 
     // ---- 音声 (動画) ----
     public double Volume { get; set; } = 100;
     public bool Muted { get; set; }
+    /// <summary>速度を変えても、音の高さを変えない。</summary>
+    public bool KeepPitch { get; set; }
 
     // ---- 文字 ----
     /// <summary>クリップに重ねる字幕 (キャプション)。空なら出さない。</summary>
     public string Caption { get; set; } = "";
     public CaptionPlacement CaptionPlacement { get; set; }
+    /// <summary>キャプションの後ろに半透明の帯を敷く。</summary>
+    public bool CaptionBackground { get; set; }
+    /// <summary>キャプションを出し始める時刻 (クリップの先頭からの秒)。</summary>
+    public double CaptionStart { get; set; }
+    /// <summary>キャプションを出す長さ (秒)。0 ならクリップの終わりまで。</summary>
+    public double CaptionSeconds { get; set; }
+    /// <summary>文字 (タイトル・キャプション) の大きさ (%、100 が標準)。</summary>
+    public double TextScale { get; set; } = 100;
+    /// <summary>文字のフォント。空なら既定のフォント。</summary>
+    public string Font { get; set; } = "";
     /// <summary>タイトルの文字。</summary>
     public string Text { get; set; } = "";
     public string TextColor { get; set; } = "#FFFFFF";
@@ -138,6 +159,10 @@ public sealed class MusicClip
     public double Volume { get; set; } = 100;
     public double FadeIn { get; set; } = 1;
     public double FadeOut { get; set; } = 2;
+    /// <summary>使う範囲を繰り返して、映像の終わりまで鳴らす。</summary>
+    public bool Loop { get; set; }
+    /// <summary>動画の音声が鳴っている間は、音楽を小さくする (ダッキング)。</summary>
+    public bool Duck { get; set; }
 
     [JsonIgnore] public double EffectiveTrimEnd => TrimEnd > 0 ? TrimEnd : SourceSeconds;
     [JsonIgnore] public double Seconds => Math.Max(StoryClip.MinSeconds, EffectiveTrimEnd - TrimStart);

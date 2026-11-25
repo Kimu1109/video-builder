@@ -7,6 +7,7 @@ using VideoBuilder.App.Controls;
 using VideoBuilder.App.Services;
 using VideoBuilder.Core;
 using VideoBuilder.Editing;
+using VideoBuilder.Rendering;
 
 namespace VideoBuilder.App.Workspaces.Simple;
 
@@ -29,6 +30,13 @@ public sealed class ClipPanel : UserControl
     public static readonly string[] Motions = { "なし", "ズームイン", "ズームアウト", "左へパン", "右へパン" };
     public static readonly string[] Looks = { "なし", "白黒", "セピア", "ぼかし", "明るく", "暗く", "鮮やか" };
     public static readonly string[] Placements = { "下", "中央", "上" };
+    /// <summary>タイトルの動き (<see cref="ClipMotion.None"/> と <see cref="ClipMotion.ScrollUp"/>)。</summary>
+    public static readonly string[] TitleMotions = { "なし", "下から上へ流す (エンドロール)" };
+    /// <summary>文字の大きさ (%)。</summary>
+    public static readonly double[] TextScales = { 75, 100, 130, 160 };
+    public static readonly string[] TextScaleNames = { "小さく", "標準", "大きく", "とても大きく" };
+    private static IReadOnlyList<string>? _fonts;
+    private static IReadOnlyList<string> Fonts => _fonts ??= new[] { "(既定のフォント)" }.Concat(Generators.FontFamilies).ToList();
     /// <summary>速度の表示 (1 倍は「標準」)。</summary>
     public static string SpeedLabel(double speed) => speed == 1 ? L.T("標準 (1 倍)") : $"{speed:0.##}x";
 
@@ -44,7 +52,10 @@ public sealed class ClipPanel : UserControl
         Refresh();
     }
 
-    private object? Selected => (object?)_editor.SelectedClip ?? _editor.SelectedMusic;
+    /// <summary>欄に出すもの: クリップ、音楽、いくつも選んでいればクリップの一覧。</summary>
+    private object? Selected => _editor.HasMultipleSelection
+        ? _editor.SelectedClipIds.Select(id => _editor.Board!.FindClip(id)!).ToList()
+        : (object?)_editor.SelectedClip ?? _editor.SelectedMusic;
 
     /// <summary>選んでいるものが変わったか、その中身がほかの操作 (取り消しなど) で変わったときだけ作り直す。</summary>
     public void Refresh()
@@ -58,6 +69,7 @@ public sealed class ClipPanel : UserControl
         CaptionBox = null;
         switch (item)
         {
+            case List<StoryClip> list: BuildMulti(list); break;
             case StoryClip c: BuildClip(c); break;
             case MusicClip m: BuildMusic(m); break;
             default: BuildNothing(); break;
@@ -68,7 +80,7 @@ public sealed class ClipPanel : UserControl
     private string StateOf(object? item)
     {
         var board = _editor.Board;
-        string common = $"{board?.Clips.Count}:{board?.FitMusicToVideo}";
+        string common = $"{board?.Clips.Count}:{board?.FitMusicToVideo}:{board?.EndFadeSeconds}:{board?.Background}";
         return item == null ? $"none:{common}:{_editor.Layout.Length}" : common + ":" + JsonSerializer.Serialize(item, item.GetType());
     }
 
@@ -78,7 +90,25 @@ public sealed class ClipPanel : UserControl
         _applying = true;
         try { _editor.UpdateClip(c.Id, description, change, mergeKey); }
         finally { _applying = false; }
-        _shownState = StateOf(_editor.SelectedClip);
+        _shownState = StateOf(Selected);
+    }
+
+    /// <summary>選んでいるすべてのクリップの設定を変える。</summary>
+    private void ApplySelected(string description, Action<StoryClip> change)
+    {
+        _applying = true;
+        try { _editor.UpdateSelectedClips(description, change); }
+        finally { _applying = false; }
+        _shownState = StateOf(Selected);
+    }
+
+    /// <summary>ストーリーボード全体の設定を変える。</summary>
+    private void ApplyBoard(string description, Action<Storyboard> change, string? mergeKey = null)
+    {
+        _applying = true;
+        try { _editor.Change(description, change, mergeKey); }
+        finally { _applying = false; }
+        _shownState = StateOf(Selected);
     }
 
     private void ApplyMusic(string description, Action<MusicClip> change, string? mergeKey = null)
@@ -87,7 +117,7 @@ public sealed class ClipPanel : UserControl
         _applying = true;
         try { _editor.UpdateMusic(m.Id, description, change, mergeKey); }
         finally { _applying = false; }
-        _shownState = StateOf(_editor.SelectedMusic);
+        _shownState = StateOf(Selected);
     }
 
     // ---------------- 部品 ----------------
@@ -159,6 +189,31 @@ public sealed class ClipPanel : UserControl
         return picker;
     }
 
+    private static CheckBox Check(string text, bool value, Action<bool> changed)
+    {
+        var box = new CheckBox { Content = text, IsChecked = value };
+        box.IsCheckedChanged += (_, _) => changed(box.IsChecked == true);
+        return box;
+    }
+
+    private static ComboBox FontCombo(string font, Action<string> changed)
+    {
+        int index = font.Length == 0 ? 0 : Fonts.ToList().IndexOf(font);
+        if (index < 0) index = 0;
+        var c = Combo(Fonts.ToArray(), index, i => changed(i == 0 ? "" : Fonts[i]));
+        c.MaxDropDownHeight = 360;
+        return c;
+    }
+
+    private static ComboBox ScaleCombo(double scale, Action<double> changed)
+    {
+        int index = Array.IndexOf(TextScales, scale);
+        var names = TextScaleNames.ToList();
+        var values = TextScales.ToList();
+        if (index < 0) { values.Add(scale); names.Add($"{scale:0}%"); index = values.Count - 1; }
+        return Combo(names.ToArray(), index, i => changed(values[i]));
+    }
+
     private TextBox TextInput(string value, string watermark, bool multiline, Action<string> changed)
     {
         var box = new TextBox { Text = value, Watermark = watermark, AcceptsReturn = multiline, TextWrapping = TextWrapping.Wrap, MinHeight = multiline ? 56 : 0 };
@@ -181,7 +236,7 @@ public sealed class ClipPanel : UserControl
             _applying = true;
             try { _editor.ApplyToAll(c.Id, description, copy, target); }
             finally { _applying = false; }
-            _shownState = StateOf(_editor.SelectedClip);
+            _shownState = StateOf(Selected);
         }));
     }
 
@@ -212,11 +267,75 @@ public sealed class ClipPanel : UserControl
         Note(L.Format("長さ {0}", StoryboardStrip.FormatSeconds(_editor.Project.FrameToSeconds(layout.Length))));
         Note("クリップを選ぶと、ここで長さ・切り替え効果・キャプションなどを変えられます。");
         Note("ツールバーの「ビデオと写真」で素材を追加し、出来上がったら「動画の出力」で書き出します。");
+        if (clips > 0)
+        {
+            Heading("作品全体");
+            var endFade = board!.EndFadeSeconds;
+            var fade = Check("最後に黒い画面へフェードアウト", endFade > 0, on => ApplyBoard("終わりのフェードアウト", b => b.EndFadeSeconds = on ? (b.EndFadeSeconds > 0 ? b.EndFadeSeconds : 1.5) : 0));
+            _body.Children.Add(fade);
+            if (endFade > 0) Row("長さ (秒)", Seconds(endFade, 0.1, 10, v => ApplyBoard("終わりのフェードアウト", b => b.EndFadeSeconds = v)));
+            bool colored = !string.IsNullOrWhiteSpace(board.Background);
+            Row("余白の色", new StackPanel
+            {
+                Orientation = Orientation.Horizontal, Spacing = 6,
+                Children =
+                {
+                    ColorBox(colored ? board.Background : "#000000", v => ApplyBoard("余白の色", b => b.Background = v == "#000000" ? "" : v, "bgcolor")),
+                    Small("黒に戻す", () => ApplyBoard("余白の色", b => b.Background = "")),
+                },
+            });
+            Note("写真・動画を画面に収めたときにできる、上下・左右の帯の色です。");
+        }
         if (music > 0)
         {
             Heading("音楽");
             FitMusicBox();
         }
+    }
+
+    // ---------------- いくつも選んでいるとき ----------------
+
+    private void BuildMulti(List<StoryClip> clips)
+    {
+        Heading(L.Format("{0} 個のクリップを選んでいます", clips.Count.ToString()));
+        Note("ここで変えた設定は、選んでいるすべてのクリップに付きます。Ctrl を押しながらクリックで選択に加える / 外す、Shift で範囲を選べます。");
+        // 全部が同じ値なら、それを選んでおく (違えば空欄)
+        int Common(Func<StoryClip, int> value) => clips.Select(value).Distinct().Count() == 1 ? value(clips[0]) : -1;
+
+        Heading("切り替え効果");
+        Row("種類", Combo(Transitions, Common(c => Math.Clamp(c.Transition, 0, EffectRegistry.TransitionTypes.Length)), i => ApplySelected("切り替え効果の変更", x => x.Transition = i)));
+        Row("長さ (秒)", Seconds(clips[0].TransitionSeconds, 0.1, 10, v => ApplySelected("切り替え効果の長さ", x => x.TransitionSeconds = v)));
+
+        Heading("効果");
+        var media = clips.Where(c => c.UsesFile).ToList();
+        if (media.Count > 0)
+        {
+            Row("動き", Combo(Motions, media.Select(c => (int)c.Motion).Distinct().Count() == 1 && media[0].Motion != ClipMotion.ScrollUp ? (int)media[0].Motion : -1,
+                i => ApplySelected("動きの変更", x => { if (x.UsesFile) x.Motion = (ClipMotion)i; })));
+        }
+        Row("見た目", Combo(Looks, Common(c => (int)c.Look), i => ApplySelected("見た目の変更", x => x.Look = (ClipLook)i)));
+        if (media.Count > 0)
+            _body.Children.Add(Check("画面いっぱいに広げる (はみ出た所は切れる)", media.All(c => c.Fill), on => ApplySelected("画面いっぱいに広げる", x => x.Fill = on)));
+
+        var timed = clips.Where(c => c.Kind != StoryClipKind.Video).ToList();
+        if (timed.Count > 0)
+        {
+            Heading("長さ");
+            Row("表示時間 (秒)", Seconds(timed[0].Duration, StoryClip.MinSeconds, 3600, v => ApplySelected("表示時間の変更", x => { if (x.Kind != StoryClipKind.Video) x.Duration = v; })));
+            Note("写真・タイトルの表示時間です (動画は変わりません)。");
+        }
+
+        Heading("操作");
+        _body.Children.Add(new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 6,
+            Children =
+            {
+                Small("前へ移動", () => _editor.MoveSelected(-1)),
+                Small("後ろへ移動", () => _editor.MoveSelected(1)),
+                Small("削除", _editor.RemoveSelected),
+            },
+        });
     }
 
     // ---------------- クリップ ----------------
@@ -278,6 +397,9 @@ public sealed class ClipPanel : UserControl
             _body.Children.Add(TextInput(c.Text, "タイトルの文字", true, v => Apply("タイトルの文字", x => x.Text = v, "title:" + c.Id)));
             Row("文字色", ColorBox(c.TextColor, v => Apply("文字色の変更", x => x.TextColor = v, "tcolor:" + c.Id)));
             Row("背景色", ColorBox(c.Background, v => Apply("背景色の変更", x => x.Background = v, "bg:" + c.Id)));
+            Row("大きさ", ScaleCombo(c.TextScale, v => Apply("文字の大きさ", x => x.TextScale = v)));
+            Row("フォント", FontCombo(c.Font, v => Apply("フォントの変更", x => x.Font = v)));
+            Row("動き", Combo(TitleMotions, c.Motion == ClipMotion.ScrollUp ? 1 : 0, i => Apply("動きの変更", x => x.Motion = i == 1 ? ClipMotion.ScrollUp : ClipMotion.None)));
         }
         else
         {
@@ -286,6 +408,12 @@ public sealed class ClipPanel : UserControl
             _body.Children.Add(CaptionBox);
             Row("位置", Combo(Placements, (int)c.CaptionPlacement, i => Apply("キャプションの位置", x => x.CaptionPlacement = (CaptionPlacement)i)));
             Row("文字色", ColorBox(c.TextColor, v => Apply("文字色の変更", x => x.TextColor = v, "tcolor:" + c.Id)));
+            Row("大きさ", ScaleCombo(c.TextScale, v => Apply("文字の大きさ", x => x.TextScale = v)));
+            Row("フォント", FontCombo(c.Font, v => Apply("フォントの変更", x => x.Font = v)));
+            _body.Children.Add(Check("後ろに帯を敷く (読みやすくする)", c.CaptionBackground, on => Apply("キャプションの帯", x => x.CaptionBackground = on)));
+            Row("出し始め (秒)", Seconds(c.CaptionStart, 0, 3600, v => Apply("キャプションの時間", x => x.CaptionStart = v)));
+            Row("出す長さ (秒)", Seconds(c.CaptionSeconds, 0, 3600, v => Apply("キャプションの時間", x => x.CaptionSeconds = v)));
+            Note("出し始めはクリップの先頭からの秒です。出す長さが 0 なら、クリップの終わりまで出します。");
         }
 
         // ---- 切り替え効果 ----
@@ -314,6 +442,8 @@ public sealed class ClipPanel : UserControl
                     Small("右に 90°", () => Apply("回転", x => x.Rotation = (x.Rotation + 90) % 360)),
                 },
             });
+        if (c.Kind != StoryClipKind.Title)
+            _body.Children.Add(Check("画面いっぱいに広げる (はみ出た所は切れる)", c.Fill, on => Apply("画面いっぱいに広げる", x => x.Fill = on)));
 
         // ---- 音声 ----
         if (c.Kind == StoryClipKind.Video)
@@ -323,7 +453,10 @@ public sealed class ClipPanel : UserControl
             else
             {
                 Row("音量", Volume(c.Volume, (v, done) => Apply("音量の変更", x => x.Volume = v, "volume:" + c.Id)));
-                if (c.EffectiveSpeed != 1) Note("速度を変えると、音の高さも変わります。");
+                if (c.EffectiveSpeed != 1)
+                    _body.Children.Add(Check("音の高さを変えない", c.KeepPitch, on => Apply("音の高さを変えない", x => x.KeepPitch = on)));
+                if (c.EffectiveSpeed != 1 && !c.KeepPitch) Note("速度を変えると、音の高さも変わります。");
+                if (c.KeepPitch && c.EffectiveSpeed is > 4 or < 0.25) Note("この速度では、音の高さを元どおりにはできません (近づけるだけ)。");
                 var mute = new CheckBox { Content = "音を消す", IsChecked = c.Muted };
                 mute.IsCheckedChanged += (_, _) => Apply("音を消す", x => x.Muted = mute.IsChecked == true);
                 _body.Children.Add(mute);
@@ -361,6 +494,9 @@ public sealed class ClipPanel : UserControl
         Row("音量", Volume(m.Volume, (v, done) => ApplyMusic("音量の変更", x => x.Volume = v, "mvolume:" + m.Id)));
         Row("フェードイン (秒)", Seconds(m.FadeIn, 0, 30, v => ApplyMusic("フェードの変更", x => x.FadeIn = v)));
         Row("フェードアウト (秒)", Seconds(m.FadeOut, 0, 30, v => ApplyMusic("フェードの変更", x => x.FadeOut = v)));
+
+        _body.Children.Add(Check("繰り返して、映像の終わりまで鳴らす", m.Loop, on => ApplyMusic("音楽の繰り返し", x => x.Loop = on)));
+        _body.Children.Add(Check("動画の音声が鳴っている間は小さくする", m.Duck, on => ApplyMusic("音楽を自動で小さくする", x => x.Duck = on)));
 
         Heading("すべての音楽");
         FitMusicBox();

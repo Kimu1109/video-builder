@@ -27,8 +27,8 @@ public static class SimpleMedia
 
         if (defId == EffectRegistry.Image)
         {
-            var (w, h) = ImageSize(path);
-            return new(new StoryClip { Kind = StoryClipKind.Photo, File = path, SourceWidth = w, SourceHeight = h, Duration = PhotoSeconds }, null, null, null);
+            var (w, h, rotation) = ImageSize(path);
+            return new(new StoryClip { Kind = StoryClipKind.Photo, File = path, SourceWidth = w, SourceHeight = h, Rotation = rotation, Duration = PhotoSeconds }, null, null, null);
         }
 
         if (!FFmpegLoader.EnsureLoaded()) return new(null, null, null, "FFmpeg が見つからないため、動画・音声を読み込めません。\n" + FFmpegLoader.Error);
@@ -48,17 +48,27 @@ public static class SimpleMedia
         return new(null, new MusicClip { File = path, SourceSeconds = Math.Round(info.Duration, 3), TrimEnd = info.Duration > 0 ? 0 : 60 }, info, null);
     }
 
-    private static (int, int) ImageSize(string path)
+    /// <summary>画像の大きさと、EXIF の向きを直す回転 (時計回りの度)。</summary>
+    private static (int, int, int) ImageSize(string path)
     {
         try
         {
             using var codec = SKCodec.Create(path);
-            if (codec == null) return (0, 0);
-            // 描画 (MediaCache) は EXIF の向きを使わないので、ここでも元の縦横のまま (向きは「回転」で直す)
-            return (codec.Info.Width, codec.Info.Height);
+            if (codec == null) return (0, 0, 0);
+            // 描画 (MediaCache) は EXIF の向きを使わず、元の縦横のまま描く。スマートフォンの写真などが横倒しにならないよう、
+            // 向きの分だけクリップの「回転」を付けておく (左右の反転は扱わない)
+            return (codec.Info.Width, codec.Info.Height, RotationFor(codec.EncodedOrigin));
         }
-        catch { return (0, 0); }
+        catch { return (0, 0, 0); }
     }
+
+    public static int RotationFor(SKEncodedOrigin origin) => origin switch
+    {
+        SKEncodedOrigin.BottomRight or SKEncodedOrigin.BottomLeft => 180,
+        SKEncodedOrigin.RightTop or SKEncodedOrigin.LeftTop => 90,
+        SKEncodedOrigin.LeftBottom or SKEncodedOrigin.RightBottom => 270,
+        _ => 0,
+    };
 
     /// <summary>
     /// ファイルをストーリーボードに入れる。映像は index の位置 (null なら選んでいるクリップの後ろ) に、音声は現在位置から鳴らす。

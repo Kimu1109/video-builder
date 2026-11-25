@@ -141,6 +141,46 @@ public sealed class StoryboardStrip : Control
         return null;
     }
 
+    /// <summary>クリップの見えている所 (次のクリップと重なっている所は次のクリップの下なので除く)。</summary>
+    private Rect VisibleClipRect(StoryboardLayout layout, ClipSpan c)
+    {
+        var r = ClipRect(layout, c);
+        return r.WithWidth(Math.Max(2, Math.Min(r.Right, FrameToX(c.End + 1 - c.FadeOut)) - r.X));
+    }
+
+    /// <summary>端をドラッグして長さを変えられる幅 (ピクセル)。</summary>
+    private const double EdgeGrip = 6;
+
+    /// <summary>位置が、クリップか音楽の端 (長さを変えるつまみ) か。繰り返す音楽は端で長さを変えない。</summary>
+    private (string Id, bool Music, bool Start)? EdgeAt(Point p)
+    {
+        var layout = _editor.Layout;
+        if (p.Y >= MusicTop && p.Y <= MusicTop + MusicHeight)
+        {
+            // 境目では、ポインタの下にある方の端を使う (なければ、少し外れていても近い方)
+            var m = layout.Music.LastOrDefault(x => MusicRect(x).Contains(p))
+                    ?? layout.Music.LastOrDefault(x => MusicRect(x).Inflate(new Thickness(EdgeGrip, 0)).Contains(p));
+            if (m == null || m.Music.Loop) return null;
+            return Edge(MusicRect(m), m.Music.Id, true);
+        }
+        if (p.Y >= ClipTop && p.Y <= ClipTop + ClipHeight)
+        {
+            var c = layout.Clips.LastOrDefault(x => VisibleClipRect(layout, x).Contains(p))
+                    ?? layout.Clips.LastOrDefault(x => VisibleClipRect(layout, x).Inflate(new Thickness(EdgeGrip, 0)).Contains(p));
+            if (c == null) return null;
+            return Edge(VisibleClipRect(layout, c), c.Clip.Id, false);
+        }
+        return null;
+
+        (string, bool, bool)? Edge(Rect r, string id, bool music)
+        {
+            if (r.Width < EdgeGrip * 3) return null;   // 細すぎるものは、選びやすさを優先する
+            if (Math.Abs(p.X - r.Left) <= EdgeGrip) return (id, music, true);
+            if (Math.Abs(p.X - r.Right) <= EdgeGrip) return (id, music, false);
+            return null;
+        }
+    }
+
     /// <summary>x の位置にドロップしたとき、並びの何番目に入るか (クリップの真ん中より左なら、その前)。</summary>
     public int InsertIndexAt(double x)
     {
@@ -155,8 +195,14 @@ public sealed class StoryboardStrip : Control
 
     // ---------------- マウス ----------------
 
-    private enum DragKind { None, Seek, Clip, Music }
+    private enum DragKind { None, Seek, Clip, Music, Resize }
     private DragKind _drag;
+    // 端のドラッグ: 対象、始まりの端か、ドラッグ前の設定、1 回のドラッグを 1 回の取り消しにまとめる印
+    private bool _resizeStart, _resizeMusic;
+    private StoryClip? _resizeClip;
+    private MusicClip? _resizeMusicOriginal;
+    private string? _resizeKey;
+    private int _resizeSerial;
     private string? _dragId;
     private Point _pressPoint;
     private bool _dragging;
@@ -173,7 +219,8 @@ public sealed class StoryboardStrip : Control
         int frame = XToFrame(p.X);
         if (props.IsRightButtonPressed)
         {
-            if (hit != null) _editor.Select(hit);
+            // いくつも選んでいるものの 1 つなら、選択はそのまま (まとめて削除などできるように)
+            if (hit != null && !_editor.IsSelected(hit)) _editor.Select(hit);
             MenuRequested?.Invoke(hit, frame);
             e.Handled = true;
             return;
@@ -182,6 +229,28 @@ public sealed class StoryboardStrip : Control
         _pressPoint = p;
         _dragging = false;
         Svc.Preview.Stop();
+        var mods = e.KeyModifiers;
+        if (hit != null && p.Y >= RulerHeight && (mods.HasFlag(KeyModifiers.Control) || mods.HasFlag(KeyModifiers.Meta) || mods.HasFlag(KeyModifiers.Shift)))
+        {
+            // Ctrl: 選択に加える / 外す、Shift: 範囲で選ぶ (ドラッグはしない)
+            if (mods.HasFlag(KeyModifiers.Shift)) _editor.SelectRange(hit); else _editor.ToggleSelect(hit);
+            e.Handled = true;
+            return;
+        }
+        if (p.Y >= RulerHeight && _editor.CanEdit && EdgeAt(p) is { } edge)
+        {
+            _editor.Select(edge.Id);
+            _drag = DragKind.Resize;
+            _dragId = edge.Id;
+            _resizeStart = edge.Start;
+            _resizeMusic = edge.Music;
+            _resizeClip = edge.Music ? null : _editor.Board?.FindClip(edge.Id)?.Clone();
+            _resizeMusicOriginal = edge.Music ? _editor.Board?.FindMusic(edge.Id)?.Clone() : null;
+            _resizeKey = $"resize:{edge.Id}:{++_resizeSerial}";
+            e.Pointer.Capture(this);
+            e.Handled = true;
+            return;
+        }
         if (p.Y < RulerHeight || hit == null)
         {
             if (p.Y >= RulerHeight) _editor.Select(null);
@@ -204,9 +273,16 @@ public sealed class StoryboardStrip : Control
     protected override void OnPointerMoved(PointerEventArgs e)
     {
         base.OnPointerMoved(e);
-        if (_drag == DragKind.None) return;
         var p = e.GetPosition(this);
+        if (_drag == DragKind.None)
+        {
+            // 端の上では、長さを変えられることをカーソルで示す
+            bool edge = p.Y >= RulerHeight && _editor.CanEdit && EdgeAt(p) != null;
+            Cursor = edge ? new Cursor(StandardCursorType.SizeWestEast) : Cursor.Default;
+            return;
+        }
         if (_drag == DragKind.Seek) { Seek(XToFrame(p.X)); return; }
+        if (_drag == DragKind.Resize) { Resize(p); return; }
         if (!_dragging && Math.Abs(p.X - _pressPoint.X) < 5) return;
         _dragging = true;
         if (_drag == DragKind.Clip) _dropIndex = InsertIndexAt(p.X);
@@ -221,6 +297,12 @@ public sealed class StoryboardStrip : Control
         e.Pointer.Capture(null);
         var kind = _drag;
         _drag = DragKind.None;
+        if (kind == DragKind.Resize)
+        {
+            _resizeClip = null; _resizeMusicOriginal = null; _resizeKey = null; _dragId = null; _dragging = false;
+            InvalidateVisual();
+            return;
+        }
         if (_dragging && _dragId != null)
         {
             if (kind == DragKind.Clip && _dropIndex is { } at && _editor.Board is { } board)
@@ -237,6 +319,25 @@ public sealed class StoryboardStrip : Control
         }
         _dragging = false; _dropIndex = null; _musicDelta = 0; _dragId = null;
         InvalidateVisual();
+    }
+
+    /// <summary>端のドラッグ中: ドラッグ前の設定から、動かした分だけ長さを変える (1 回の取り消しにまとまる)。</summary>
+    private void Resize(Point p)
+    {
+        if (_dragId == null) return;
+        if (!_dragging && Math.Abs(p.X - _pressPoint.X) < 2) return;
+        _dragging = true;
+        double delta = (p.X - _pressPoint.X) / _pps;
+        double startDelta = _resizeStart ? delta : 0, endDelta = _resizeStart ? 0 : delta;
+        if (_resizeMusic && _resizeMusicOriginal != null)
+        {
+            _editor.ResizeMusic(_dragId, _resizeMusicOriginal, startDelta, endDelta, _resizeKey);
+            return;
+        }
+        if (_resizeClip == null) return;
+        _editor.ResizeClip(_dragId, _resizeClip, startDelta, endDelta, _resizeKey);
+        // 切った所の絵が見えるように、現在位置をクリップの始まり / 終わりに合わせる
+        if (_editor.Layout.Find(_dragId) is { } span) Seek(_resizeStart ? span.Start : span.End);
     }
 
     protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
@@ -304,7 +405,7 @@ public sealed class StoryboardStrip : Control
         }
 
         string? selected = _editor.SelectedId;
-        foreach (var span in layout.Clips) DrawClip(ctx, layout, span, span.Clip.Id == selected);
+        foreach (var span in layout.Clips) DrawClip(ctx, layout, span, _editor.IsSelected(span.Clip.Id));
 
         if (layout.Music.Count == 0)
         {
@@ -425,6 +526,19 @@ public sealed class StoryboardStrip : Control
             ctx.FillRectangle(grad, tr);
             ctx.DrawText(Text("◆", 10, white), new Point(inner.X + 3, inner.Y + thumbTop + 2));
         }
+        // 最後に黒へフェードアウトする印 (クリップの出)
+        var board = _editor.Board;
+        if (board is { EndFadeSeconds: > 0 } && span.Index == layout.Clips.Count - 1)
+        {
+            double w = Math.Max(6, Math.Min(inner.Width / 2, board.EndFadeSeconds * _pps));
+            var tr = new Rect(inner.Right - w, inner.Y + thumbTop, w, thumbHeight);
+            var grad = new LinearGradientBrush
+            {
+                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
+                GradientStops = { new GradientStop(Color.FromArgb(0, 0, 0, 0), 0), new GradientStop(Color.FromArgb(220, 0, 0, 0), 1) },
+            };
+            ctx.FillRectangle(grad, tr);
+        }
         clipState.Dispose();
 
         if (selected) ctx.DrawRectangle(null, new Pen(Svc.Brush("Accent"), 2), inner.Deflate(1));
@@ -453,7 +567,16 @@ public sealed class StoryboardStrip : Control
                     ctx.DrawLine(pen, new Point(x, mid - h), new Point(x, mid + h));
                 }
             }
-            ctx.DrawText(Text("♪ " + Path.GetFileName(span.Music.File), 11, Brushes.White), new Point(inner.X + 4, inner.Y + (inner.Height - 15) / 2));
+            if (span.Music.Loop)
+            {
+                // 繰り返す所に区切りの線を引く
+                double cycle = Math.Max(StoryClip.MinSeconds, span.Music.Seconds) * _pps;
+                var pen = new Pen(new SolidColorBrush(Color.FromArgb(160, 255, 255, 255)), 1, new DashStyle(new double[] { 3, 3 }, 0));
+                for (double x = inner.X + cycle; x < inner.Right && x < Bounds.Width; x += cycle)
+                    if (x >= 0) ctx.DrawLine(pen, new Point(Math.Round(x) + 0.5, inner.Y), new Point(Math.Round(x) + 0.5, inner.Bottom));
+            }
+            string label = "♪ " + Path.GetFileName(span.Music.File) + (span.Music.Loop ? "  ↻" : "") + (span.Music.Duck ? "  ↓" : "");
+            ctx.DrawText(Text(label, 11, Brushes.White), new Point(inner.X + 4, inner.Y + (inner.Height - 15) / 2));
         }
         if (selected) ctx.DrawRectangle(null, new Pen(Svc.Brush("Accent"), 2), inner.Deflate(1));
     }
