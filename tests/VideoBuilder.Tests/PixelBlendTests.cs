@@ -163,4 +163,174 @@ public unsafe class PixelBlendTests
             Console.WriteLine($"BENCH blend-speed blend={blend,2} pixelblend {mine,6:0.00} ms/frame   skia {skia,6:0.00} ms/frame");
         }
     }
+
+    // ---- 効果の中の合成 (PixelBlend.Draw・DrawImage・BeginLayer) ----
+
+    /// <summary>効果のパラメータを、トラックか値かに合わせて設定する。</summary>
+    private static void Set(Effect e, string key, double value)
+    {
+        var def = e.Definition.Params.FirstOrDefault(p => p.Key == key);
+        if (def != null && def.Kind == ParamKind.Track) e.Tracks[key] = new AnimatedValue(value);
+        else e.Values[key] = value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string? _blendImage;
+
+    /// <summary>画像ファイル合成で重ねる絵 (色の帯)。</summary>
+    private static string BlendImage()
+    {
+        if (_blendImage != null && File.Exists(_blendImage)) return _blendImage;
+        var path = Path.Combine(Path.GetTempPath(), $"vb-blend-{Environment.ProcessId}.png");
+        using var bmp = new SKBitmap(new SKImageInfo(90, 60, SKColorType.Bgra8888, SKAlphaType.Premul));
+        using (var c = new SKCanvas(bmp))
+        {
+            using var sh = SKShader.CreateLinearGradient(new SKPoint(0, 0), new SKPoint(90, 60), new[] { new SKColor(250, 60, 40), new SKColor(40, 200, 250, 180) }, SKShaderTileMode.Clamp);
+            using var paint = new SKPaint { Shader = sh };
+            c.DrawPaint(paint);
+        }
+        using (var data = bmp.Encode(SKEncodedImageFormat.Png, 100))
+        using (var fs = File.Create(path)) data.SaveTo(fs);
+        return _blendImage = path;
+    }
+
+    // 効果の ID とパラメータ。どれも合成モードを使う描き方をする設定にする
+    public static TheoryData<string, string, double[]> EffectCases => new()
+    {
+        { "filter.diffuse", "strength,radius", new double[] { 70, 10 } },
+        { "filter.flash", "strength,length,threshold", new double[] { 100, 60, 20 } },
+        { "filter.mirror", "", Array.Empty<double>() },
+        { "filter.innershadow", "density,spread,x,y", new double[] { 90, 6, 5, 4 } },
+        { "filter.glow", "", Array.Empty<double>() },
+        { "filter.emit", "threshold", new double[] { 20 } },                // 既定のしきい値 (80%) では、この色は光らない
+        { "filter.vignette", "strength", new double[] { 100 } },
+        { "filter.gradient", "strength", new double[] { 100 } },
+        { "filter.ascii", "", Array.Empty<double>() },
+        { "filter.lensflare", "strength,x,y", new double[] { 100, -20, -15 } },  // 光源を絵の中に置く (絵の外は描かれない)
+        { "filter.lightleak", "strength", new double[] { 100 } },
+        { "filter.border", "size,only", new double[] { 6, 1 } },
+        { "filter.anim", "type", new double[] { 20 } },                     // 虹色
+        { "filter.transition", "type,edge", new double[] { 47, 6 } },       // 形のワイプ (境界線あり)
+        { "filter.transition", "type,edge", new double[] { 48, 0 } },       // 形のワイプ (境界線なし)
+        { "filter.transition", "type", new double[] { 78 } },               // 光漏れ
+        { "filter.imageblend", "blend", new double[] { 2 } },               // 乗算
+        { "filter.imageblend", "blend", new double[] { 3 } },               // スクリーン
+        { "filter.imageblend", "blend", new double[] { 9 } },               // ハードライト
+    };
+
+    [Theory]
+    [MemberData(nameof(EffectCases))]
+    public void Effects_with_blend_modes_render_the_same_as_with_skia(string id, string keys, double[] values)
+    {
+        var p = new Project();
+        p.Settings.Width = 320; p.Settings.Height = 180;
+        var back = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 60);
+        back.Main.Values["color"] = "#3A5070"; back.Main.Values["type"] = "0";
+        p.Root.Objects.Add(back);
+        var o = ObjectFactory.Create(EffectRegistry.Shape, 1, 0, 60);
+        o.Main.Values["color"] = "#E0A040"; o.Main.Values["type"] = "1";
+        o.Main.Tracks["size"] = new AnimatedValue(120);
+        p.Root.Objects.Add(o);
+        var e = ObjectFactory.AddFilter(o, id);
+        var names = keys.Length == 0 ? Array.Empty<string>() : keys.Split(',');
+        for (int i = 0; i < names.Length; i++) Set(e, names[i], values[i]);
+        if (id == "filter.imageblend") e.Values["file"] = BlendImage();
+        int frame = id == "filter.transition" ? 7 : 10;   // トランジションは途中のフレーム
+        SKBitmap Render()
+        {
+            using var engine = new RenderEngine();
+            var bmp = new SKBitmap(new SKImageInfo(320, 180, SKColorType.Bgra8888, SKAlphaType.Premul));
+            engine.RenderToBitmap(p, p.Root, frame, bmp);
+            return bmp;
+        }
+        using var mine = Render();
+        SKBitmap skia;
+        PixelBlend.Disabled = true;
+        try { skia = Render(); }
+        finally { PixelBlend.Disabled = false; }
+        using (skia)
+        {
+            var (mean, max) = Compare(skia, mine);
+            // 効果が絵を変えていることも確かめる (設定が効いていなければ比べる意味がない)
+            using var plain = new SKBitmap(mine.Info);
+            o.Effects.Remove(e);
+            using (var engine = new RenderEngine()) engine.RenderToBitmap(p, p.Root, frame, plain);
+            var (changed, _) = Compare(plain, mine);
+            Console.WriteLine($"BENCH pixelblend effect {id} {keys}={string.Join(",", values)} mean={mean:0.000} max={max} effect-changes={changed:0.00}");
+            Assert.True(changed > 0.05, $"{id}: 効果がかかっていない");
+            Assert.True(mean < 0.3 && max <= 6, $"{id}: Skia で合成したものと違う mean={mean} max={max}");
+        }
+    }
+
+    /// <summary>1080p で、合成モードを使う効果の描画時間を、自前の合成と Skia の合成で比べて表示する (Release で測ること)。</summary>
+    [Fact]
+    public void Report_effect_blend_speed()
+    {
+        var cases = EffectCases.Select(r => ((string)r.Data.Item1, (string)r.Data.Item2, (double[])r.Data.Item3)).ToList();
+        double Measure(string id, string keys, double[] values, int frames)
+        {
+            var p = new Project();
+            p.Settings.Width = 1920; p.Settings.Height = 1080;
+            var back = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 60);
+            back.Main.Values["color"] = "#3A5070"; back.Main.Values["type"] = "0";
+            p.Root.Objects.Add(back);
+            var o = ObjectFactory.Create(EffectRegistry.Shape, 1, 0, 60);
+            o.Main.Values["color"] = "#E0A040"; o.Main.Values["type"] = "1";
+            o.Main.Tracks["size"] = new AnimatedValue(800);
+            p.Root.Objects.Add(o);
+            var e = ObjectFactory.AddFilter(o, id);
+            var names = keys.Length == 0 ? Array.Empty<string>() : keys.Split(',');
+            for (int i = 0; i < names.Length; i++) Set(e, names[i], values[i]);
+            if (id == "filter.imageblend") e.Values["file"] = BlendImage();
+            using var engine = new RenderEngine();
+            using var bmp = new SKBitmap(new SKImageInfo(1920, 1080, SKColorType.Bgra8888, SKAlphaType.Premul));
+            int frame = id == "filter.transition" ? 7 : 10;
+            // 効果の結果は使い回されるので、元の図形の色を毎回少し変えて、効果を作り直させる
+            void Draw(int k) { o.Main.Values["color"] = $"#E0A0{k % 256:X2}"; engine.RenderToBitmap(p, p.Root, frame, bmp); }
+            Draw(0);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            for (int k = 1; k <= frames; k++) Draw(k);
+            return sw.Elapsed.TotalMilliseconds / frames;
+        }
+        // .NET の最適化が効くまで動かしてから測る
+        foreach (var (id, keys, values) in cases) Measure(id, keys, values, 8);
+        foreach (var (id, keys, values) in cases)
+        {
+            double mine = Measure(id, keys, values, 10);
+            PixelBlend.Disabled = true;
+            double skia;
+            try { skia = Measure(id, keys, values, 10); }
+            finally { PixelBlend.Disabled = false; }
+            Console.WriteLine($"BENCH effect-speed {id,-18} {keys}={string.Join(",", values),-14} pixelblend {mine,7:0.00} ms   skia {skia,7:0.00} ms");
+        }
+    }
+
+    /// <summary>縁取りの「縁だけ」を CPU 描画 (自前) と GPU 描画 (Skia の画像フィルタ) で描いて比べる。</summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(6)]
+    public void Border_only_on_cpu_matches_skia_on_gpu(double blur)
+    {
+        using var gpu = GpuContext.TryCreate(out var error);
+        if (gpu == null) { Assert.False(GpuSelectionTests.GpuRequired, "GPU を作れません: " + error); return; }
+        var p = new Project();
+        p.Settings.Width = 320; p.Settings.Height = 180;
+        var back = ObjectFactory.Create(EffectRegistry.Shape, 0, 0, 60);
+        back.Main.Values["color"] = "#3A5070"; back.Main.Values["type"] = "0";
+        p.Root.Objects.Add(back);
+        var o = ObjectFactory.Create(EffectRegistry.Text, 1, 0, 60);
+        o.Main.Values["text"] = "縁だけ";
+        p.Root.Objects.Add(o);
+        var e = ObjectFactory.AddFilter(o, "filter.border");
+        Set(e, "size", 5); Set(e, "blur", blur); Set(e, "only", 1);
+        using var cpu = new RenderEngine();
+        using var onGpu = new RenderEngine(gpu);
+        using var a = new SKBitmap(new SKImageInfo(320, 180, SKColorType.Bgra8888, SKAlphaType.Premul));
+        using var b = new SKBitmap(a.Info);
+        cpu.RenderToBitmap(p, p.Root, 0, a);
+        onGpu.RenderToBitmap(p, p.Root, 0, b);
+        var (mean, max) = Compare(a, b);
+        Console.WriteLine($"BENCH border-only blur={blur} cpu-vs-gpu mean={mean:0.000} max={max}");
+        // ぼかしの計算方法 (自前の 8 ビットの重みと Skia) と、文字の縁のアンチエイリアスの違いだけを許す
+        Assert.True(mean < 0.6, $"縁だけの縁取りが違う: mean={mean} max={max}");
+    }
 }

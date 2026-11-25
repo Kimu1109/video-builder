@@ -132,7 +132,7 @@ public static partial class Effects
             return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
             {
                 c.DrawImage(s.Image, x, y);
-                c.DrawImage(blurred.Image, x - (blurred.Cx - s.Cx), y - (blurred.Cy - s.Cy), paint);
+                PixelBlend.DrawImage(c, blurred.Image, x - (blurred.Cx - s.Cx), y - (blurred.Cy - s.Cy), paint);
             });
         }
     }
@@ -164,7 +164,7 @@ public static partial class Effects
             return Redraw(s, a, rp, rp, rp, rp, (c, x, y) =>
             {
                 if (!only) c.DrawImage(s.Image, x, y);
-                for (int i = 0; i < times; i++) c.DrawImage(r.Image, x - (r.Cx - s.Cx), y - (r.Cy - s.Cy), paint);
+                for (int i = 0; i < times; i++) PixelBlend.DrawImage(c, r.Image, x - (r.Cx - s.Cx), y - (r.Cy - s.Cy), paint);
             });
         }
     }
@@ -325,15 +325,16 @@ public static partial class Effects
                     case 2: area = SKRect.Create(x + w + gap, y, w, h); near = new(area.Left, 0); far = new(area.Left + len, 0); break;
                     default: area = SKRect.Create(x - gap - w, y, w, h); near = new(area.Right, 0); far = new(area.Right - len, 0); break;
                 }
-                c.SaveLayer(area, null);
-                c.Save();
-                if (vertical) { c.Translate(0, area.Top + area.Bottom); c.Scale(1, -1); c.DrawImage(s.Image, x, area.Top); }
-                else { c.Translate(area.Left + area.Right, 0); c.Scale(-1, 1); c.DrawImage(s.Image, area.Left, y); }
-                c.Restore();
+                // 反射した絵のレイヤー (CPU 描画では自前で合成する。PixelBlend)
+                using var layer = PixelBlend.BeginLayer(c, area, SKBlendMode.SrcOver);
+                var lc = layer.Canvas;
+                lc.Save();
+                if (vertical) { lc.Translate(0, area.Top + area.Bottom); lc.Scale(1, -1); lc.DrawImage(s.Image, x, area.Top); }
+                else { lc.Translate(area.Left + area.Right, 0); lc.Scale(-1, 1); lc.DrawImage(s.Image, area.Left, y); }
+                lc.Restore();
                 using var shader = SKShader.CreateLinearGradient(near, far, new[] { edge, SKColors.Transparent }, SKShaderTileMode.Clamp);
                 using var mask = new SKPaint { Shader = shader, BlendMode = SKBlendMode.DstIn };
-                c.DrawRect(area, mask);
-                c.Restore();
+                PixelBlend.Draw(lc, area, mask, (cv, p) => cv.DrawRect(area, p));
             });
         }
     }
@@ -623,8 +624,10 @@ public static partial class Effects
             float cx = s.Cx + a.Track("x"), cy = s.Cy + a.Track("y");
             return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
             {
-                c.SaveLayer();
-                c.DrawImage(s.Image, x, y);
+                // 元の絵の形で切り抜くためのレイヤー (CPU 描画では自前で合成する。PixelBlend)
+                using var layer = PixelBlend.BeginLayer(c, SKRect.Create(x, y, s.Width, s.Height), SKBlendMode.SrcOver);
+                var lc = layer.Canvas;
+                lc.DrawImage(s.Image, x, y);
                 using var paint = new SKPaint
                 {
                     BlendMode = FileBlendModes[mode], FilterQuality = SKFilterQuality.Medium,
@@ -637,13 +640,12 @@ public static partial class Effects
                     var local = SKMatrix.CreateScale(zoom, zoom).PostConcat(SKMatrix.CreateTranslation(dest.Left, dest.Top));
                     using var shader = SKShader.CreateImage(img, SKShaderTileMode.Repeat, SKShaderTileMode.Repeat, local);
                     paint.Shader = shader;
-                    c.DrawRect(SKRect.Create(x, y, s.Width, s.Height), paint);
+                    PixelBlend.Draw(lc, SKRect.Create(x, y, s.Width, s.Height), paint, (cv, p) => cv.DrawRect(SKRect.Create(x, y, s.Width, s.Height), p));
                 }
-                else c.DrawImage(img, dest, paint);
+                else PixelBlend.Draw(lc, dest, paint, (cv, p) => cv.DrawImage(img, dest, p));
                 // 元の絵の形で切り抜く
                 using var clip = new SKPaint { BlendMode = SKBlendMode.DstIn };
-                c.DrawImage(s.Image, x, y, clip);
-                c.Restore();
+                PixelBlend.DrawImage(lc, s.Image, x, y, clip);
             });
         }
     }

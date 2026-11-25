@@ -280,6 +280,8 @@ public static unsafe class PixelOps
             using var surface = SKSurface.Create(new SKImageInfo(width, y1 - y0, SKColorType.Bgra8888, SKAlphaType.Premul), pixels + y0 * rowBytes, rowBytes);
             var canvas = surface.Canvas;
             canvas.Clear(SKColors.Transparent);
+            // 効果の中の合成モードの描画を、自前で合成できるようにする (PixelBlend)
+            PixelBlend.Register(canvas, pixels + y0 * rowBytes, rowBytes, width, y1 - y0);
             canvas.Translate(0, -y0);
             draw(canvas);
             canvas.Flush();

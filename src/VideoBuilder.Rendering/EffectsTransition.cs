@@ -452,14 +452,14 @@ public static partial class Effects
         return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
         {
             c.DrawImage(s.Image, x, y);
-            using (var layerPaint = new SKPaint { BlendMode = leaving ? SKBlendMode.DstOut : SKBlendMode.DstIn })
+            // 形のレイヤーで切り抜く (CPU 描画では自前で合成する。PixelBlend)
+            using (var layer = PixelBlend.BeginLayer(c, null, leaving ? SKBlendMode.DstOut : SKBlendMode.DstIn))
             {
-                c.SaveLayer(layerPaint);
+                var lc = layer.Canvas;
                 using var shapePaint = new SKPaint { IsAntialias = antialias, Color = SKColors.White };
                 if (feather > 0) shapePaint.MaskFilter = SKMaskFilter.CreateBlur(SKBlurStyle.Normal, feather / 2);
-                c.Translate(x, y);
-                c.DrawPath(path, shapePaint);
-                c.Restore();
+                lc.Translate(x, y);
+                lc.DrawPath(path, shapePaint);
             }
             if (edge <= 0) return;
             // 境界線: 形の内側だけ (出る側の絵に隠れない所) に、絵の見えている所だけ描く
@@ -805,27 +805,27 @@ public static partial class Effects
         return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
         {
             c.DrawImage(s.Image, x, y);
-            using var layerPaint = new SKPaint { BlendMode = SKBlendMode.Screen };
-            c.SaveLayer(layerPaint);
-            c.Translate(x, y);
+            // スクリーンのレイヤー (CPU 描画では自前で合成する。PixelBlend)
+            using var layer = PixelBlend.BeginLayer(c, SKRect.Create(x, y, s.Width, s.Height), SKBlendMode.Screen);
+            var lc = layer.Canvas;
+            lc.Translate(x, y);
             using (var g1 = SKShader.CreateRadialGradient(new SKPoint(lx, ly), radius,
                        new[] { new SKColor(255, 214, 150, A(k)), new SKColor(255, 110, 40, A(k * 0.75f)), new SKColor(255, 60, 90, 0) }, new[] { 0f, 0.45f, 1f }, SKShaderTileMode.Clamp))
             using (var p1 = new SKPaint { Shader = g1 })
-                c.DrawRect(SKRect.Create(0, 0, s.Width, s.Height), p1);
+                lc.DrawRect(SKRect.Create(0, 0, s.Width, s.Height), p1);
             float lx2 = G.Right - G.Width * (-0.1f + 1.2f * u), ly2 = G.Bottom - G.Height * 0.2f;
             using (var g2 = SKShader.CreateRadialGradient(new SKPoint(lx2, ly2), radius * 0.7f,
                        new[] { new SKColor(255, 120, 170, A(k * 0.6f)), new SKColor(255, 120, 170, 0) }, SKShaderTileMode.Clamp))
             using (var p2 = new SKPaint { Shader = g2 })
-                c.DrawRect(SKRect.Create(0, 0, s.Width, s.Height), p2);
+                lc.DrawRect(SKRect.Create(0, 0, s.Width, s.Height), p2);
             // 切り替わる瞬間は、ほぼ白に飛ばす
             float white = Math.Clamp((k - 0.7f) / 0.3f, 0, 1);
             if (white > 0)
                 using (var p3 = new SKPaint { Color = new SKColor(255, 244, 228, A(white)) })
-                    c.DrawRect(SKRect.Create(0, 0, s.Width, s.Height), p3);
+                    lc.DrawRect(SKRect.Create(0, 0, s.Width, s.Height), p3);
             // 光は絵の見えている所だけに乗せる
             using (var keep = new SKPaint { BlendMode = SKBlendMode.DstIn })
-                c.DrawImage(s.Image, 0, 0, keep);
-            c.Restore();
+                PixelBlend.DrawImage(lc, s.Image, 0, 0, keep);
         });
     }
 

@@ -378,7 +378,7 @@ public static partial class Effects
     /// Skia の画像フィルタ (色の付いた絵全体を太らせてぼかす) と同じ結果を、アルファの 1 チャンネルだけで計算する。
     /// ピクセルを読めない絵なら null (呼び出し側は Skia で描く)。
     /// </summary>
-    public static unsafe SKImage? BorderOnCpu(SKImage image, int size, float sigma, int pad, SKColor color)
+    public static unsafe SKImage? BorderOnCpu(SKImage image, int size, float sigma, int pad, SKColor color, bool only = false)
     {
         int w = image.Width, h = image.Height, ow = w + pad * 2, oh = h + pad * 2;
         if (ow > 16384 || oh > 16384) return null;
@@ -435,6 +435,9 @@ public static partial class Effects
                         int sx = x - pad;
                         uint sp = srow != null && sx >= 0 && sx < w ? srow[sx] : 0;
                         int sa = (int)(sp >> 24);
+                        // 縁だけ (only) のときは、元の絵は重ねずに、元の絵のある所の縁を抜く (DstOut と同じ: 縁 × (1 - sa))。
+                        // sa は元の絵のアルファのまま使い、重ねる元の絵 (sp) だけを 0 にする
+                        if (only) sp = 0;
                         // よくある場合を先に: 元の絵が不透明 (縁取りは見えない)・縁取りも元の絵もない
                         if (sa == 255) { d[x] = sp; continue; }
                         if (mv == 0) { d[x] = sp; continue; }
@@ -443,7 +446,7 @@ public static partial class Effects
                         int bb = Div255(Div255(pb * mv) * inv) + (int)(sp & 0xFF);
                         int bg = Div255(Div255(pg * mv) * inv) + (int)(sp >> 8 & 0xFF);
                         int br = Div255(Div255(pr * mv) * inv) + (int)(sp >> 16 & 0xFF);
-                        int ba = Div255(Div255(ca * mv) * inv) + sa;
+                        int ba = Div255(Div255(ca * mv) * inv) + (only ? 0 : sa);
                         d[x] = (uint)(bb | bg << 8 | br << 16 | ba << 24);
                     }
                 }
@@ -471,7 +474,8 @@ public static partial class Effects
             if (size <= 0) return s;
             int pad = a.IsFrameBuffer ? 0 : size + (int)MathF.Ceiling(blur * 1.5f);
             bool only = a.Check("only");
-            if (!only && a.Context.Gpu == null && BorderOnCpu(s.Image, size, blur / 2, pad, a.Color("color")) is { } own)
+            // CPU 描画は自前で描く (SkiaSharp 3 の CPU 描画では、Skia の太らせるフィルタが 2.88 の 50 倍ほど遅い)
+            if (a.Context.Gpu == null && BorderOnCpu(s.Image, size, blur / 2, pad, a.Color("color"), only) is { } own)
                 return new Sprite(a.Context.Own(own), s.Cx + pad, s.Cy + pad);
             using var dilate = SKImageFilter.CreateDilate(size, size);
             using var cf = SKColorFilter.CreateBlendMode(a.Color("color"), SKBlendMode.SrcIn);
@@ -483,7 +487,7 @@ public static partial class Effects
             return Redraw(s, a, pad, pad, pad, pad, (c, x, y) =>
             {
                 c.DrawImage(s.Image, x, y, paint);
-                c.DrawImage(s.Image, x, y, cut);
+                PixelBlend.DrawImage(c, s.Image, x, y, cut);
             });
         }
     }

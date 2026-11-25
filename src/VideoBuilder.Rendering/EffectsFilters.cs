@@ -805,11 +805,13 @@ public static partial class Effects
                 using var bgPaint = new SKPaint { Color = bg };
                 using var font = new SKFont(face, cellH * 1.05f);
                 using var paint = new SKPaint { IsAntialias = true };
-                // 背景は絵の見えている所だけ
-                c.SaveLayer(null);
-                c.DrawRect(SKRect.Create(x, y, s.Width, s.Height), bgPaint);
-                using (var keep = new SKPaint { BlendMode = SKBlendMode.DstIn }) c.DrawImage(s.Image, x, y, keep);
-                c.Restore();
+                // 背景は絵の見えている所だけ (CPU 描画では自前で合成する。PixelBlend)
+                using (var layer = PixelBlend.BeginLayer(c, SKRect.Create(x, y, s.Width, s.Height), SKBlendMode.SrcOver))
+                {
+                    layer.Canvas.DrawRect(SKRect.Create(x, y, s.Width, s.Height), bgPaint);
+                    using var keep = new SKPaint { BlendMode = SKBlendMode.DstIn };
+                    PixelBlend.DrawImage(layer.Canvas, s.Image, x, y, keep);
+                }
                 for (int cy = 0; cy < rows; cy++)
                     for (int cx = 0; cx < cols; cx++)
                     {
@@ -847,6 +849,8 @@ public static partial class Effects
                 {
                     using var sh = SKShader.CreateRadialGradient(new SKPoint(px, py), Math.Max(1, r), new[] { col.WithAlpha(A(alpha)), col.WithAlpha(0) }, SKShaderTileMode.Clamp);
                     paint.Shader = sh;
+                    // スクリーンで重ねる。PixelBlend (作業用の画像に描いてから合成) は使わない:
+                    // グラデーションの円を 1 つずつ作業用の画像に描くと、Skia で直接描くより遅くなる (設計書 22.53)
                     c.DrawCircle(px, py, r, paint);
                     paint.Shader = null;
                 }
@@ -895,9 +899,10 @@ public static partial class Effects
             return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
             {
                 c.DrawImage(s.Image, x, y);
-                using var layerPaint = new SKPaint { BlendMode = SKBlendMode.Screen };
-                c.SaveLayer(layerPaint);
-                c.Translate(x, y);
+                // スクリーンのレイヤー (CPU 描画では自前で合成する。PixelBlend)
+                using var layer = PixelBlend.BeginLayer(c, SKRect.Create(x, y, s.Width, s.Height), SKBlendMode.Screen);
+                var lc = layer.Canvas;
+                lc.Translate(x, y);
                 float big = Math.Max(s.Width, s.Height);
                 SKColor[] cols = { new(255, 120, 40), new(255, 60, 90), new(255, 200, 90) };
                 for (int i = 0; i < 3; i++)
@@ -909,10 +914,9 @@ public static partial class Effects
                     using var sh = SKShader.CreateRadialGradient(new SKPoint(px * s.Width, py * s.Height), big * (0.35f + 0.25f * pulse),
                         new[] { cols[i].WithAlpha(A(0.75f * k * pulse)), cols[i].WithAlpha(0) }, SKShaderTileMode.Clamp);
                     using var p = new SKPaint { Shader = sh };
-                    c.DrawRect(SKRect.Create(0, 0, s.Width, s.Height), p);
+                    lc.DrawRect(SKRect.Create(0, 0, s.Width, s.Height), p);
                 }
-                using (var keep = new SKPaint { BlendMode = SKBlendMode.DstIn }) c.DrawImage(s.Image, 0, 0, keep);
-                c.Restore();
+                using (var keep = new SKPaint { BlendMode = SKBlendMode.DstIn }) PixelBlend.DrawImage(lc, s.Image, 0, 0, keep);
             });
         }
     }

@@ -157,15 +157,15 @@ public static partial class Effects
         return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
         {
             c.DrawImage(s.Image, x, y);
-            using var layerPaint = new SKPaint { BlendMode = SKBlendMode.Multiply };
-            c.SaveLayer(layerPaint);
+            // 乗算のレイヤー (CPU 描画では自前で合成する。PixelBlend)
+            using var layer = PixelBlend.BeginLayer(c, SKRect.Create(x, y, s.Width, s.Height), SKBlendMode.Multiply);
+            var lc = layer.Canvas;
             var local = SKMatrix.CreateRotationDegrees(-25).PostConcat(SKMatrix.CreateTranslation(x + shift * period, y));
             using (var shader = SKShader.CreateLinearGradient(new SKPoint(0, 0), new SKPoint(period, 0), colors, null, SKShaderTileMode.Repeat, local))
             using (var paint = new SKPaint { Shader = shader })
-                c.DrawRect(SKRect.Create(x, y, s.Width, s.Height), paint);
+                lc.DrawRect(SKRect.Create(x, y, s.Width, s.Height), paint);
             using (var keep = new SKPaint { BlendMode = SKBlendMode.DstIn })
-                c.DrawImage(s.Image, x, y, keep);
-            c.Restore();
+                PixelBlend.DrawImage(lc, s.Image, x, y, keep);
         });
     }
 

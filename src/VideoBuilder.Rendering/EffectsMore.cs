@@ -144,7 +144,7 @@ public static partial class Effects
                 {
                     if (!only) cv.DrawImage(s.Image, x, y);
                     foreach (var g in glows)
-                        for (int i = 0; i < times; i++) cv.DrawImage(g.Image, x - (g.Cx - s.Cx), y - (g.Cy - s.Cy), paint);
+                        for (int i = 0; i < times; i++) PixelBlend.DrawImage(cv, g.Image, x - (g.Cx - s.Cx), y - (g.Cy - s.Cy), paint);
                 });
             }
         }
@@ -292,7 +292,8 @@ public static partial class Effects
             {
                 c.DrawImage(s.Image, x, y);
                 c.Translate(x, y);
-                c.DrawRect(SKRect.Create(s.Width, s.Height), paint);
+                var rect = SKRect.Create(s.Width, s.Height);
+                PixelBlend.Draw(c, rect, paint, (cv, p) => cv.DrawRect(rect, p));
             });
         }
     }
@@ -321,7 +322,8 @@ public static partial class Effects
             {
                 c.DrawImage(s.Image, x, y);
                 c.Translate(x, y);
-                c.DrawRect(SKRect.Create(s.Width, s.Height), paint);
+                var rect = SKRect.Create(s.Width, s.Height);
+                PixelBlend.Draw(c, rect, paint, (cv, p) => cv.DrawRect(rect, p));
             });
         }
     }
