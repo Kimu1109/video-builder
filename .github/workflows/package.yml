@@ -192,8 +192,13 @@ jobs:
         # D3D11VA (デコード) と Media Foundation (エンコード) が入っていること。Windows on ARM では GPU を使う方法はこれだけ
         run: |
           ffmpeg="$(cygpath -u "$RUNNER_TEMP")/ffmpeg/bin/ffmpeg.exe"
-          "$ffmpeg" -hide_banner -hwaccels | tee /dev/stderr | grep -q '^d3d11va'
-          "$ffmpeg" -hide_banner -encoders | tee /dev/stderr | grep -q ' h264_mf '
+          # MSYS2 のシェルには /dev/stderr がないので、tee ではなく変数に受けて表示する
+          hwaccels="$("$ffmpeg" -hide_banner -hwaccels | tr -d '\r')"
+          encoders="$("$ffmpeg" -hide_banner -encoders | tr -d '\r')"
+          echo "$hwaccels"
+          echo "$encoders" | grep -E '_(mf|nvenc|qsv|amf) ' || true
+          echo "$hwaccels" | grep -qx d3d11va || { echo "d3d11va がありません" >&2; exit 1; }
+          echo "$encoders" | grep -q ' h264_mf ' || { echo "h264_mf がありません" >&2; exit 1; }
       - name: Smoke test with the bundled FFmpeg only
         # MSYS2 の PATH を使わない (同梱したものだけで読み込めることを確かめる)
         shell: pwsh
