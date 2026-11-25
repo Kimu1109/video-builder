@@ -196,7 +196,7 @@ public static partial class Effects
                 if (!Half(u, leaving, ref m, out float w)) return s;
                 int size = (int)MathF.Round(1 + w * w * G.Width / 14);
                 if (size < 2) return s;
-                return WithPixels(s, a, (px, w2, h2, rb) => PixelOps.Mosaic(px, w2, h2, rb, size), alsoOnGpu: true) ?? s;
+                return MosaicOnGpu(s, a, size) ?? WithPixels(s, a, (px, w2, h2, rb) => PixelOps.Mosaic(px, w2, h2, rb, size), alsoOnGpu: true) ?? s;
             }
             case 80:   // 波紋: 波紋が強くなって切り替わり、収まる
             {

@@ -858,4 +858,67 @@ public static partial class Effects
         return ApplyGpuShader(s, a, NoiseShader, u => { u["cell"] = (float)cell; u["amp"] = (float)amp; u["colored"] = color ? 1f : 0f; },
             (kids, _, _) => kids["cells"] = cellShader);
     }
+
+    // ---------------- モザイク ----------------
+
+    /// <summary>
+    /// GPU で扱うマスの大きさの上限。SkSL のループは回数が定数でなければならず、Skia はループを展開するので、
+    /// ループの中身を含めて大きくなりすぎるとコンパイルできない (32 × 32 は通り、64 × 64 は通らない)。
+    /// 大きなマスを横と縦に分けて合計するには途中の合計を正確に持つ描画先が要るが、Skia の GPU 描画 (GLES) では
+    /// 32 ビットの浮動小数点の描画先を作れず、16 ビットでは合計が収まらない。それより大きいマスは、読み戻して CPU で処理する。
+    /// </summary>
+    private const int MaxMosaicCell = 32;
+
+    private static readonly Sksl MosaicCellShader = new("""
+        uniform shader image;
+        uniform float cell;
+        uniform float2 size;
+        // 1 画素 = 1 マス。マスの中の平均 (乗算済みのまま)
+        half4 main(float2 p) {
+            float2 o = floor(p) * cell;
+            float2 e = min(size, o + cell);
+            float4 sum = float4(0);
+            for (int j = 0; j < 32; j++) {
+                float y = o.y + float(j);
+                if (y >= e.y) break;
+                for (int i = 0; i < 32; i++) {
+                    float x = o.x + float(i);
+                    if (x >= e.x) break;
+                    sum += floor(float4(image.eval(float2(x, y) + 0.5)) * 255 + 0.5);
+                }
+            }
+            float n = (e.x - o.x) * (e.y - o.y);
+            // (sum + n/2) / n の切り捨て (PixelOps.Mosaic と同じ四捨五入)。+0.5 で、割り算の誤差で境目ちょうどの値が 1 つ下にならないようにする
+            return half4(floor((sum + floor(n / 2) + 0.5) / n) / 255);
+        }
+        """);
+
+    /// <summary>
+    /// モザイクを GPU で (マスごとの平均を小さな画像に描いてから、補間なしで広げる)。
+    /// GPU 描画でない・マスが大きすぎるときは null (読み戻して CPU で処理する)。
+    /// </summary>
+    internal static Sprite? MosaicOnGpu(Sprite s, EffectArgs a, int size)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || size > MaxMosaicCell || MosaicCellShader.Effect is not { } effect) return null;
+        if (size <= 1) return s;
+        int sw = (s.Width + size - 1) / size, sh = (s.Height + size - 1) / size;
+        using var small = a.Context.CreateSurface(sw, sh);
+        if (small == null) return null;
+        using (var image = s.Image.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp))
+        {
+            var kids = new SKRuntimeEffectChildren(effect) { ["image"] = image };
+            var u = new SKRuntimeEffectUniforms(effect) { ["cell"] = (float)size, ["size"] = new float[] { s.Width, s.Height } };
+            using var shader = effect.ToShader(u, kids);
+            using var paint = new SKPaint { Shader = shader, BlendMode = SKBlendMode.Src };
+            small.Canvas.DrawRect(SKRect.Create(sw, sh), paint);
+        }
+        using var smallImg = small.Snapshot();
+        return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
+        {
+            c.Save();
+            c.ClipRect(SKRect.Create(x, y, s.Width, s.Height));
+            c.DrawImage(smallImg, SKRect.Create(sw, sh), SKRect.Create(x, y, sw * size, sh * size), new SKSamplingOptions(SKFilterMode.Nearest), null);
+            c.Restore();
+        });
+    }
 }

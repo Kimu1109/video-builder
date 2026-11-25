@@ -120,6 +120,8 @@ public unsafe class GpuShaderTests
         { "filter.edge", "strength,threshold,overlay,type", new double[] { 150, 10, 1, 1 } },   // 不透明度の変わり目・重ねる
         { "filter.noise", "amount,size", new double[] { 40, 3 } },
         { "filter.noise", "amount,size,color", new double[] { 40, 1, 1 } },
+        { "filter.mosaic", "size", new double[] { 8 } },
+        { "filter.mosaic", "size", new double[] { 13 } },     // 割り切れない大きさ (端のマスは欠ける)
     };
 
     [Theory]

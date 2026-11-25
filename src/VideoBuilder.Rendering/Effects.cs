@@ -561,7 +561,8 @@ public static partial class Effects
             int size = Math.Max(1, (int)a.Track("size"));
             if (size <= 1) return s;
             // ピクセルを直接平均する。CPU 描画では縮小と拡大を 2 回描くより速く、マスの色も正確になる。
-            // GPU 描画でも同じ絵になるよう、読み戻してこの処理を使う
+            // GPU 描画では SkSL で同じ計算をする (読み戻さない。設計書 22.54)。マスが大きすぎるときは読み戻してこの処理を使う
+            if (MosaicOnGpu(s, a, size) is { } onGpu) return onGpu;
             if (WithPixels(s, a, (px, w, h, rb) => PixelOps.Mosaic(px, w, h, rb, size), alsoOnGpu: true) is { } fast) return fast;
             int sw = Math.Max(1, (int)MathF.Ceiling(s.Width / (float)size)), sh = Math.Max(1, (int)MathF.Ceiling(s.Height / (float)size));
             using var small = a.Context.CreateSurface(sw, sh);
