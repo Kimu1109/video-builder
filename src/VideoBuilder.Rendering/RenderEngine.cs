@@ -142,8 +142,15 @@ public sealed class RenderEngine : IDisposable
     }
 
     /// <summary>
+    /// RenderToBitmap の dest にいちばん速く読み戻せる色の並び。GPU 描画なら描画先と同じ RGBA
+    /// (BGRA で読むと、読み戻しのたびに R と B を入れ替える処理が入る)、CPU 描画なら BGRA。
+    /// </summary>
+    public SKColorType ReadbackColorType => Gpu != null ? SKColorType.Rgba8888 : SKColorType.Bgra8888;
+
+    /// <summary>
     /// dest の大きさでフレームを描いて、ピクセルを dest に入れる。
     /// GPU が使えるときは GPU で描いてから読み戻し、使えないときは CPU で直接描く。
+    /// dest は BGRA でも RGBA でもよい (CPU 描画で RGBA のときは、BGRA で描いてから並べ替える)。
     /// </summary>
     public void RenderToBitmap(Project project, Scene scene, int frame, SKBitmap dest)
     {
@@ -161,6 +168,22 @@ public sealed class RenderEngine : IDisposable
                 Render(project, scene, frame, _gpuSurface);
                 if (_gpuSurface.ReadPixels(dest.Info, dest.GetPixels(), dest.RowBytes, 0, 0)) return;
             }
+        }
+        if (dest.ColorType != SKColorType.Bgra8888)
+        {
+            // CPU 描画は BGRA を前提にしている (描画先のピクセルを直接扱う処理がある)。BGRA で描いて写す
+            var info = Effects.Info(dest.Width, dest.Height);
+            int rowBytes = info.Width * 4;
+            long bytes = (long)rowBytes * info.Height;
+            var buffer = PixelPool.Rent(bytes);
+            try
+            {
+                using (var bgra = SKSurface.Create(info, buffer, rowBytes)) Render(project, scene, frame, bgra);
+                using var pixmap = new SKPixmap(info, buffer, rowBytes);
+                pixmap.ReadPixels(dest.Info, dest.GetPixels(), dest.RowBytes, 0, 0);
+            }
+            finally { PixelPool.Return(buffer, bytes); }
+            return;
         }
         using var surface = SKSurface.Create(dest.Info, dest.GetPixels(), dest.RowBytes);
         Render(project, scene, frame, surface);

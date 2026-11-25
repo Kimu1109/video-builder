@@ -166,6 +166,21 @@ public static partial class Effects
         return WithPaint(s, a, paint);
     }
 
+    /// <summary>
+    /// RGB に同じ変換表 (256 個) をかける (アルファはそのまま)。CPU 描画では PixelFx.ApplyLut、
+    /// GPU 描画では Skia の表のカラーフィルタ (アルファを外してから表を引き、掛け戻す。ApplyLut と同じ考え方) を使い、
+    /// 読み戻さずに GPU のまま処理する。
+    /// </summary>
+    internal static Sprite ApplyLut(Sprite s, EffectArgs a, byte[] lut)
+    {
+        if (WithPixels(s, a, (px, w, h, rb) => PixelFx.ApplyLut(px, w, h, rb, lut)) is { } fast) return fast;
+        using var cf = SKColorFilter.CreateTable(IdentityTable, lut, lut, lut);
+        using var paint = new SKPaint { ColorFilter = cf };
+        return WithPaint(s, a, paint);
+    }
+
+    private static readonly byte[] IdentityTable = Enumerable.Range(0, 256).Select(i => (byte)i).ToArray();
+
     /// <summary>ぼかしを何分の 1 の大きさで計算するか。大きくぼかすときは縮小してから計算しても見分けがつかない。</summary>
     internal static int BlurDownscale(float sigma)
     {

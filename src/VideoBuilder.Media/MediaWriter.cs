@@ -28,6 +28,10 @@ public sealed unsafe class MediaWriter : IDisposable
     private AVStream* _vst, _ast;
     private SwsContext* _sws;
     private bool _swsThreaded;
+    // RGBA で渡されたフレーム用の変換 (GPU 描画の書き出しで使う。初めて使うときに作る)
+    private SwsContext* _swsRgba;
+    private bool _swsRgbaThreaded;
+    private AVPixelFormat _softwareFormat;
 
     /// <summary>BGRA → YUV の変換に使うスレッドの数 (1 なら今までどおり 1 スレッド)。テストで変える。</summary>
     internal static int ConvertThreads { get; set; } = Math.Clamp(Environment.ProcessorCount, 1, 8);
@@ -117,16 +121,24 @@ public sealed unsafe class MediaWriter : IDisposable
         _vframe->format = (int)softwareFormat;
         _vframe->width = _venc->width; _vframe->height = _venc->height;
         FFmpegLoader.Check(ffmpeg.av_frame_get_buffer(_vframe, 0), "フレームの確保に失敗");
-        _sws = CreateScaler(_width, _height, AVPixelFormat.AV_PIX_FMT_BGRA, _venc->width, _venc->height, softwareFormat,
-            (int)SwsFlags.SWS_BICUBIC, ConvertThreads, out _swsThreaded);
-        if (_sws == null) throw new InvalidOperationException("色変換の準備に失敗");
+        _softwareFormat = softwareFormat;
+        _sws = CreateConverter(AVPixelFormat.AV_PIX_FMT_BGRA, out _swsThreaded);
+    }
+
+    /// <summary>source の形式からエンコーダの形式への変換を作る。BT.709 (HD 以上) の設定もする。</summary>
+    private SwsContext* CreateConverter(AVPixelFormat source, out bool threaded)
+    {
+        var sws = CreateScaler(_width, _height, source, _venc->width, _venc->height, _softwareFormat,
+            (int)SwsFlags.SWS_BICUBIC, ConvertThreads, out threaded);
+        if (sws == null) throw new InvalidOperationException("色変換の準備に失敗");
         // BT.709 で変換する (HD 以上の標準)
         if (_height >= 720)
         {
             var coef = ffmpeg.sws_getCoefficients(ffmpeg.SWS_CS_ITU709);
             var arr = new int_array4(); for (uint i = 0; i < 4; i++) arr[i] = coef[i];
-            ffmpeg.sws_setColorspaceDetails(_sws, arr, 1, arr, 0, 0, 1 << 16, 1 << 16);
+            ffmpeg.sws_setColorspaceDetails(sws, arr, 1, arr, 0, 0, 1 << 16, 1 << 16);
         }
+        return sws;
     }
 
     private void OpenAudio(ExportSettings s, bool globalHeader)
@@ -174,12 +186,16 @@ public sealed unsafe class MediaWriter : IDisposable
     private readonly List<IntPtr> _allFrames = new();
 
     /// <summary>
-    /// BGRA を、エンコーダに渡せる形式 (YUV など) に変換したフレームを返す。WritePreparedVideoFrame に渡すこと。
+    /// BGRA (rgba が true なら RGBA) を、エンコーダに渡せる形式 (YUV など) に変換したフレームを返す。WritePreparedVideoFrame に渡すこと。
     /// 変換 (PrepareVideoFrame) と書き込み (WritePreparedVideoFrame) は、それぞれ 1 つのスレッドからなら、別々のスレッドで呼んでよい。
+    /// RGBA は GPU で描いたフレーム用 (GPU の描画先の並びのまま読み戻せば、読み戻しで R と B を入れ替えずに済む)。
     /// </summary>
-    public IntPtr PrepareVideoFrame(ReadOnlySpan<byte> bgra, int stride)
+    public IntPtr PrepareVideoFrame(ReadOnlySpan<byte> bgra, int stride, bool rgba = false)
     {
         if (_venc == null) return IntPtr.Zero;
+        if (rgba && _swsRgba == null) _swsRgba = CreateConverter(AVPixelFormat.AV_PIX_FMT_RGBA, out _swsRgbaThreaded);
+        var sws = rgba ? _swsRgba : _sws;
+        bool threaded = rgba ? _swsRgbaThreaded : _swsThreaded;
         if (!_framePool.TryTake(out var handle))
         {
             var f = ffmpeg.av_frame_alloc();
@@ -191,17 +207,17 @@ public sealed unsafe class MediaWriter : IDisposable
         var frame = (AVFrame*)handle;
         fixed (byte* p = bgra)
         {
-            if (_swsThreaded)
+            if (threaded)
             {
                 // 複数スレッドで変換する。描画したフレームは複製せず、解放しないバッファとして包んで渡す
                 var src = ffmpeg.av_frame_alloc();
                 try
                 {
-                    src->format = (int)AVPixelFormat.AV_PIX_FMT_BGRA;
+                    src->format = (int)(rgba ? AVPixelFormat.AV_PIX_FMT_RGBA : AVPixelFormat.AV_PIX_FMT_BGRA);
                     src->width = _width; src->height = _height;
                     src->buf[0] = ffmpeg.av_buffer_create(p, (ulong)bgra.Length, NoFree, null, 0);
                     src->data[0] = p; src->linesize[0] = stride;
-                    int ret = ffmpeg.sws_scale_frame(_sws, frame, src);
+                    int ret = ffmpeg.sws_scale_frame(sws, frame, src);
                     FFmpegLoader.Check(ret, "色変換に失敗");
                 }
                 finally { ffmpeg.av_frame_free(&src); }
@@ -210,7 +226,7 @@ public sealed unsafe class MediaWriter : IDisposable
             {
                 var src = new byte*[4] { p, null, null, null };
                 var strides = new int[4] { stride, 0, 0, 0 };
-                ffmpeg.sws_scale(_sws, src, strides, 0, _height, frame->data, frame->linesize);
+                ffmpeg.sws_scale(sws, src, strides, 0, _height, frame->data, frame->linesize);
             }
         }
         return handle;
@@ -332,6 +348,7 @@ public sealed unsafe class MediaWriter : IDisposable
         if (_aframe != null) { var f = _aframe; ffmpeg.av_frame_free(&f); _aframe = null; }
         if (_pkt != null) { var p = _pkt; ffmpeg.av_packet_free(&p); _pkt = null; }
         if (_sws != null) { ffmpeg.sws_freeContext(_sws); _sws = null; }
+        if (_swsRgba != null) { ffmpeg.sws_freeContext(_swsRgba); _swsRgba = null; }
         if (_swr != null) { var s = _swr; ffmpeg.swr_free(&s); _swr = null; }
         if (_venc != null) { var c = _venc; ffmpeg.avcodec_free_context(&c); _venc = null; }
         if (_hwDevice != null) { var d = _hwDevice; ffmpeg.av_buffer_unref(&d); _hwDevice = null; }

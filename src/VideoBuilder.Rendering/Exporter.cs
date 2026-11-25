@@ -84,7 +84,7 @@ public static class Exporter
             for (int i = 0; i < total; i++)
             {
                 stop.Token.ThrowIfCancellationRequested();
-                if (!pool.TryTake(out var bitmap)) bitmap = new SKBitmap(Effects.Info(w, h));
+                if (!pool.TryTake(out var bitmap)) bitmap = new SKBitmap(ReadbackInfo(engine, w, h));
                 try { measure(() => engine.RenderToBitmap(project, scene, req.StartFrame + i, bitmap), stats == null ? null : stats.AddRender); }
                 catch { pool.Add(bitmap); throw; }
                 try { queue.Add((i, bitmap), stop.Token); }
@@ -101,6 +101,10 @@ public static class Exporter
         if (error != null) throw error;
         cancel.ThrowIfCancellationRequested();
     }
+
+    /// <summary>描いたフレームを受け取るビットマップの形式。GPU 描画なら RGBA (読み戻しで並べ替えない)。</summary>
+    private static SKImageInfo ReadbackInfo(RenderEngine engine, int w, int h) =>
+        Effects.Info(w, h).WithColorType(engine.ReadbackColorType);
 
     private static void RunCore(ExportRequest req, Project project, Scene scene, int total, int w, int h, ExportStats? stats,
         IProgress<(int Done, int Total)>? progress, CancellationToken cancel)
@@ -180,12 +184,13 @@ public static class Exporter
                     IntPtr prepared = IntPtr.Zero;
                     if (hasVideo)
                     {
-                        if (!pool.TryTake(out var target)) target = new SKBitmap(Effects.Info(w, h));
+                        if (!pool.TryTake(out var target)) target = new SKBitmap(ReadbackInfo(engine, w, h));
                         Measure(() => engine.RenderToBitmap(project, scene, frame, target), stats == null ? null : stats.AddRender);
                         watch.Restart();
                         unsafe
                         {
-                            prepared = writer.PrepareVideoFrame(new ReadOnlySpan<byte>((void*)target.GetPixels(), target.RowBytes * h), target.RowBytes);
+                            prepared = writer.PrepareVideoFrame(new ReadOnlySpan<byte>((void*)target.GetPixels(), target.RowBytes * h), target.RowBytes,
+                                rgba: target.ColorType == SKColorType.Rgba8888);
                         }
                         stats?.AddConvert(watch.Elapsed);
                         pool.Add(target);
