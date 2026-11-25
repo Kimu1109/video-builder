@@ -3,7 +3,7 @@
 #
 #   packaging/publish-all.sh [RID ...]
 #
-# RID を省くと linux-x64 linux-arm64 win-x64 osx-x64 osx-arm64 のすべて。結果は artifacts/publish/<RID>/ に置く。
+# RID を省くと linux-x64 linux-arm64 win-x64 win-arm64 osx-x64 osx-arm64 のすべて。結果は artifacts/publish/<RID>/ に置く。
 # ここで確かめるのは「発行できて、実行ファイルと Skia などのネイティブライブラリが入っている」ことまで。
 #
 # FFmpeg: artifacts/ffmpeg-bundle/<RID>/ があれば、発行したフォルダの ffmpeg/ に写して同梱する。
@@ -15,7 +15,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 rids=("$@")
-[ ${#rids[@]} -eq 0 ] && rids=(linux-x64 linux-arm64 win-x64 osx-x64 osx-arm64)
+[ ${#rids[@]} -eq 0 ] && rids=(linux-x64 linux-arm64 win-x64 win-arm64 osx-x64 osx-arm64)
 failed=0
 
 for rid in "${rids[@]}"; do
@@ -27,7 +27,8 @@ for rid in "${rids[@]}"; do
     echo "!! $rid: 発行に失敗しました" >&2; failed=1; continue
   fi
   case "$rid" in
-    win-*)   need=(video-builder.exe libSkiaSharp.dll libHarfBuzzSharp.dll) ;;
+    # Windows は GPU 描画に使う ANGLE (av_libglesv2.dll) も要る (ARM64 版にも Avalonia が同梱する ARM64 の ANGLE が入る)
+    win-*)   need=(video-builder.exe libSkiaSharp.dll libHarfBuzzSharp.dll av_libglesv2.dll) ;;
     osx-*)   need=(video-builder libSkiaSharp.dylib libHarfBuzzSharp.dylib) ;;
     *)       need=(video-builder libSkiaSharp.so libHarfBuzzSharp.so) ;;
   esac

@@ -272,6 +272,8 @@ public sealed class PreviewService : IDisposable
         IsGpuActive = gpu != null;
         // 画面との共有ができる環境なのに使わないときは、理由を添える (環境設定・パフォーマンスチェックに出る)
         if (gpu != null && !_presentsToShared && _shared != null && notShared.Length > 0) description += $" ※画面との共有なし: {notShared}";
+        // ARM64 の Windows で x64 版を動かしている: GPU のドライバへの呼び出しも画素の処理もエミュレーションを通るので、ARM64 版を勧める
+        if (VideoBuilder.Media.PlatformInfo.IsEmulatedOnArm64) description += " ※x64 版をエミュレーションで実行中 (ARM64 版の方が速く動きます)";
         BackendDescription = description;
         Dispatcher.UIThread.Post(() => BackendChanged?.Invoke());
     }

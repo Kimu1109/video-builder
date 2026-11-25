@@ -21,6 +21,13 @@ public sealed record GpuAdapter(int Index, string Name, string Vendor, string Dr
     public bool IsNvidia => Has("NVIDIA") || Has("nouveau") || Vendor.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase) || Vendor.Contains("nouveau", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Qualcomm の GPU (Snapdragon の Adreno)。Windows on ARM の PC の GPU は、ほぼこれ。
+    /// Windows はアダプタの名前 "Qualcomm(R) Adreno(TM) X1-85 GPU" (ベンダー 0x5143)、Linux は Mesa の freedreno ("FD750" など) か "Adreno"。
+    /// </summary>
+    public bool IsQualcomm => Has("Adreno") || Vendor.Contains("Qualcomm", StringComparison.OrdinalIgnoreCase) || Vendor.Contains("freedreno", StringComparison.OrdinalIgnoreCase)
+                              || Name.StartsWith("FD", StringComparison.Ordinal) && Name.Length > 2 && char.IsAsciiDigit(Name[2]);
+
+    /// <summary>
     /// 自動で選ぶときの優先度 (大きいほど優先)。外付けの GPU を、CPU 内蔵の GPU より優先する。
     /// ソフトウェア (llvmpipe・WARP など) は負。
     /// </summary>
@@ -33,6 +40,8 @@ public sealed record GpuAdapter(int Index, string Name, string Vendor, string Dr
             if (IsNvidia) return 30;
             if (Has("Radeon RX") || Has("Radeon Pro") || Has("Radeon VII") || Has("FirePro")) return 20;
             if (Has("Intel") && Has("Arc")) return 20;
+            // Snapdragon の Adreno: CPU 内蔵だが、ARM の PC にはふつうこれしかない。ほかの内蔵 GPU と同じ扱いにはせず、既定の 10 にする
+            if (IsQualcomm) return 10;
             if (Has("Intel") || Has("Radeon Graphics") || Has("Radeon(TM) Graphics") || Has("Vega") && Has("Graphics")) return 5;   // CPU 内蔵
             return 10;
         }

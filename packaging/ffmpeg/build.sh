@@ -22,6 +22,9 @@
 #   macOS        : Xcode のコマンドラインツール、Homebrew の nasm pkgconf x264 x265 libvpx dav1d opus
 #   Windows      : MSYS2 の UCRT64 環境で、mingw-w64-ucrt-x86_64-{toolchain,nasm,pkgconf,x264,x265,libvpx,dav1d,opus,ffnvcodec-headers,amf-headers}
 #                  と make diffutils curl xz。UCRT64 のシェルから実行する
+#   Windows ARM64: MSYS2 の CLANGARM64 環境で、mingw-w64-clang-aarch64-{toolchain,pkgconf,x264,x265,libvpx,dav1d,opus}
+#                  と make diffutils curl xz。CLANGARM64 のシェルから、ARM64 の Windows の上で実行する
+#                  (NVENC・AMF・nasm は要らない。GPU は D3D11VA・D3D12VA・Media Foundation で使う)
 # NVENC (NVIDIA) のヘッダ (ffnvcodec) と AMF のヘッダは、あれば configure が見つけて有効にする (macOS にはない)。
 set -euo pipefail
 
@@ -40,6 +43,11 @@ CONFIGURE_FLAGS=(
 # 同梱するものが増えるので切る (アプリは使わない)
 MACOS_FLAGS=(--disable-libxcb --disable-xlib --disable-sdl2)
 
+# Windows だけに足す設定: GPU でのデコード (D3D11VA・DXVA2) と、Media Foundation のエンコーダ (h264_mf など) を必ず入れる。
+# Windows on ARM (Snapdragon) では NVENC・Quick Sync・AMF がないので、GPU のエンコーダは Media Foundation からしか使えない。
+# D3D12VA は、MSYS2 のヘッダが新しければ configure が自動で有効にする
+WINDOWS_FLAGS=(--enable-d3d11va --enable-dxva2 --enable-mediafoundation)
+
 # Linux の --bundle で写すライブラリ (ファイル名の先頭)。libc や GPU のドライバ (libva・libdrm) などは利用者の環境のものを使う
 BUNDLE_PATTERN='^(libavcodec|libavformat|libavutil|libavfilter|libavdevice|libswscale|libswresample|libx264|libx265|libvpx|libdav1d|libopus|libnuma)\.so'
 
@@ -50,6 +58,7 @@ while [ $# -gt 0 ]; do
     --bundle) bundle="$2"; shift 2 ;;
     --print-version) echo "$FFMPEG_VERSION"; exit 0 ;;
     --print-configure) echo "${CONFIGURE_FLAGS[*]}"; exit 0 ;;
+    --print-windows-configure) echo "${WINDOWS_FLAGS[*]}"; exit 0 ;;
     *) echo "不明な引数: $1" >&2; exit 1 ;;
   esac
 done
@@ -59,7 +68,7 @@ prefix="$(mkdir -p "$prefix" && cd "$prefix" && pwd)"
 case "$(uname -s)" in
   Linux*) os=linux ;;
   Darwin*) os=macos ;;
-  MINGW*|MSYS*|UCRT*|CLANG*) os=windows ;;
+  MINGW*|MSYS*|UCRT*|CLANG*) os=windows ;;   # CLANGARM64 (ARM64 の Windows) もここ
   *) echo "対応していない OS: $(uname -s)" >&2; exit 1 ;;
 esac
 
@@ -82,10 +91,11 @@ if [ ! -f "$licenses/CONFIGURATION.txt" ]; then
   check_sha256 "$tarball"
   rm -rf "$work/ffmpeg-$FFMPEG_VERSION"
   tar -C "$work" -xJf "$tarball"
+  extra=()
+  [ "$os" = macos ] && extra=("${MACOS_FLAGS[@]}")
+  [ "$os" = windows ] && extra=("${WINDOWS_FLAGS[@]}")
   (
     cd "$work/ffmpeg-$FFMPEG_VERSION"
-    extra=()
-    [ "$os" = macos ] && extra=("${MACOS_FLAGS[@]}")
     ./configure --prefix="$prefix" "${CONFIGURE_FLAGS[@]}" ${extra[@]+"${extra[@]}"}
     make -j"$(cpus)"
     make install
@@ -94,7 +104,7 @@ if [ ! -f "$licenses/CONFIGURATION.txt" ]; then
   mkdir -p "$licenses"
   cp "$work/ffmpeg-$FFMPEG_VERSION/COPYING.GPLv3" "$work/ffmpeg-$FFMPEG_VERSION/LICENSE.md" "$licenses/"
   {
-    echo "ffmpeg $FFMPEG_VERSION ($os): ${CONFIGURE_FLAGS[*]}"
+    echo "ffmpeg $FFMPEG_VERSION ($os $(uname -m)): ${CONFIGURE_FLAGS[*]}${extra[@]+ ${extra[*]}}"
     echo "source: https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz (sha256 $FFMPEG_SHA256)"
   } > "$licenses/CONFIGURATION.txt"
 else

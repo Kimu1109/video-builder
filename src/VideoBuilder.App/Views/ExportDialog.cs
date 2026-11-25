@@ -109,7 +109,7 @@ public sealed class ExportDialog : DialogBase
     {
         string codec = Current.VideoCodec, family = HardwareEncoders.FamilyOf(codec);
         _crf.IsEnabled = family.Length > 0 || codec is "libx264" or "libx265" or "libvpx-vp9" or "libsvtav1";
-        _preset.IsEnabled = codec is "libx264" or "libx265" || family is "nvenc" or "qsv" or "amf";
+        _preset.IsEnabled = codec is "libx264" or "libx265" || family is "nvenc" or "qsv" or "amf" or "mf";
     }
 
     private void FixExtension()

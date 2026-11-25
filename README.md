@@ -7,7 +7,7 @@
 
 *A layer-based video editor for Linux, Windows and macOS, with keyframes, effects, reusable templates, Lua scripting and plugins. The UI is available in Japanese and English.*
 
-- 対応 OS: Linux (Ubuntu 22.04+ / Fedora 39+ / Arch。x64・arm64) ・ Windows 10+ ・ macOS 13+
+- 対応 OS: Linux (Ubuntu 22.04+ / Fedora 39+ / Arch。x64・arm64) ・ Windows 10+ (x64・arm64) ・ macOS 13+
 - 表示言語: 日本語 / English
 - ライセンス: [LGPL-3.0-or-later](#ライセンス)
 
@@ -75,7 +75,7 @@
 
 ### 配布物をダウンロードする (Linux・Windows・macOS)
 
-GitHub Actions の [Package ワークフロー](https://github.com/Kimu1109/video-builder/actions/workflows/package.yml) の実行結果 (Artifacts) から、FFmpeg を同梱した Linux (x64・arm64 の AppImage・Flatpak・tar.gz)・Windows・macOS 向けの配布物をダウンロードできます (GitHub へのログインが必要です)。
+GitHub Actions の [Package ワークフロー](https://github.com/Kimu1109/video-builder/actions/workflows/package.yml) の実行結果 (Artifacts) から、FFmpeg を同梱した Linux (x64・arm64 の AppImage・Flatpak・tar.gz)・Windows (x64・arm64)・macOS 向けの配布物をダウンロードできます (GitHub へのログインが必要です)。
 
 ### ソースからビルドする (Linux など)
 
@@ -154,9 +154,17 @@ FFmpeg を標準以外の場所に置いている場合は、環境変数 `VIDEO
 重い動画でも軽快に編集できるよう、次の仕組みを備えています。どれも基本は自動で働きます。
 
 - **GPU 描画**: GPU が使えれば GPU で、なければ自動で CPU で描画します (GPU 描画は Linux (ARM のボードの GPU を含む) と Windows。macOS は今のところ CPU で描画します)。
-- **ハードウェアデコード**: NVDEC / VAAPI / VideoToolbox / V4L2 (Raspberry Pi 4 など ARM のボード) などを使います。使えなければ自動でソフトウェアに戻ります。
-- **ハードウェアエンコード**: NVENC / Quick Sync / VAAPI / V4L2 などが使える環境では、出力ダイアログの形式に自動で出ます。
+- **ハードウェアデコード**: NVDEC / VAAPI / D3D11VA / D3D12VA / VideoToolbox / V4L2 (Raspberry Pi 4 など ARM のボード) などを使います。使えなければ自動でソフトウェアに戻ります。
+- **ハードウェアエンコード**: NVENC / Quick Sync / AMF / VAAPI / Media Foundation / V4L2 などが使える環境では、出力ダイアログの形式に自動で出ます。
 - **プロキシ編集**: 4K などの重い動画は、プレビュー用の小さな動画を自動で作って使います。
+
+### Windows on ARM (Snapdragon の PC) で使う
+
+`video-builder-win-arm64` の配布物を使ってください。x64 版もエミュレーションで動きますが、GPU のドライバへの呼び出しや画素の処理もエミュレーションを通るため遅くなります (環境設定の描画方式の説明に「x64 版をエミュレーションで実行中」と出ます)。
+
+- **GPU 描画**: Adreno の GPU で、Direct3D 11 (ANGLE) を使って描画します。プレビューは画面の描画と共有して、読み戻さずに表示します。
+- **ハードウェアデコード**: D3D11VA (使えなければ D3D12VA・DXVA2) で Adreno のデコーダを使います。ARM64 の Windows には NVDEC がないので試しません。
+- **ハードウェアエンコード**: Media Foundation のエンコーダ (`H.264`・`H.265`。GPU のドライバが入れるもの) が、出力ダイアログに「ハードウェア (Media Foundation)」として出ます。
 
 ### ARM のボードで使う
 

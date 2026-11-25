@@ -44,9 +44,14 @@ jobs:
         env:
           VB_REQUIRE_FFMPEG: "1"
 
-  # Windows の GPU 描画 (ANGLE) を確かめる (設計書 22.35)。ランナーに GPU はないので、ソフトウェアの Direct3D 11 (WARP) で動かす
+  # Windows の GPU 描画 (ANGLE) を確かめる (設計書 22.35)。ランナーに GPU はないので、ソフトウェアの Direct3D 11 (WARP) で動かす。
+  # x64 と arm64 (Windows on ARM。ARM64 の ANGLE・Direct3D 11 で、エミュレーションなしで動かす)
   windows-gpu:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
