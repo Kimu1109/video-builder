@@ -166,8 +166,8 @@ public static partial class Effects
             int padY = clamp ? 0 : (int)MathF.Ceiling(MathF.Abs(dy) * length / 2) + 1;
             int passes = a.IsDraft ? 8 : 10;
             return AtHalfForPreview(s, a, length >= 24, (half, k) =>
-                       Resample(half, a, (int)MathF.Ceiling(padX * k), (int)MathF.Ceiling(padY * k), (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, dx, dy, length * k, clamp, passes)))
-                ?? Resample(s, a, padX, padY, (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, dx, dy, length, clamp, passes)) ?? s;
+                       DirectionalBlurSprite(half, a, (int)MathF.Ceiling(padX * k), (int)MathF.Ceiling(padY * k), dx, dy, length * k, clamp, passes))
+                ?? DirectionalBlurSprite(s, a, padX, padY, dx, dy, length, clamp, passes) ?? s;
         }
     }
 
@@ -185,8 +185,8 @@ public static partial class Effects
             // いちばん遠い所が動く距離 (ピクセル) が大きければ、プレビューは半分の大きさで計算する
             bool large = MathF.Sqrt(s.Width * s.Width + s.Height * s.Height) / 2 * MathF.Log(1 + range) >= 24;
             return AtHalfForPreview(s, a, large, (half, k) =>
-                       Resample(half, a, 0, 0, (src, tmp, w, h, rb) => PixelFx.RadialBlur(src, tmp, w, h, rb, half.Cx + ox * k, half.Cy + oy * k, range, clamp, passes)))
-                ?? Resample(s, a, 0, 0, (src, tmp, w, h, rb) => PixelFx.RadialBlur(src, tmp, w, h, rb, s.Cx + ox, s.Cy + oy, range, clamp, passes)) ?? s;
+                       RadialBlurSprite(half, a, 0, 0, half.Cx + ox * k, half.Cy + oy * k, range, clamp, passes))
+                ?? RadialBlurSprite(s, a, 0, 0, s.Cx + ox, s.Cy + oy, range, clamp, passes) ?? s;
         }
     }
 
@@ -409,7 +409,7 @@ public static partial class Effects
         float dx = horizontal ? 1 : 0, dy = horizontal ? 0 : 1;
         int pad = (int)MathF.Ceiling(length / 2) + 1;
         int passes = a.IsDraft ? 8 : 10;
-        return Resample(s, a, horizontal ? pad : 0, horizontal ? 0 : pad, (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, dx, dy, length, false, passes)) ?? s;
+        return DirectionalBlurSprite(s, a, horizontal ? pad : 0, horizontal ? 0 : pad, dx, dy, length, false, passes) ?? s;
     }
 
     /// <summary>

@@ -157,4 +157,143 @@ public static partial class Effects
         float k = MathF.Round(amount * 256) / 256;
         return ApplyGpuShader(s, a, UnsharpShader, u => u["amount"] = k, (kids, _, _) => kids["blurred"] = blurredShader);
     }
+
+    // ---------------- 画素を動かす効果 (方向ブラー・放射ブラー) ----------------
+
+    /// <summary>
+    /// PixelFx.Sample と同じ読み方 (双線形補間。重みは 8 ビット、色は 0〜255 の整数) の SkSL。座標はピクセルの中心が整数。
+    /// 絵の外は、子のシェーダーのタイル (Decal なら透明、Clamp なら端のピクセル) で決まる。
+    /// </summary>
+    private const string SampleSksl = """
+        uniform shader image;
+
+        float4 fetch(float2 q) { return floor(float4(image.eval(q + 0.5)) * 255 + 0.5); }
+        float4 lerp8(float4 a, float4 b, float t) { return floor((a * (256 - t) + b * t + 128) / 256); }
+        float4 sample8(float2 q) {
+            float2 f = floor(q);
+            float2 t = floor((q - f) * 256);
+            float4 p00 = fetch(f), p10 = fetch(f + float2(1, 0));
+            float4 top = t.x == 0 ? p00 : lerp8(p00, p10, t.x);
+            if (t.y == 0) return top;
+            float4 p01 = fetch(f + float2(0, 1)), p11 = fetch(f + float2(1, 1));
+            return lerp8(top, t.x == 0 ? p01 : lerp8(p01, p11, t.x), t.y);
+        }
+        // PixelFx.Average と同じ: 2 つの平均。up = 1 なら 0.5 を切り上げ、0 なら切り捨て
+        half4 average(float4 a, float4 b, float up) { return half4(floor((a + b + up) / 2) / 255); }
+        """;
+
+    private static readonly Sksl DirectionalPassShader = new(SampleSksl + """
+        uniform float2 off;   // ずらす量 (±)
+        uniform float up;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            return average(sample8(q - off), sample8(q + off), up);
+        }
+        """);
+
+    private static readonly Sksl RadialPassShader = new(SampleSksl + """
+        uniform float2 center;
+        uniform float k1;   // 中心からの倍率 (縮める側)
+        uniform float k2;   // 中心からの倍率 (広げる側)
+        uniform float up;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            return average(sample8(center + (q - center) * k1), sample8(center + (q - center) * k2), up);
+        }
+        """);
+
+    /// <summary>
+    /// GPU で、s に余白 (padX, padY) を付けた絵に passes を順にかける。各回は前の回の絵を子 "image" として読み、同じ大きさに描く。
+    /// 結果は Resample と同じ位置 (余白の分だけ中心をずらす)。GPU 描画でない・使えないときは null。
+    /// </summary>
+    private static Sprite? MultiPassOnGpu(Sprite s, EffectArgs a, int padX, int padY, Sksl sksl, bool clamp, int passes, Action<SKRuntimeEffectUniforms, int> uniforms)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || sksl.Effect is not { } effect) return null;
+        padX = Math.Max(0, padX); padY = Math.Max(0, padY);
+        int w = s.Width + padX * 2, h = s.Height + padY * 2;
+        if (w > 16384 || h > 16384) { padX = padY = 0; w = s.Width; h = s.Height; }
+        // 余白を付けた絵 (Resample と同じ。余白は透明)
+        SKImage? current;
+        using (var first = a.Context.CreateSurface(w, h))
+        {
+            if (first == null) return null;
+            first.Canvas.Clear(SKColors.Transparent);
+            first.Canvas.DrawImage(s.Image, padX, padY);
+            current = first.Snapshot();
+        }
+        var tile = clamp ? SKShaderTileMode.Clamp : SKShaderTileMode.Decal;
+        try
+        {
+            for (int i = 0; i < passes; i++)
+            {
+                using var surface = a.Context.CreateSurface(w, h);
+                if (surface == null) return null;
+                using var image = current.ToShader(tile, tile);
+                var kids = new SKRuntimeEffectChildren(effect) { ["image"] = image };
+                var u = new SKRuntimeEffectUniforms(effect);
+                uniforms(u, i);
+                using var shader = effect.ToShader(u, kids);
+                using var paint = new SKPaint { Shader = shader, BlendMode = SKBlendMode.Src };
+                surface.Canvas.DrawRect(SKRect.Create(w, h), paint);
+                var next = surface.Snapshot();
+                current.Dispose();
+                current = next;
+            }
+            var result = new Sprite(a.Context.Own(current), s.Cx + padX, s.Cy + padY);
+            current = null;
+            return result;
+        }
+        finally { current?.Dispose(); }
+    }
+
+    /// <summary>
+    /// 方向ブラー (PixelFx.DirectionalBlur と同じ) をかけた絵。座標は余白 (padX, padY) を付けた絵のもの。
+    /// GPU 描画なら SkSL (読み戻さない)、CPU 描画なら PixelFx。読めなければ null。
+    /// </summary>
+    internal static Sprite? DirectionalBlurSprite(Sprite s, EffectArgs a, int padX, int padY, float dx, float dy, float length, bool clamp, int maxPasses = 10)
+    {
+        float len = MathF.Sqrt(dx * dx + dy * dy);
+        if (length >= 1 && len > 0)
+        {
+            float ux = dx / len, uy = dy / len;
+            int passes = Math.Clamp((int)MathF.Ceiling(MathF.Log2(length)), 1, maxPasses);
+            var gpu = MultiPassOnGpu(s, a, padX, padY, DirectionalPassShader, clamp, passes, (u, i) =>
+            {
+                float d = length / 2 / MathF.Pow(2, i);
+                u["off"] = new[] { ux * d / 2, uy * d / 2 };
+                u["up"] = (i & 1) == 0 ? 1f : 0f;
+            });
+            if (gpu != null) return gpu;
+        }
+        return Resample(s, a, padX, padY, (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, dx, dy, length, clamp, maxPasses));
+    }
+
+    /// <summary>
+    /// 放射ブラー (PixelFx.RadialBlur と同じ) をかけた絵。中心 (cx, cy) は余白 (padX, padY) を付けた絵の座標。
+    /// GPU 描画なら SkSL (読み戻さない)、CPU 描画なら PixelFx。読めなければ null。
+    /// </summary>
+    internal static Sprite? RadialBlurSprite(Sprite s, EffectArgs a, int padX, int padY, float cx, float cy, float range, bool clamp, int maxPasses = 10)
+    {
+        if (range > 0)
+        {
+            int w = s.Width + Math.Max(0, padX) * 2, h = s.Height + Math.Max(0, padY) * 2;
+            float lg = MathF.Log(1 + range);
+            float far = MathF.Sqrt(MathF.Max(cx * cx, (w - cx) * (w - cx)) + MathF.Max(cy * cy, (h - cy) * (h - cy)));
+            float pixels = far * lg;
+            if (pixels >= 1 && w <= 16384 && h <= 16384)
+            {
+                int passes = Math.Clamp((int)MathF.Ceiling(MathF.Log2(pixels)), 1, maxPasses);
+                var gpu = MultiPassOnGpu(s, a, padX, padY, RadialPassShader, clamp, passes, (u, i) =>
+                {
+                    float d = lg / 2 / MathF.Pow(2, i);
+                    u["center"] = new[] { cx, cy };
+                    u["k1"] = MathF.Exp(-d / 2);
+                    u["k2"] = MathF.Exp(d / 2);
+                    u["up"] = (i & 1) == 0 ? 1f : 0f;
+                });
+                if (gpu != null) return gpu;
+            }
+        }
+        return Resample(s, a, padX, padY, (src, tmp, w, h, rb) => PixelFx.RadialBlur(src, tmp, w, h, rb, cx, cy, range, clamp, maxPasses));
+    }
 }

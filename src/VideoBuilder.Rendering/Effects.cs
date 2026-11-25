@@ -882,7 +882,7 @@ public static partial class Effects
                     if (len < 1.5f) return s;
                     int padX = (int)MathF.Ceiling(MathF.Abs(mx) / MathF.Max(1, MathF.Sqrt(mx * mx + my * my)) * len / 2) + 1;
                     int padY = (int)MathF.Ceiling(MathF.Abs(my) / MathF.Max(1, MathF.Sqrt(mx * mx + my * my)) * len / 2) + 1;
-                    return Resample(s, a, padX, padY, (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, mx, my, len, false, a.IsDraft ? 8 : 10)) ?? s;
+                    return DirectionalBlurSprite(s, a, padX, padY, mx, my, len, false, a.IsDraft ? 8 : 10) ?? s;
                 }
                 default:  // ひし形ワイプ: 中心からひし形を広げる
                 {

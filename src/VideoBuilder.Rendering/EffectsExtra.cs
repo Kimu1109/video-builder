@@ -154,8 +154,8 @@ public static partial class Effects
             int pad = a.IsFrameBuffer ? 0 : (int)Math.Min(MathF.Ceiling(far * (MathF.Sqrt(1 + length) - 1)), 4096);
             bool clampEdge = a.IsFrameBuffer;
             var rays = AtHalfForPreview(bright, a, true, (half, k) =>
-                           Resample(half, a, (int)(pad * k), (int)(pad * k), (src, tmp, w, h, rb) => PixelFx.RadialBlur(src, tmp, w, h, rb, half.Cx + (int)(pad * k) + ox * k, half.Cy + (int)(pad * k) + oy * k, length, clampEdge, passes)))
-                       ?? Resample(bright, a, pad, pad, (src, tmp, w, h, rb) => PixelFx.RadialBlur(src, tmp, w, h, rb, bright.Cx + pad + ox, bright.Cy + pad + oy, length, clampEdge, passes));
+                           RadialBlurSprite(half, a, (int)(pad * k), (int)(pad * k), half.Cx + (int)(pad * k) + ox * k, half.Cy + (int)(pad * k) + oy * k, length, clampEdge, passes))
+                       ?? RadialBlurSprite(bright, a, pad, pad, bright.Cx + pad + ox, bright.Cy + pad + oy, length, clampEdge, passes);
             if (rays is not { } r) return s;
             int times = Math.Max(1, (int)MathF.Ceiling(strength * 2));
             using var paint = new SKPaint { BlendMode = SKBlendMode.Plus, Color = SKColors.White.WithAlpha((byte)Math.Clamp(MathF.Round(strength * 2 / times * 255), 0, 255)) };
@@ -500,7 +500,7 @@ public static partial class Effects
             if (length < 1) return s;
             int padX = (int)MathF.Ceiling(MathF.Abs(lx)) + 1, padY = (int)MathF.Ceiling(MathF.Abs(ly)) + 1;
             int passes = a.IsDraft ? 8 : 10;
-            var r = Resample(s, a, padX, padY, (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, lx, ly, length, false, passes));
+            var r = DirectionalBlurSprite(s, a, padX, padY, lx, ly, length, false, passes);
             if (r is not { } blurred) return s;
             // ぼかしは今の位置を中心に前後へ広がるので、半分だけ後ろへずらして、通ってきた側に尾を引かせる
             return blurred with { Cx = blurred.Cx + lx / 2, Cy = blurred.Cy + ly / 2 };

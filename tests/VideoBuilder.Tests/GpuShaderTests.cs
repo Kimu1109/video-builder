@@ -61,6 +61,9 @@ public unsafe class GpuShaderTests
         { "filter.emit", "threshold", new double[] { 30 } },
         { "filter.flash", "strength,length,threshold", new double[] { 100, 50, 30 } },
         { "filter.sharpen", "amount,radius", new double[] { 150, 6 } },
+        { "filter.dirblur", "length,angle", new double[] { 40, 30 } },
+        { "filter.dirblur", "length,angle,fixed", new double[] { 25, -60, 1 } },     // サイズ固定 (端は延ばす)
+        { "filter.radialblur", "amount,x,y", new double[] { 30, 20, -10 } },
     };
 
     [Theory]
@@ -101,9 +104,9 @@ public unsafe class GpuShaderTests
             // シャープはぼかしを GPU (Skia) で作るので、CPU の自前のぼかしとの違いの分だけ許す
             double meanLimit = id == "filter.sharpen" ? 1.0 : 0.3;
             Assert.True(mean < meanLimit, $"{id}: 以前の描き方と違う mean={mean} max={max}");
-            // 以前は読み戻していた。SkSL では読み戻さない (閃光の光の筋 (放射ブラー) は、まだ読み戻す)
+            // 以前は読み戻していた。SkSL では読み戻さない
             Assert.True(oldReadbacks >= 1, $"{id}: 以前の描き方で読み戻していない");
-            if (id != "filter.flash") Assert.True(skslReadbacks < oldReadbacks, $"{id}: 読み戻しが減っていない ({skslReadbacks} / {oldReadbacks})");
+            Assert.True(skslReadbacks == 0, $"{id}: まだ読み戻している ({skslReadbacks} 回。以前は {oldReadbacks} 回)");
         }
     }
 

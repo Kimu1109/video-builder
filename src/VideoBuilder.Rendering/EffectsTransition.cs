@@ -131,7 +131,7 @@ public static partial class Effects
                 float range = 0.7f * w;
                 if (range < 0.01f) return s;
                 float cx = s.Cx, cy = s.Cy;
-                return Resample(s, a, 0, 0, (src, tmp, w2, h2, rb) => PixelFx.RadialBlur(src, tmp, w2, h2, rb, cx, cy, range, true, a.IsDraft ? 7 : 9)) ?? s;
+                return RadialBlurSprite(s, a, 0, 0, cx, cy, range, true, a.IsDraft ? 7 : 9) ?? s;
             }
             case 45 or 46:   // 白・黒で切り替え: 出る側が白 (黒) になり、入る側が白 (黒) から戻る
             {
@@ -284,7 +284,7 @@ public static partial class Effects
         float len = MathF.Min(D * 0.12f * speed, D * 0.4f) * K;
         if (len < 1.5f) return s;
         int padX = (int)MathF.Ceiling(MathF.Abs(dx) * len / 2) + 1, padY = (int)MathF.Ceiling(MathF.Abs(dy) * len / 2) + 1;
-        return Resample(s, a, padX, padY, (src, tmp, w2, h2, rb) => PixelFx.DirectionalBlur(src, tmp, w2, h2, rb, dx, dy, len, false, a.IsDraft ? 8 : 10)) ?? s;
+        return DirectionalBlurSprite(s, a, padX, padY, dx, dy, len, false, a.IsDraft ? 8 : 10) ?? s;
     }
 
     // ---------------- 形で切り替えるもの ----------------
