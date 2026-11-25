@@ -1674,7 +1674,9 @@ public class UiTests
             Pump();
             var music = Assert.Single(ed.Board!.Music);
             Assert.Equal(3, music.StartSeconds, 1);
-            Assert.Equal(0, Svc.Session.CurrentFrame);   // 現在位置は動かさない
+            // 追加したものを選び、現在位置をその始まり (落とした所) へ移す (クリップを追加したときと同じ)
+            Assert.Equal(music.Id, ed.SelectedId);
+            Assert.Equal(90, Svc.Session.CurrentFrame);
         }
         finally { Directory.Delete(dir, true); }
     }
