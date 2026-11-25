@@ -45,8 +45,10 @@ MACOS_FLAGS=(--disable-libxcb --disable-xlib --disable-sdl2)
 
 # Windows だけに足す設定: GPU でのデコード (D3D11VA・DXVA2) と、Media Foundation のエンコーダ (h264_mf など) を必ず入れる。
 # Windows on ARM (Snapdragon) では NVENC・Quick Sync・AMF がないので、GPU のエンコーダは Media Foundation からしか使えない。
-# D3D12VA は、MSYS2 のヘッダが新しければ configure が自動で有効にする
-WINDOWS_FLAGS=(--enable-d3d11va --enable-dxva2 --enable-mediafoundation)
+# D3D12VA は、MSYS2 のヘッダが新しければ configure が自動で有効にする。
+# 画面の取り込み (gfxcapture。Windows.Graphics.Capture を使う C++ のフィルタ) はアプリが使わないうえ、
+# CLANGARM64 の libc++ では作れない (<chrono> の中で ratio などが見つからない) ので切る
+WINDOWS_FLAGS=(--enable-d3d11va --enable-dxva2 --enable-mediafoundation --disable-filter=gfxcapture)
 
 # Linux の --bundle で写すライブラリ (ファイル名の先頭)。libc や GPU のドライバ (libva・libdrm) などは利用者の環境のものを使う
 BUNDLE_PATTERN='^(libavcodec|libavformat|libavutil|libavfilter|libavdevice|libswscale|libswresample|libx264|libx265|libvpx|libdav1d|libopus|libnuma)\.so'
