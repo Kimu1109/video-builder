@@ -5,7 +5,7 @@ using VideoBuilder.Media;
 namespace VideoBuilder.Rendering;
 
 /// <summary>
-/// デコードしたままの YUV の動画フレームを GPU へ送り、GPU で RGBA に変換して Skia の画像にする (設計書 22.40)。
+/// デコードしたままの YUV の動画フレームを GPU へ送り、GPU で RGBA に変換して Skia の画像にする (設計書 22.52)。
 /// CPU で BGRA に変換してから送るのに比べて、CPU の色変換がなくなり、送る量も 4 バイト/画素から 1.5 バイト/画素 (4:2:0) になる。
 /// SkiaSharp 2.88 には YUV の画像を作る API (SKYuvaPixmaps) がなく、SkSL のシェーダも描画時に落ちるので、
 /// OpenGL ES 3 を直接使う (Y・U・V の面を R8 / RG8 のテクスチャに送り、自前のシェーダで RGBA8 のテクスチャに描く)。

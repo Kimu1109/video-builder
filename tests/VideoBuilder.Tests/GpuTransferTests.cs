@@ -6,7 +6,7 @@ using VideoBuilder.Rendering;
 namespace VideoBuilder.Tests;
 
 /// <summary>
-/// GPU と CPU の間の受け渡しを減らす高速化 (設計書 22.40) が、絵を変えないことを確かめる。
+/// GPU と CPU の間の受け渡しを減らす高速化 (設計書 22.52) が、絵を変えないことを確かめる。
 /// GPU コンテキストを作れない環境では何もしない (VB_REQUIRE_GPU=1 なら失敗にする)。
 /// </summary>
 public class GpuTransferTests
@@ -345,5 +345,117 @@ public class GpuTransferTests
             Console.WriteLine($"BENCH yuv-planes {format} {w}x{h} mean={mean:0.000} max={max}");
             Assert.True(mean < 1.0 && max <= 4, $"sws と違う: mean={mean} max={max}");
         }
+    }
+
+    // ---- 1: 書き出しで、GPU の読み戻しを待たずに次のフレームを描く ----
+
+    /// <summary>フレームごとに動く図形 (フレームの順番がずれれば絵が変わる)。</summary>
+    private static Project Moving()
+    {
+        var p = Colorful();
+        var mover = Shape(p, 6, "#FFFFFF", 2, 40);
+        mover.Draw!.Tracks["x"] = new AnimatedValue { Values = new() { -140, 140 }, Mode = MovementMode.Linear };
+        return p;
+    }
+
+    /// <summary>動画の全フレームを BGRA で読む。</summary>
+    private static List<byte[]> AllFrames(string path, int count, double fps)
+    {
+        using var r = new VideoReader(path);
+        var list = new List<byte[]>();
+        for (int i = 0; i < count; i++) list.Add((byte[])r.GetFrame((i + 0.5) / fps)!.Clone());
+        return list;
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(3)]
+    public void Gpu_export_with_async_readback_matches_cpu_frame_by_frame(int failAfter)
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        using (var probe = Gpu()) if (probe == null) return;
+        var p = Moving();
+        const int Frames = 12;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-async-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var old = AsyncReadback.TestFailAfter;
+        try
+        {
+            ExportStats Export(string name, bool useGpu)
+            {
+                var stats = new ExportStats();
+                Task.Run(() => Exporter.Run(new ExportRequest
+                {
+                    Project = p, SceneId = "root", StartFrame = 0, EndFrame = Frames - 1, UseGpu = useGpu, Stats = stats,
+                    Settings = new ExportSettings { Path = Path.Combine(dir, name), Crf = 10 },
+                }, null, CancellationToken.None)).Wait();
+                return stats;
+            }
+            Export("cpu.mp4", false);
+            AsyncReadback.TestFailAfter = failAfter;
+            var stats = Export("gpu.mp4", true);
+            AsyncReadback.TestFailAfter = old;
+            Console.WriteLine($"BENCH async-readback failAfter={failAfter} frames={stats.AsyncReadbackFrames} error={stats.AsyncReadbackError}");
+            if (failAfter < 0)
+            {
+                Assert.Equal(Frames, stats.AsyncReadbackFrames);
+                Assert.Null(stats.AsyncReadbackError);
+            }
+            else
+            {
+                // 途中で読み戻せなくなったら、残りはこれまでどおり描いて読み戻す
+                Assert.Equal(failAfter, stats.AsyncReadbackFrames);
+                Assert.NotNull(stats.AsyncReadbackError);
+            }
+            Assert.Equal(Frames, stats.Frames);
+            var fps = p.Settings.Fps.Value;
+            var a = AllFrames(Path.Combine(dir, "cpu.mp4"), Frames, fps);
+            var b = AllFrames(Path.Combine(dir, "gpu.mp4"), Frames, fps);
+            for (int f = 0; f < Frames; f++)
+            {
+                long total = 0;
+                for (int i = 0; i < a[f].Length; i++) total += Math.Abs(a[f][i] - b[f][i]);
+                double mean = (double)total / a[f].Length;
+                Assert.True(mean < 1.5, $"frame {f} が違う (順番のずれ?): {mean}");
+            }
+            // 音声も最後まで入っている
+            var info = MediaInfo.Probe(Path.Combine(dir, "gpu.mp4"))!;
+            Assert.True(info.HasAudio);
+        }
+        finally
+        {
+            AsyncReadback.TestFailAfter = old;
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// 1080p の動画 + 図形を GPU で書き出す速さ (内訳つき) を表示する。
+    /// VIDEO_BUILDER_GPU_YUV=0・VIDEO_BUILDER_ASYNC_READBACK=0 で、それぞれ以前の方法と比べられる。
+    /// </summary>
+    [Fact]
+    public void Report_gpu_export_speed()
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        using (var probe = Gpu()) if (probe == null) return;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-speed-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var video = WriteVideo(dir, "src.mp4", "libx264", 1920, 1080);
+            var p = VideoProject(video, 1920, 1080);
+            Shape(p, 1, "#F2A900", 1, 300, -400, -100);
+            var stats = new ExportStats();
+            Task.Run(() => Exporter.Run(new ExportRequest
+            {
+                Project = p, SceneId = "root", StartFrame = 0, EndFrame = 29, UseGpu = true, Stats = stats,
+                Settings = new ExportSettings { Path = Path.Combine(dir, "out.mp4"), AudioCodec = "", Preset = "ultrafast" },
+            }, null, CancellationToken.None)).Wait();
+            double Ms(TimeSpan t) => t.TotalMilliseconds / stats.Frames;
+            Console.WriteLine($"BENCH gpu-export 1080p fps={stats.FramesPerSecond:0.0} render={Ms(stats.Render):0.0}ms convert={Ms(stats.Convert):0.0}ms " +
+                $"encode={Ms(stats.Encode):0.0}ms wait={Ms(stats.WaitForEncoder):0.0}ms async={stats.AsyncReadbackFrames} " +
+                $"yuv={Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_YUV") ?? "on"} readback={Environment.GetEnvironmentVariable("VIDEO_BUILDER_ASYNC_READBACK") ?? "on"}");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 }
