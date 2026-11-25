@@ -611,6 +611,11 @@ public sealed class RenderEngine : IDisposable
             {
                 // 背景と被る色を反転: 背景を読んで色を決めて重ねた (合成モードは使わない)
             }
+            else if (blend != 0 && PixelBlend.Draw(canvas, target, sprite, paint, blend))
+            {
+                // CPU 描画: 作業用の画像に SrcOver で描いてから、自前で合成した
+                // (SkiaSharp 3 の CPU 描画は、SrcOver 以外の合成モードが 10〜40 倍遅い。設計書 22.53)
+            }
             else if (blend == 2)
             {
                 // 減算: 背景を反転 → 加算 → もう一度反転
