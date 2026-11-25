@@ -56,13 +56,31 @@ public sealed class MediaCache : IDisposable
     /// GPU 描画のときのコンテキスト。動画のフレームを、デコーダの置き場から直接 GPU に送る
     /// (メモリ上で複製してから送るより 1 回少ない)。描画のスレッドからだけ使う。
     /// </param>
-    public MediaCache(bool zeroCopy = false, GRContext? gpu = null)
+    /// <param name="gpuContext">
+    /// gpu の元の GpuContext。渡せば、GPU 描画中は動画のフレームを YUV のまま GPU へ送り、GPU で色を変換する (YuvTextures)。
+    /// </param>
+    public MediaCache(bool zeroCopy = false, GRContext? gpu = null, GpuContext? gpuContext = null)
     {
         _zeroCopy = zeroCopy;
         _gpu = gpu;
+        _gpuContext = gpu != null && !zeroCopy && gpuContext?.Context == gpu ? gpuContext : null;
+        if (_gpuContext == null || Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_YUV") == "0") _yuvState = -1;
     }
 
     private readonly GRContext? _gpu;
+    private readonly GpuContext? _gpuContext;
+    private YuvTextures? _yuv;
+    // 0: まだ試していない, 1: 使える, -1: 使えない (GPU 描画でない・OpenGL ES 3 でない・シェーダを作れない)
+    private volatile int _yuvState;
+
+    /// <summary>YUV のまま GPU へ送れないとき、その理由 (計測・表示用)。</summary>
+    public string? GpuYuvError { get; private set; }
+
+    /// <summary>YUV のまま GPU へ送って変換したフレームの数 (計測・テスト用)。</summary>
+    public long GpuYuvFrames => _yuv?.Converted ?? 0;
+
+    /// <summary>動画のフレームを YUV のまま GPU へ送るか (GPU 描画中で、使えないと分かっていなければ)。</summary>
+    private bool WantsYuv => _yuvState >= 0 && DrawingOnGpu;
 
     /// <summary>今の描画が GPU で描かれるか (GPU の描画先を作れずに CPU で描くときは false にして、GPU へ送らない)。</summary>
     public bool DrawingOnGpu { get; set; } = true;
@@ -345,6 +363,7 @@ public sealed class MediaCache : IDisposable
         if (r == null || e.Pending != null) { e.Data = IntPtr.Zero; e.Lost = false; return; }
         e.Position = seconds;
         r.OutputDivisor = DivisorFor(e, original ?? e.Path, detail);
+        r.PreferYuv = WantsYuv;
         long before = r.CurrentFrameId;
         e.Data = r.GetFramePointer(seconds);
         e.Lost = e.Data == IntPtr.Zero && _zeroCopy && r.CurrentFrameId != before;
@@ -362,12 +381,31 @@ public sealed class MediaCache : IDisposable
             e.Image?.Dispose();
             // アニメーション WebP・GIF は透明な部分を残す (VideoReader がアルファを掛けて渡す)
             var info = new SKImageInfo(r.FrameWidth, r.FrameHeight, SKColorType.Bgra8888, r.HasAlpha ? SKAlphaType.Premul : SKAlphaType.Opaque);
-            e.Image = _zeroCopy ? SKImage.FromPixels(info, e.Data, r.FrameWidth * 4) : Upload(info, e.Data);
+            if (_zeroCopy) e.Image = SKImage.FromPixels(info, e.Data, r.FrameWidth * 4);
+            else if (r.TryGetYuv(e.Data, out var planes))
+            {
+                // YUV のまま持っている: GPU で色を変換する。できなければ、ここで BGRA にしてから送る
+                e.Image = YuvImage(planes) ?? Upload(info, r.EnsureBgra(e.Data));
+            }
+            else e.Image = Upload(info, e.Data);
             e.FrameId = r.CurrentFrameId;
         }
         e.Data = IntPtr.Zero;
         LastFrameSize = (e.Image.Width, e.Image.Height);
         return e.Image;
+    }
+
+    /// <summary>YUV の面を GPU へ送って、GPU で RGBA にした画像。GPU 描画中でない・使えないときは null。描画のスレッドから呼ぶ。</summary>
+    private SKImage? YuvImage(in VideoBuilder.Media.YuvPlanes planes)
+    {
+        if (_gpuContext == null || !DrawingOnGpu || _yuvState < 0) return null;
+        if (_yuv == null)
+        {
+            _yuv = YuvTextures.Create(_gpuContext, out var error);
+            if (_yuv == null) { GpuYuvError = error; _yuvState = -1; return null; }
+            _yuvState = 1;
+        }
+        return _yuv.Convert(planes);
     }
 
     /// <summary>GPU へ送った回数 (メモリ上で複製せずに直接送ったもの。計測・テスト用)。</summary>
@@ -435,5 +473,7 @@ public sealed class MediaCache : IDisposable
         foreach (var e in _byPath.Values.SelectMany(l => l)) { e.Reader?.Dispose(); e.Image?.Dispose(); }
         foreach (var (img, _) in _images.Values) img?.Dispose();
         _byPath.Clear(); _assigned.Clear(); _images.Clear();
+        _yuv?.Dispose();
+        _yuv = null;
     }
 }

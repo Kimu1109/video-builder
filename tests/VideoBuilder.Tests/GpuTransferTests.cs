@@ -182,4 +182,168 @@ public class GpuTransferTests
         Console.WriteLine($"BENCH lut gpu-vs-cpu filterObject={asFilterObject} mean={mean:0.000} max={max}");
         Assert.True(mean < 0.6, $"平均の差が大きい: {mean}");
     }
+
+    // ---- 4a: 動画のフレームを YUV のまま GPU へ送り、GPU で色を変換する ----
+
+    /// <summary>色の変化 (横・縦のグラデーションと色の帯) のある動画を書き出す。</summary>
+    private static string WriteVideo(string dir, string name, string codec, int w, int h)
+    {
+        var path = Path.Combine(dir, name);
+        var s = new ExportSettings { Path = path, Width = w, Height = h, Fps = new Rational(30, 1), VideoCodec = codec, AudioCodec = "", Crf = 8 };
+        using var writer = new MediaWriter(s);
+        var frame = new byte[w * h * 4];
+        for (int f = 0; f < 6; f++)
+        {
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    int i = (y * w + x) * 4;
+                    bool band = (x / 24 + y / 24 + f) % 5 == 0;
+                    frame[i + 0] = (byte)(band ? 40 : 255 * y / h);            // B
+                    frame[i + 1] = (byte)(band ? 200 : 128 + f * 10);          // G
+                    frame[i + 2] = (byte)(band ? 230 : 255 * x / w);           // R
+                    frame[i + 3] = 255;
+                }
+            writer.WriteVideoFrame(frame, w * 4);
+        }
+        writer.Finish();
+        return path;
+    }
+
+    private static Project VideoProject(string video, int w, int h)
+    {
+        var p = new Project();
+        p.Settings.Width = w; p.Settings.Height = h;
+        var o = ObjectFactory.Create(EffectRegistry.Video, 0, 0, 6);
+        o.Main.Values["file"] = video;
+        p.Root.Objects.Add(o);
+        return p;
+    }
+
+    [Theory]
+    [InlineData("yuv420.mp4", "libx264", 320, 180)]
+    [InlineData("vp9.webm", "libvpx-vp9", 256, 144)]
+    public void Video_frames_converted_on_gpu_match_cpu(string name, string codec, int w, int h)
+    {
+        if (!FFmpegLoader.EnsureLoaded() || !MediaWriter.IsEncoderAvailable(codec)) return;
+        using var gpu = Gpu();
+        if (gpu == null) return;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-yuv-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var video = WriteVideo(dir, name, codec, w, h);
+            var p = VideoProject(video, w, h);
+            using var cpu = new RenderEngine();
+            using var engine = new RenderEngine(gpu);
+            for (int f = 0; f < 4; f++)
+            {
+                using var a = Render(cpu, p, f);
+                using var b = Render(engine, p, f);
+                var (mean, max) = Compare(a, b);
+                Console.WriteLine($"BENCH yuv {name} frame={f} mean={mean:0.000} max={max}");
+                Assert.True(mean < 1.0, $"GPU で変換した色が違う (frame {f}): mean={mean} max={max}");
+                Assert.True(max <= 24, $"大きく違う画素がある (frame {f}): max={max}");
+            }
+            Assert.True(engine.Media.GpuYuvFrames >= 4, $"YUV のまま送っていない: {engine.Media.GpuYuvFrames} {engine.Media.GpuYuvError}");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
+    public void Yuv_frames_can_still_be_read_as_bgra()
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-yuv-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var video = WriteVideo(dir, "v.mp4", "libx264", 320, 180);
+            using var plain = new VideoReader(video);
+            using var yuv = new VideoReader(video) { PreferYuv = true };
+            foreach (int divisor in new[] { 1, 2 })
+            {
+                plain.OutputDivisor = yuv.OutputDivisor = divisor;
+                var expected = (byte[])plain.GetFrame(0.1)!.Clone();
+                var token = yuv.GetFramePointer(0.1);
+                Assert.True(yuv.TryGetYuv(token, out var planes));
+                Assert.Equal((320 / divisor, 180 / divisor), (planes.Width, planes.Height));
+                Assert.Equal((yuv.FrameWidth, yuv.FrameHeight), (planes.Width, planes.Height));
+                // BGRA が要るとき (GPU へ送れなかったとき) は、あとから変換できる
+                var bgra = yuv.GetFrame(0.1)!;
+                long total = 0;
+                for (int i = 0; i < expected.Length; i++) total += Math.Abs(expected[i] - bgra[i]);
+                double mean = (double)total / expected.Length;
+                // 元の大きさなら同じ変換なので一致する。縮めるときは YUV のまま縮めるので、わずかに違う
+                if (divisor == 1) Assert.Equal(0, total);
+                else Assert.True(mean < 2.0, $"縮めた絵が違う: {mean}");
+            }
+            // U・V を間引いた形式で奇数の大きさに縮めるときは、YUV で持たない (BGRA にする)
+            yuv.OutputDivisor = 3;   // 107x60
+            Assert.False(yuv.TryGetYuv(yuv.GetFramePointer(0.1), out _));
+            // PreferYuv でなければ、これまでどおり BGRA だけ
+            Assert.False(plain.TryGetYuv(plain.GetFramePointer(0.1), out _));
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Theory]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUV420P, 64, 36)]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUVJ420P, 64, 36)]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_NV12, 64, 36)]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUV422P, 64, 36)]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUVJ444P, 64, 36)]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUV444P, 37, 23)]
+    public unsafe void Gpu_yuv_conversion_matches_ffmpeg(FFmpeg.AutoGen.AVPixelFormat format, int w, int h)
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        using var gpu = Gpu();
+        if (gpu == null) return;
+        var layout = VideoReader.YuvFormatOf(format)!.Value;
+        int cw = (w + (1 << layout.ShiftX) - 1) >> layout.ShiftX, ch = (h + (1 << layout.ShiftY) - 1) >> layout.ShiftY;
+        bool nv12 = layout.Layout == YuvLayout.Nv12;
+        // 行の終わりに余白のある面 (デコーダの置き場と同じ)
+        int ys = w + 13, us = (nv12 ? cw * 2 + 8 : cw + 7), vs = cw + 5;
+        var y = new byte[ys * h]; var u = new byte[us * ch]; var v = new byte[vs * ch];
+        var rnd = new Random(7);
+        for (int r = 0; r < h; r++) for (int c = 0; c < w; c++) y[r * ys + c] = (byte)(16 + (c * 7 + r * 3) % 220);
+        for (int r = 0; r < ch; r++)
+            for (int c = 0; c < cw; c++)
+            {
+                byte cu = (byte)rnd.Next(16, 241), cv = (byte)rnd.Next(16, 241);
+                if (nv12) { u[r * us + c * 2] = cu; u[r * us + c * 2 + 1] = cv; }
+                else { u[r * us + c] = cu; v[r * vs + c] = cv; }
+            }
+        var expected = new byte[w * h * 4];
+        fixed (byte* py = y, pu = u, pv = v, pe = expected)
+        {
+            // CPU の変換 (VideoReader と同じ sws の呼び方)
+            var sws = FFmpeg.AutoGen.ffmpeg.sws_getContext(w, h, format, w, h, FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_BGRA,
+                (int)FFmpeg.AutoGen.SwsFlags.SWS_BILINEAR, null, null, null);
+            var src = new byte*[] { py, pu, nv12 ? null : pv, null };
+            var srcStride = new[] { ys, us, nv12 ? 0 : vs, 0 };
+            var dst = new byte*[] { pe, null, null, null };
+            var dstStride = new[] { w * 4, 0, 0, 0 };
+            FFmpeg.AutoGen.ffmpeg.sws_scale(sws, src, srcStride, 0, h, dst, dstStride);
+            FFmpeg.AutoGen.ffmpeg.sws_freeContext(sws);
+
+            var planes = new YuvPlanes(w, h, layout.Layout, layout.ShiftX, layout.ShiftY, layout.Full,
+                (IntPtr)py, ys, (IntPtr)pu, us, nv12 ? IntPtr.Zero : (IntPtr)pv, nv12 ? 0 : vs);
+            gpu.MakeCurrent();
+            using var converter = YuvTextures.Create(gpu, out var error);
+            Assert.True(converter != null, error);
+            using var image = converter!.Convert(planes);
+            Assert.NotNull(image);
+            using var actual = new SKBitmap(new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Premul));
+            Assert.True(image!.ReadPixels(actual.Info, actual.GetPixels(), actual.RowBytes, 0, 0));
+            var got = actual.Bytes;
+            // sws は NV12 の下端 2 行だけ、U・V の重みの付け方が違う (端の扱い)。そこは比べない
+            int rows = nv12 ? h - 2 : h;
+            long total = 0; int max = 0;
+            for (int i = 0; i < rows * w * 4; i++) { int d = Math.Abs(expected[i] - got[i]); total += d; max = Math.Max(max, d); }
+            double mean = (double)total / (rows * w * 4);
+            Console.WriteLine($"BENCH yuv-planes {format} {w}x{h} mean={mean:0.000} max={max}");
+            Assert.True(mean < 1.0 && max <= 4, $"sws と違う: mean={mean} max={max}");
+        }
+    }
 }
