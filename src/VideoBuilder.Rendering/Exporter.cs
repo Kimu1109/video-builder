@@ -63,7 +63,7 @@ public static class Exporter
                     if (stop.IsCancellationRequested) continue;
                     watch.Restart();
                     using (var pixmap = bitmap.PeekPixels())
-                    using (var data = pixmap.Encode(SKEncodedImageFormat.Png, 100))
+                    using (var data = pixmap?.Encode(SKEncodedImageFormat.Png, 100) ?? throw new InvalidOperationException("PNG に圧縮できません"))
                     using (var fs = File.Create(Path.Combine(dir, $"{name}_{index:00000}.png")))
                         data.SaveTo(fs);
                     stats?.AddEncode(watch.Elapsed);
