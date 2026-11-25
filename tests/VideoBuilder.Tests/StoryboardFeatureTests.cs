@@ -284,6 +284,94 @@ public class StoryboardFeatureTests
     }
 
     [Fact]
+    public void Reimporting_after_advanced_edits_keeps_captions_titles_and_settings()
+    {
+        var (s, ed) = NewEditor();
+        var photo = Photo(3);
+        photo.Caption = "cap";
+        photo.Transition = 1;
+        photo.Look = ClipLook.Sepia;
+        var title = StoryClip.Title("Hello");
+        title.Background = "#123456";
+        var plain = Photo(2);
+        ed.AddClips(new[] { title, photo, plain });
+        var music = new MusicClip { File = "/m.wav", SourceSeconds = 1, Loop = true, Duck = true, FadeIn = 0.5 };
+        ed.AddMusic(music);
+        ed.Change("x", b => { b.EndFadeSeconds = 2; b.Background = "#222222"; });
+
+        // 詳細編集で: 写真を 1 秒長くし、キャプションの文字を変え、別の写真に文字を重ねる
+        s.Edit("advanced", () =>
+        {
+            var root = s.Project.Root;
+            var v = root.Objects.Single(o => o.Id == StoryboardCompiler.IdPrefix + photo.Id + "v");
+            v.End += 30;
+            root.Objects.Single(o => o.Id == StoryboardCompiler.IdPrefix + photo.Id + "t").Main.Values["text"] = "changed";
+            var span = ed.Layout.Find(plain.Id)!;
+            var t = ObjectFactory.Create(EffectRegistry.Text, 20, span.Start + 15, 15);
+            t.Main.Values["text"] = "added";
+            root.Objects.Add(t);
+        });
+        Assert.False(ed.CanEdit);
+
+        ed.ImportFromScene();
+        var board = ed.Board!;
+        Assert.True(ed.CanEdit);
+        Assert.Equal(3, board.Clips.Count);
+        var t2 = board.Clips[0];
+        Assert.Equal((StoryClipKind.Title, "Hello", "#123456"), (t2.Kind, t2.Text, t2.Background));
+        var p2 = board.FindClip(photo.Id)!;
+        Assert.Equal("changed", p2.Caption);
+        Assert.Equal((1, ClipLook.Sepia), (p2.Transition, p2.Look));
+        Assert.Equal(4, p2.Duration, 1);
+        var q2 = board.Clips[2];
+        Assert.Equal("added", q2.Caption);
+        Assert.Equal((0.5, 0.5), (q2.CaptionStart, q2.CaptionSeconds));
+        Assert.Equal((2.0, "#222222"), (board.EndFadeSeconds, board.Background));
+
+        // 繰り返す音楽は、並べたものを 1 つにまとめて、設定も引き継ぐ
+        var m2 = Assert.Single(board.Music);
+        Assert.True(m2.Loop && m2.Duck);
+        Assert.Equal((0.5, 1.0), (m2.FadeIn, m2.EffectiveTrimEnd));
+    }
+
+    [Fact]
+    public void Importing_a_plain_advanced_project_turns_text_into_captions()
+    {
+        var p = Small();
+        var scene = p.Root;
+        var img = ObjectFactory.Create(EffectRegistry.Image, 0, 0, 60);
+        img.Main.Values["file"] = "/a.png";
+        var text = ObjectFactory.Create(EffectRegistry.Text, 1, 0, 60);
+        text.Main.Values["text"] = "hi";
+        var lonely = ObjectFactory.Create(EffectRegistry.Text, 1, 100, 10);   // 映像に重ならない文字は取り込まない
+        lonely.Main.Values["text"] = "skip";
+        scene.Objects.AddRange(new[] { img, text, lonely });
+        var board = StoryboardImport.FromScene(p, scene);
+        var clip = Assert.Single(board.Clips);
+        Assert.Equal("hi", clip.Caption);
+        Assert.Equal((0.0, 0.0), (clip.CaptionStart, clip.CaptionSeconds));
+    }
+
+    [Fact]
+    public void Previous_and_next_clip_can_be_selected()
+    {
+        var (_, ed) = NewEditor();
+        ed.AddClips(new[] { Photo(2), Photo(2), Photo(2) });
+        ed.Select(null);
+        var ids = ed.Board!.Clips.Select(c => c.Id).ToArray();
+        Assert.Equal(ids[1], ed.SelectAdjacent(1, 75)!.Id);    // 何も選んでいなければ、その位置のクリップ
+        Assert.Equal(ids[2], ed.SelectAdjacent(1, 0)!.Id);
+        Assert.Equal(ids[2], ed.SelectAdjacent(1, 0)!.Id);     // 端では動かない
+        Assert.Equal(ids[1], ed.SelectAdjacent(-1, 0)!.Id);
+        ed.Select(null);
+        Assert.Equal(ids[1], ed.SelectAdjacent(-1, 75)!.Id);   // 途中なら、そのクリップの始まりへ
+        ed.Select(null);
+        Assert.Equal(ids[0], ed.SelectAdjacent(-1, 60)!.Id);   // 始まりなら、前のクリップ
+        ed.Select(null);
+        Assert.Equal(ids[2], ed.SelectAdjacent(-1, 999)!.Id);
+    }
+
+    [Fact]
     public void End_title_goes_last()
     {
         var (_, ed) = NewEditor();

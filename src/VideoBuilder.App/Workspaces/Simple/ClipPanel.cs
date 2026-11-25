@@ -152,6 +152,30 @@ public sealed class ClipPanel : UserControl
         return box;
     }
 
+    /// <summary>時刻・長さの入力 (「分:秒」で表示し、「1:23.5」でも「83.5」でも入れられる)。</summary>
+    private static NumberBox Time(double value, double min, double max, Action<double> commit)
+    {
+        var box = Seconds(value, min, max, commit);
+        box.TimeFormat = true;
+        box.Value = value;   // 表示を「分:秒」にし直す
+        ToolTip.SetTip(box, L.T("「1:23.5」(分:秒) でも「83.5」(秒) でも入力できます"));
+        return box;
+    }
+
+    /// <summary>素材のファイル名。見つからなければ、そのことと付け替えのボタンを出す。</summary>
+    private void FileName(string path)
+    {
+        var name = L.Verbatim(Path.GetFileName(path));
+        name.TextTrimming = TextTrimming.CharacterEllipsis;
+        ToolTip.SetTip(name, L.Verbatim(path));
+        _body.Children.Add(name);
+        if (SimpleMedia.Exists(path)) return;
+        var warn = new TextBlock { Text = L.T("ファイルが見つかりません。移動したときは、付け替えてください。"), TextWrapping = TextWrapping.Wrap };
+        warn.Foreground = Svc.Brush("Error");
+        _body.Children.Add(warn);
+        _body.Children.Add(Small("素材の付け替え...", () => _ = EditorCommands.CheckMissingFilesAsync(always: true)));
+    }
+
     private static ComboBox Combo(string[] items, int index, Action<int> changed)
     {
         var c = new ComboBox { ItemsSource = items, SelectedIndex = index, HorizontalAlignment = HorizontalAlignment.Stretch };
@@ -321,7 +345,7 @@ public sealed class ClipPanel : UserControl
         if (timed.Count > 0)
         {
             Heading("長さ");
-            Row("表示時間 (秒)", Seconds(timed[0].Duration, StoryClip.MinSeconds, 3600, v => ApplySelected("表示時間の変更", x => { if (x.Kind != StoryClipKind.Video) x.Duration = v; })));
+            Row("表示時間", Time(timed[0].Duration, StoryClip.MinSeconds, 3600, v => ApplySelected("表示時間の変更", x => { if (x.Kind != StoryClipKind.Video) x.Duration = v; })));
             Note("写真・タイトルの表示時間です (動画は変わりません)。");
         }
 
@@ -344,25 +368,19 @@ public sealed class ClipPanel : UserControl
     {
         string kind = c.Kind switch { StoryClipKind.Video => "動画", StoryClipKind.Photo => "写真", _ => "タイトル" };
         Heading(kind);
-        if (c.UsesFile)
-        {
-            var name = L.Verbatim(Path.GetFileName(c.File));
-            name.TextTrimming = TextTrimming.CharacterEllipsis;
-            ToolTip.SetTip(name, L.Verbatim(c.File));
-            _body.Children.Add(name);
-        }
+        if (c.UsesFile) FileName(c.File);
 
         // ---- 長さ ----
         Heading("長さ");
         if (c.Kind == StoryClipKind.Video)
         {
             double max = c.SourceSeconds > 0 ? c.SourceSeconds : 36000;
-            Row("開始 (秒)", Seconds(c.TrimStart, 0, max, v => Apply("開始位置の設定", x =>
+            Row("始まり", Time(c.TrimStart, 0, max, v => Apply("開始位置の設定", x =>
             {
                 if (x.TrimEnd <= 0) x.TrimEnd = x.EffectiveTrimEnd;
                 x.TrimStart = Math.Min(v, x.EffectiveTrimEnd - StoryClip.MinSeconds);
             })));
-            Row("終了 (秒)", Seconds(c.EffectiveTrimEnd, 0, max, v => Apply("終了位置の設定", x => x.TrimEnd = Math.Max(v, x.TrimStart + StoryClip.MinSeconds))));
+            Row("終わり", Time(c.EffectiveTrimEnd, 0, max, v => Apply("終了位置の設定", x => x.TrimEnd = Math.Max(v, x.TrimStart + StoryClip.MinSeconds))));
             _body.Children.Add(new StackPanel
             {
                 Orientation = Orientation.Horizontal, Spacing = 6,
@@ -384,7 +402,7 @@ public sealed class ClipPanel : UserControl
         }
         else
         {
-            Row("表示時間 (秒)", Seconds(c.Duration, StoryClip.MinSeconds, 3600, v => Apply("表示時間の変更", x => x.Duration = v)));
+            Row("表示時間", Time(c.Duration, StoryClip.MinSeconds, 3600, v => Apply("表示時間の変更", x => x.Duration = v)));
             bool photo = c.Kind == StoryClipKind.Photo;
             ApplyAllButton(c, photo ? "すべての写真を同じ表示時間にする" : "すべてのタイトルを同じ表示時間にする", "表示時間をすべてに付ける",
                 (src, x) => x.Duration = src.Duration, x => x.Kind == c.Kind);
@@ -411,8 +429,8 @@ public sealed class ClipPanel : UserControl
             Row("大きさ", ScaleCombo(c.TextScale, v => Apply("文字の大きさ", x => x.TextScale = v)));
             Row("フォント", FontCombo(c.Font, v => Apply("フォントの変更", x => x.Font = v)));
             _body.Children.Add(Check("後ろに帯を敷く (読みやすくする)", c.CaptionBackground, on => Apply("キャプションの帯", x => x.CaptionBackground = on)));
-            Row("出し始め (秒)", Seconds(c.CaptionStart, 0, 3600, v => Apply("キャプションの時間", x => x.CaptionStart = v)));
-            Row("出す長さ (秒)", Seconds(c.CaptionSeconds, 0, 3600, v => Apply("キャプションの時間", x => x.CaptionSeconds = v)));
+            Row("出し始め", Time(c.CaptionStart, 0, 3600, v => Apply("キャプションの時間", x => x.CaptionStart = v)));
+            Row("出す長さ", Time(c.CaptionSeconds, 0, 3600, v => Apply("キャプションの時間", x => x.CaptionSeconds = v)));
             Note("出し始めはクリップの先頭からの秒です。出す長さが 0 なら、クリップの終わりまで出します。");
         }
 
@@ -421,6 +439,21 @@ public sealed class ClipPanel : UserControl
         Row("種類", Combo(Transitions, Math.Clamp(c.Transition, 0, EffectRegistry.TransitionTypes.Length), i => Apply("切り替え効果の変更", x => x.Transition = i)));
         Row("長さ (秒)", Seconds(c.TransitionSeconds, 0.1, 10, v => Apply("切り替え効果の長さ", x => x.TransitionSeconds = v)));
         Note(_editor.Board?.Clips.IndexOf(c) == 0 ? "先頭のクリップでは、黒い画面から切り替わります。" : "前のクリップから、このクリップへ切り替わるときの効果です。");
+        if (c.Transition > 0 && _editor.Layout.Find(c.Id) is { } span)
+        {
+            // 前後のクリップの長さの半分までに抑えるので、指定より短くなることがある
+            double actual = _editor.Project.FrameToSeconds(span.FadeIn);
+            if (c.TransitionSeconds - actual > 1.0 / Math.Max(1, _editor.Project.Settings.Fps.Value) + 1e-6)
+            {
+                var warn = new TextBlock
+                {
+                    Text = L.Format("このクリップか前のクリップが短いため、切り替えは {0} 秒に短くなっています (クリップの長さの半分まで)。", actual.ToString("0.##")),
+                    TextWrapping = TextWrapping.Wrap,
+                };
+                warn.Foreground = Svc.Brush("Warning");
+                _body.Children.Add(warn);
+            }
+        }
         ApplyAllButton(c, "すべてのクリップに同じ効果を付ける", "切り替え効果をすべてに付ける",
             (src, x) => { x.Transition = src.Transition; x.TransitionSeconds = src.TransitionSeconds; });
 
@@ -469,12 +502,9 @@ public sealed class ClipPanel : UserControl
     private void BuildMusic(MusicClip m)
     {
         Heading("音楽");
-        var name = L.Verbatim(Path.GetFileName(m.File));
-        name.TextTrimming = TextTrimming.CharacterEllipsis;
-        ToolTip.SetTip(name, L.Verbatim(m.File));
-        _body.Children.Add(name);
+        FileName(m.File);
 
-        Row("鳴らし始め (秒)", Seconds(m.StartSeconds, 0, 36000, v => ApplyMusic("音楽の移動", x => x.StartSeconds = v)));
+        Row("鳴らし始め", Time(m.StartSeconds, 0, 36000, v => ApplyMusic("音楽の移動", x => x.StartSeconds = v)));
         _body.Children.Add(Small("現在位置から鳴らす", () =>
         {
             double at = Math.Round(_editor.Project.FrameToSeconds(_session.CurrentFrame), 3);
@@ -483,12 +513,12 @@ public sealed class ClipPanel : UserControl
 
         Heading("使う範囲");
         double max = m.SourceSeconds > 0 ? m.SourceSeconds : 36000;
-        Row("開始 (秒)", Seconds(m.TrimStart, 0, max, v => ApplyMusic("音楽の範囲", x =>
+        Row("始まり", Time(m.TrimStart, 0, max, v => ApplyMusic("音楽の範囲", x =>
         {
             if (x.TrimEnd <= 0) x.TrimEnd = x.EffectiveTrimEnd;
             x.TrimStart = Math.Min(v, x.EffectiveTrimEnd - StoryClip.MinSeconds);
         })));
-        Row("終了 (秒)", Seconds(m.EffectiveTrimEnd, 0, max, v => ApplyMusic("音楽の範囲", x => x.TrimEnd = Math.Max(v, x.TrimStart + StoryClip.MinSeconds))));
+        Row("終わり", Time(m.EffectiveTrimEnd, 0, max, v => ApplyMusic("音楽の範囲", x => x.TrimEnd = Math.Max(v, x.TrimStart + StoryClip.MinSeconds))));
 
         Heading("音量");
         Row("音量", Volume(m.Volume, (v, done) => ApplyMusic("音量の変更", x => x.Volume = v, "mvolume:" + m.Id)));

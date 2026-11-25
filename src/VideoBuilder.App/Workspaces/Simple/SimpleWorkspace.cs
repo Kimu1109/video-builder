@@ -63,7 +63,7 @@ public sealed class SimpleWorkspace : IWorkspace
         Strip.ViewChanged += SyncScroll;
         _scroll.ValueChanged += (_, _) => { if (!_syncingScroll) Strip.ScrollX = _scroll.Value; };
         Strip.MenuRequested += OnContext;
-        Strip.FilesDropped += (files, at) => AddFiles(files, at);
+        Strip.FilesDropped += (files, at, seconds) => AddFiles(files, at, seconds);
         _editor.SelectionChanged += () => _shell?.RefreshEnabled();
         _session.ProjectChanged += UpdateNotice;
         _session.ProjectReplaced += UpdateNotice;
@@ -167,6 +167,8 @@ public sealed class SimpleWorkspace : IWorkspace
         Menus.Item("現在位置で分割", "Split", Split, Shortcuts.First("edit.split")),
         shell.Track(Menus.Item("開始位置を現在位置に", null, () => TrimAtPlayhead(true), Shortcuts.First("simple.trimStart")), ClipSelected),
         shell.Track(Menus.Item("終了位置を現在位置に", null, () => TrimAtPlayhead(false), Shortcuts.First("simple.trimEnd")), ClipSelected),
+        shell.Track(Menus.Item("前のクリップを選ぶ", null, () => SelectAdjacent(-1), Shortcuts.First("simple.prevClip")), () => _editor.Board is { Clips.Count: > 0 }),
+        shell.Track(Menus.Item("次のクリップを選ぶ", null, () => SelectAdjacent(1), Shortcuts.First("simple.nextClip")), () => _editor.Board is { Clips.Count: > 0 }),
         shell.Track(Menus.Item("前へ移動", "ChevronLeft", () => _editor.MoveSelected(-1)), ClipSelected),
         shell.Track(Menus.Item("後ろへ移動", "ChevronRight", () => _editor.MoveSelected(1)), ClipSelected),
         Menus.Sep(),
@@ -267,13 +269,16 @@ public sealed class SimpleWorkspace : IWorkspace
         if (errors.Count > 0) await EditorCommands.ShowErrorAsync(string.Join("\n", errors));
     }
 
-    /// <summary>ファイルをストーリーボードに入れる。index は並びの何番目か (null なら選んでいるクリップの後ろ)。</summary>
-    public void AddFiles(IReadOnlyList<string> files, int? index)
+    /// <summary>
+    /// ファイルをストーリーボードに入れる。index は並びの何番目か (null なら選んでいるクリップの後ろ)。
+    /// 音声は musicAt 秒 (落とした位置。null なら現在位置) から鳴らす。
+    /// </summary>
+    public void AddFiles(IReadOnlyList<string> files, int? index, double? musicAt = null)
     {
         if (files.Count == 0) return;
         if (!CanEdit) { _ = EditorCommands.ShowErrorAsync("このプロジェクトは詳細編集で変更されているため、シンプル編集では追加できません。"); return; }
         Svc.Preview.Stop();
-        var errors = SimpleMedia.AddFiles(_editor, files, index);
+        var errors = SimpleMedia.AddFiles(_editor, files, index, musicAt);
         if (_editor.SelectedId is { } id && _editor.StartOf(id) is { } start) EditorCommands.Seek(start);
         if (errors.Count > 0) _ = EditorCommands.ShowErrorAsync(string.Join("\n", errors));
     }
@@ -299,6 +304,17 @@ public sealed class SimpleWorkspace : IWorkspace
         Panel.Refresh();
         Panel.CaptionBox?.Focus();
         Panel.CaptionBox?.SelectAll();
+    }
+
+    /// <summary>前 / 次のクリップを選び、現在位置をその始まりに移して見える所まで動かす。</summary>
+    public void SelectAdjacent(int direction)
+    {
+        Svc.Preview.Stop();
+        if (_editor.SelectAdjacent(direction, _session.CurrentFrame) is { } clip && _editor.StartOf(clip.Id) is { } start)
+        {
+            EditorCommands.Seek(start);
+            Strip.EnsureFrameVisible(start);
+        }
     }
 
     /// <summary>選んでいるクリップの始まり / 終わりを現在位置にする。</summary>
@@ -334,7 +350,7 @@ public sealed class SimpleWorkspace : IWorkspace
         Point? onStrip = Strip.IsEffectivelyVisible && window.TranslatePoint(point, Strip) is { } p && new Rect(Strip.Bounds.Size).Contains(p) ? p : null;
         if (files == null) { Strip.ShowDropTarget(onStrip); return; }
         Strip.ShowDropTarget(null);
-        AddFiles(files, onStrip is { } at ? Strip.InsertIndexAt(at.X) : null);
+        AddFiles(files, onStrip is { } at ? Strip.InsertIndexAt(at.X) : null, onStrip is { } m ? Strip.SecondsAt(m.X) : null);
     }
 
     public void ExternalDragLeft() => Strip.ShowDropTarget(null);
