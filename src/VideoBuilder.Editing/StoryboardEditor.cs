@@ -184,7 +184,8 @@ public sealed class StoryboardEditor
     /// <summary>今のメインのシーンからストーリーボードを作る (詳細編集のプロジェクトを取り込む)。</summary>
     public void ImportFromScene()
     {
-        var board = StoryboardImport.FromScene(Project, Project.Root);
+        // シンプル編集で作ってから詳細編集で変えたものは、キャプション・タイトルなどの設定を前のストーリーボードから引き継ぐ
+        var board = StoryboardImport.FromScene(Project, Project.Root, Project.Storyboard);
         _session.Edit("シンプル編集に取り込む", () =>
         {
             Project.Storyboard = board;
@@ -481,6 +482,27 @@ public sealed class StoryboardEditor
     }
 
     // ---------------- 位置 ----------------
+
+    /// <summary>
+    /// 前 (direction = -1) / 次 (+1) のクリップを選ぶ。何も選んでいなければ、frame の位置にあるクリップ (次なら、その次ではなくそれ自身)。
+    /// 選んだクリップを返す (端に着いていれば今のまま)。
+    /// </summary>
+    public StoryClip? SelectAdjacent(int direction, int frame)
+    {
+        var board = Board;
+        if (board == null || board.Clips.Count == 0) return null;
+        int index;
+        if (SelectedClip is { } sel) index = Math.Clamp(board.Clips.IndexOf(sel) + Math.Sign(direction), 0, board.Clips.Count - 1);
+        else
+        {
+            var layout = Layout;
+            var at = layout.ClipAt(frame);
+            if (at != null) index = direction < 0 && frame > at.Start ? at.Index : Math.Clamp(at.Index + (direction < 0 ? -1 : 0), 0, board.Clips.Count - 1);
+            else index = frame >= layout.VideoLength ? board.Clips.Count - 1 : 0;
+        }
+        Select(board.Clips[index].Id);
+        return board.Clips[index];
+    }
 
     /// <summary>クリップの先頭のフレーム (なければ null)。</summary>
     public int? StartOf(string id) => Layout.Find(id)?.Start ?? Layout.FindMusic(id)?.Start;

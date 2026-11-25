@@ -21,6 +21,10 @@ public sealed class NumberBox : TextBox
     public double Minimum { get; set; } = double.MinValue;
     public double Maximum { get; set; } = double.MaxValue;
     public int Decimals { get; set; } = 1;
+    /// <summary>
+    /// 秒を「分:秒」(1 時間以上なら「時:分:秒」) で表示する。入力は「1:23.5」「83.5」のどちらでもよい。
+    /// </summary>
+    public bool TimeFormat { get; set; }
     /// <summary>ユーザーが値を確定した。</summary>
     public event Action<double>? Committed;
 
@@ -42,7 +46,37 @@ public sealed class NumberBox : TextBox
         }
     }
 
-    private string Format(double v) => v.ToString("F" + Decimals, CultureInfo.InvariantCulture);
+    private string Format(double v) => TimeFormat ? FormatTime(v, Decimals) : v.ToString("F" + Decimals, CultureInfo.InvariantCulture);
+
+    /// <summary>秒を「分:秒」(1 時間以上なら「時:分:秒」) にする。例: 83.5 → "1:23.50"。</summary>
+    public static string FormatTime(double seconds, int decimals)
+    {
+        string sign = seconds < 0 ? "-" : "";
+        seconds = Math.Round(Math.Abs(seconds), decimals);
+        long whole = (long)Math.Floor(seconds);
+        string sec = (seconds - whole + whole % 60).ToString((decimals > 0 ? "00." + new string('0', decimals) : "00"), CultureInfo.InvariantCulture);
+        long minutes = whole / 60;
+        return minutes >= 60 ? $"{sign}{minutes / 60}:{minutes % 60:00}:{sec}" : $"{sign}{minutes}:{sec}";
+    }
+
+    /// <summary>「時:分:秒」「分:秒」「秒」を秒にする。読めなければ false。</summary>
+    public static bool TryParseTime(string text, out double seconds)
+    {
+        seconds = 0;
+        var parts = text.Trim().Split(':');
+        if (parts.Length is < 1 or > 3) return false;
+        bool negative = parts[0].TrimStart().StartsWith('-');
+        if (negative) parts[0] = parts[0].TrimStart()[1..];
+        for (int i = 0; i < parts.Length; i++)
+        {
+            // 最後 (秒) だけ小数を許す
+            var style = i == parts.Length - 1 ? NumberStyles.AllowDecimalPoint : NumberStyles.None;
+            if (!double.TryParse(parts[i].Trim(), style, CultureInfo.InvariantCulture, out var v)) return false;
+            seconds = seconds * 60 + v;
+        }
+        if (negative) seconds = -seconds;
+        return true;
+    }
 
     protected override void OnGotFocus(GotFocusEventArgs e)
     {
@@ -96,6 +130,12 @@ public sealed class NumberBox : TextBox
     {
         var text = (Text ?? "").Trim();
         if (text.Length == 0 || text == Format(_value)) return;
+        if (text.Contains(':'))
+        {
+            if (!TryParseTime(text, out var t)) return;
+            Apply(t);
+            return;
+        }
         if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var v))
         {
             try { v = Convert.ToDouble(new DataTable().Compute(text, null), CultureInfo.InvariantCulture); }

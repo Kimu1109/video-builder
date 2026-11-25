@@ -1578,6 +1578,155 @@ public class UiTests
         Assert.True(ed.CanEdit);
     }
 
+    [Fact]
+    public void Time_boxes_read_and_show_minutes_and_seconds()
+    {
+        Assert.Equal("1:23.50", NumberBox.FormatTime(83.5, 2));
+        Assert.Equal("0:05.00", NumberBox.FormatTime(5, 2));
+        Assert.Equal("1:00:01.0", NumberBox.FormatTime(3601, 1));
+        Assert.True(NumberBox.TryParseTime("1:23.5", out var a)); Assert.Equal(83.5, a);
+        Assert.True(NumberBox.TryParseTime("1:02:03", out var b)); Assert.Equal(3723, b);
+        Assert.True(NumberBox.TryParseTime("90", out var c)); Assert.Equal(90, c);
+        Assert.False(NumberBox.TryParseTime("1:x", out _));
+        Assert.False(NumberBox.TryParseTime("1.5:00", out _));
+    }
+
+    [AvaloniaFact]
+    public void Clip_panel_time_box_accepts_minutes_and_seconds()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        ed.AddClips(new[] { ColorTitle("#FF0000") });
+        Pump();
+        var box = w.Simple.Panel.GetVisualDescendants().OfType<NumberBox>().First(b => b.TimeFormat);
+        Assert.Equal("0:02.00", box.Text);
+        box.Text = "1:05";
+        box.Commit();
+        Pump();
+        Assert.Equal(65, ed.Board!.Clips[0].Duration);
+    }
+
+    [AvaloniaFact]
+    public void Dragged_music_snaps_to_clip_boundaries()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        ed.AddClips(new[] { ColorTitle("#FF0000", 4), ColorTitle("#00FF00", 4) });
+        ed.AddMusic(new MusicClip { File = "/m.wav", SourceSeconds = 2, StartSeconds = 0 });
+        ed.Select(null);
+        Svc.Session.CurrentFrame = 0;
+        Pump();
+        var strip = w.Simple.Strip;
+        double y = StoryboardStrip.ClipTop + StoryboardStrip.ClipHeight + StoryboardStrip.MusicGap + StoryboardStrip.MusicHeight / 2;
+        var from = strip.TranslatePoint(new Point(strip.FrameToX(30), y), w)!.Value;
+        // 4 秒 (2 つ目のクリップの始まり) の少し手前まで動かすと、ぴったり 4 秒に合う
+        var to = new Point(from.X + strip.PixelsPerSecond * 3.9, from.Y);
+        w.MouseDown(from, MouseButton.Left);
+        w.MouseMove(new Point(from.X + 10, from.Y));
+        w.MouseMove(to);
+        w.MouseUp(to, MouseButton.Left);
+        Pump();
+        Assert.Equal(4, ed.Board!.Music[0].StartSeconds, 3);
+
+        // Alt を押していれば合わせない
+        var from2 = strip.TranslatePoint(new Point(strip.FrameToX(150), y), w)!.Value;
+        var to2 = new Point(from2.X - strip.PixelsPerSecond * 0.1, from2.Y);
+        w.MouseDown(from2, MouseButton.Left);
+        w.MouseMove(new Point(from2.X - 10, from2.Y), RawInputModifiers.Alt);
+        w.MouseMove(to2, RawInputModifiers.Alt);
+        w.MouseUp(to2, MouseButton.Left, RawInputModifiers.Alt);
+        Pump();
+        Assert.Equal(3.9, ed.Board!.Music[0].StartSeconds, 1);
+    }
+
+    [AvaloniaFact]
+    public void Dropped_audio_starts_where_it_was_dropped()
+    {
+        // 音声を調べるには FFmpeg のライブラリが要る (ほかのメディアのテストと同じく、なければ飛ばす。CI では必須)
+        if (!VideoBuilder.Media.FFmpegLoader.EnsureLoaded())
+        {
+            Assert.NotEqual("1", Environment.GetEnvironmentVariable("VB_REQUIRE_FFMPEG"));
+            return;
+        }
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        ed.AddClips(new[] { ColorTitle("#FF0000", 6) });
+        Svc.Session.CurrentFrame = 0;
+        Pump();
+        var dir = Path.Combine(Path.GetTempPath(), "vb-drop-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            // 無音の 16 ビット WAV (1 秒)
+            string path = Path.Combine(dir, "music.wav");
+            const int rate = 48000;
+            using (var bw = new BinaryWriter(File.Create(path)))
+            {
+                int bytes = rate * 2;
+                bw.Write("RIFF"u8); bw.Write(36 + bytes); bw.Write("WAVE"u8);
+                bw.Write("fmt "u8); bw.Write(16); bw.Write((short)1); bw.Write((short)1); bw.Write(rate); bw.Write(rate * 2); bw.Write((short)2); bw.Write((short)16);
+                bw.Write("data"u8); bw.Write(bytes); bw.Write(new byte[bytes]);
+            }
+            var strip = w.Simple.Strip;
+            double y = StoryboardStrip.ClipTop + StoryboardStrip.ClipHeight + StoryboardStrip.MusicGap + StoryboardStrip.MusicHeight / 2;
+            var at = strip.TranslatePoint(new Point(strip.FrameToX(90), y), w)!.Value;   // 3 秒の所
+            w.Simple.ExternalDrag(w, at, new[] { path });
+            Pump();
+            var music = Assert.Single(ed.Board!.Music);
+            Assert.Equal(3, music.StartSeconds, 1);
+            // 追加したものを選び、現在位置をその始まり (落とした所) へ移す (クリップを追加したときと同じ)
+            Assert.Equal(music.Id, ed.SelectedId);
+            Assert.Equal(90, Svc.Session.CurrentFrame);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [AvaloniaFact]
+    public void Alt_arrows_select_the_previous_and_next_clip()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        ed.AddClips(new[] { ColorTitle("#FF0000"), ColorTitle("#00FF00"), ColorTitle("#0000FF") });
+        ed.Select(null);
+        Svc.Session.CurrentFrame = 0;
+        Pump();
+        w.Simple.Strip.Focus();
+        w.KeyPressQwerty(PhysicalKey.ArrowRight, RawInputModifiers.Alt);
+        Pump();
+        Assert.Equal(ed.Board!.Clips[0].Id, ed.SelectedId);
+        w.KeyPressQwerty(PhysicalKey.ArrowRight, RawInputModifiers.Alt);
+        Pump();
+        Assert.Equal(ed.Board.Clips[1].Id, ed.SelectedId);
+        Assert.Equal(ed.Layout.Clips[1].Start, Svc.Session.CurrentFrame);
+        w.KeyPressQwerty(PhysicalKey.ArrowLeft, RawInputModifiers.Alt);
+        Pump();
+        Assert.Equal(ed.Board.Clips[0].Id, ed.SelectedId);
+        Assert.Equal(0, Svc.Session.CurrentFrame);
+    }
+
+    [AvaloniaFact]
+    public void Clip_panel_warns_about_shortened_transitions_and_missing_files()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        var shortClip = ColorTitle("#00FF00", 1);
+        shortClip.Transition = 1;
+        shortClip.TransitionSeconds = 3;
+        var missing = new StoryClip { Kind = StoryClipKind.Photo, File = "/no/such/file.png", Duration = 2 };
+        ed.AddClips(new[] { ColorTitle("#FF0000"), shortClip, missing });
+        Pump();
+        List<string?> Texts() => w.Simple.Panel.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text).ToList();
+
+        ed.Select(shortClip.Id); Pump();
+        // 1 秒のクリップなので、切り替えは半分 (14 フレーム = 0.47 秒) までに縮む
+        Assert.Contains(Texts(), t => t != null && t.Contains("0.47"));
+        ed.Select(missing.Id); Pump();
+        Assert.Contains(L.T("ファイルが見つかりません。移動したときは、付け替えてください。"), Texts());
+        Assert.Contains(w.Simple.Panel.GetVisualDescendants().OfType<Button>(), b => (b.Content as string) == "素材の付け替え...");
+        ed.Select(ed.Board!.Clips[0].Id); Pump();
+        Assert.DoesNotContain(L.T("ファイルが見つかりません。移動したときは、付け替えてください。"), Texts());
+    }
+
     [AvaloniaFact]
     public void Speed_is_chosen_in_the_clip_panel_for_videos_only()
     {

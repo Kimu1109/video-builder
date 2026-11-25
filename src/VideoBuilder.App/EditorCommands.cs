@@ -453,7 +453,9 @@ public static class EditorCommands
             new("alias.create", "テンプレートとして保存", "", () => _ = SaveTemplateAsync(), Mode: Adv),
             new("template.library", "テンプレートライブラリ", "", () => _ = ShowTemplateLibraryAsync(), Mode: Adv),
             new("simple.trimStart", "開始位置を現在位置に (シンプル編集)", "OemOpenBrackets", () => Main?.Simple.TrimAtPlayhead(start: true), Mode: EditorMode.Simple),
-            new("simple.trimEnd", "終了位置を現在位置に (シンプル編集)", "OemCloseBrackets", () => Main?.Simple.TrimAtPlayhead(start: false), Mode: EditorMode.Simple));
+            new("simple.trimEnd", "終了位置を現在位置に (シンプル編集)", "OemCloseBrackets", () => Main?.Simple.TrimAtPlayhead(start: false), Mode: EditorMode.Simple),
+            new("simple.prevClip", "前のクリップを選ぶ (シンプル編集)", "Alt+Left", () => Main?.Simple.SelectAdjacent(-1), Mode: EditorMode.Simple),
+            new("simple.nextClip", "次のクリップを選ぶ (シンプル編集)", "Alt+Right", () => Main?.Simple.SelectAdjacent(1), Mode: EditorMode.Simple));
     }
 
     /// <summary>キー入力を処理したら true。文字入力中 (TextBox) は編集用のキーを横取りしない。</summary>

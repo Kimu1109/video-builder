@@ -15,6 +15,27 @@ public static class SimpleMedia
     public static string[] VisualExtensions => EffectRegistry.VideoExtensions.Concat(EffectRegistry.ImageExtensions).ToArray();
     public static string[] AllExtensions => VisualExtensions.Concat(EffectRegistry.AudioExtensions).ToArray();
 
+    // 素材があるかどうかの結果を少しのあいだ覚えておく (ストーリーボードを描くたびにファイルを調べないように)
+    private static readonly Dictionary<string, (bool Exists, long Tick)> ExistsCache = new();
+    private const long ExistsCacheMs = 3000;
+
+    /// <summary>素材のファイルがあるか (3 秒まで前の結果を使う)。空のパスは「ある」とみなす。</summary>
+    public static bool Exists(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return true;
+        long now = Environment.TickCount64;
+        lock (ExistsCache)
+        {
+            if (ExistsCache.TryGetValue(path, out var c) && now - c.Tick < ExistsCacheMs) return c.Exists;
+            bool exists = File.Exists(path) || Directory.Exists(path);
+            ExistsCache[path] = (exists, now);
+            return exists;
+        }
+    }
+
+    /// <summary>覚えていた結果を捨てる (付け替えたあとなど)。</summary>
+    public static void ForgetExists() { lock (ExistsCache) ExistsCache.Clear(); }
+
     public sealed record Result(StoryClip? Clip, MusicClip? Music, MediaInfo? Info, string? Error);
 
     /// <summary>ファイルを調べて、映像ならクリップ、音声だけなら音楽を作る。</summary>
@@ -71,10 +92,11 @@ public static class SimpleMedia
     };
 
     /// <summary>
-    /// ファイルをストーリーボードに入れる。映像は index の位置 (null なら選んでいるクリップの後ろ) に、音声は現在位置から鳴らす。
+    /// ファイルをストーリーボードに入れる。映像は index の位置 (null なら選んでいるクリップの後ろ) に、
+    /// 音声は musicAt 秒 (null なら現在位置) から鳴らす。
     /// 入れられなかったファイルの理由を返す。
     /// </summary>
-    public static List<string> AddFiles(StoryboardEditor editor, IEnumerable<string> paths, int? index = null)
+    public static List<string> AddFiles(StoryboardEditor editor, IEnumerable<string> paths, int? index = null, double? musicAt = null)
     {
         var errors = new List<string>();
         var clips = new List<StoryClip>();
@@ -104,7 +126,8 @@ public static class SimpleMedia
             p.Settings.FrameRate = Rational.FromDouble(firstVideo.FrameRate).ToString();
         } : null);
 
-        double at = Math.Round(project.FrameToSeconds(editor.Session.CurrentFrame), 3);
+        // 音楽は、落とした位置 (なければ現在位置) から鳴らす
+        double at = Math.Round(Math.Max(0, musicAt ?? project.FrameToSeconds(editor.Session.CurrentFrame)), 3);
         foreach (var m in musics)
         {
             m.StartSeconds = at;
