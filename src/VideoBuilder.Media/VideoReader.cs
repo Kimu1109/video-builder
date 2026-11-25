@@ -402,6 +402,40 @@ public sealed unsafe class VideoReader : IDisposable
         _convertedCount++;
     }
 
+    private static readonly Lazy<bool> Nv12Interpolated = new(ProbeNv12Interpolation);
+
+    /// <summary>
+    /// sws が NV12 → BGRA で U・V を縦に補間するか (x64 では補間し、arm64 の NEON 版では補間せず 2 行で同じ値を使う)。
+    /// GPU で色を変換するとき、CPU 描画と同じ絵にするために使う。FFmpeg を読み込んでから呼ぶこと。
+    /// </summary>
+    public static bool SwsInterpolatesNv12ChromaVertically => Nv12Interpolated.Value;
+
+    /// <summary>U・V の 1 行だけ値を変えた小さな NV12 を変換して、隣の行に影響が出るかで調べる。</summary>
+    private static bool ProbeNv12Interpolation()
+    {
+        const int w = 64, h = 8;
+        var y = new byte[w * h]; var uv = new byte[w * h / 2]; var bgra = new byte[w * h * 4];
+        Array.Fill(y, (byte)128); Array.Fill(uv, (byte)128);
+        for (int x = 0; x < w; x += 2) uv[1 * w + x] = 168;   // U・V の 1 行目の U だけ
+        var sws = ffmpeg.sws_getContext(w, h, AVPixelFormat.AV_PIX_FMT_NV12, w, h, AVPixelFormat.AV_PIX_FMT_BGRA, (int)SwsFlags.SWS_BILINEAR, null, null, null);
+        if (sws == null) return true;
+        try
+        {
+            fixed (byte* py = y, puv = uv, pb = bgra)
+            {
+                var src = new byte*[4] { py, puv, null, null };
+                var srcStride = new int[4] { w, w, 0, 0 };
+                var dst = new byte*[4] { pb, null, null, null };
+                var dstStride = new int[4] { w * 4, 0, 0, 0 };
+                ffmpeg.sws_scale(sws, src, srcStride, 0, h, dst, dstStride);
+            }
+        }
+        finally { ffmpeg.sws_freeContext(sws); }
+        // U・V の 1 行目は Y の 2・3 行目に使われる。補間しなければ 2 行とも同じ値になる (青で比べる)
+        int row2 = bgra[(2 * w + 8) * 4], row3 = bgra[(3 * w + 8) * 4];
+        return row2 != row3;
+    }
+
     /// <summary>形式が YUV として渡せるものなら、その並び (U・V の間引き方と、フルレンジか)。</summary>
     internal static (YuvLayout Layout, int ShiftX, int ShiftY, bool Full)? YuvFormatOf(AVPixelFormat f) => f switch
     {

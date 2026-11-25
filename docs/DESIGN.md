@@ -2760,7 +2760,7 @@ GPU 描画のときに、フレームが GPU と CPU の間を往復する回数
 | 対象 | 8 ビットの YUV420P・YUV422P・YUV444P (J 形式も)・NV12 (ハードウェアデコードの転送結果)。透明な部分のある動画 (アニメーション WebP・GIF) は除く |
 | デコーダ側 | `VideoReader.PreferYuv` のとき、BGRA に変換するかわりに YUV のフレームを置き場ごとに持つ。先読み中も前のフレームを描けるよう、置き場を 2 つ使う決まり (`PinCurrentFrame`) は BGRA と同じ。縮めるとき (`OutputDivisor`) は YUV のまま縮める。V4L2 のデコーダは受け取り用の置き場が少ないので、参照を持たずに複製する。`TryGetYuv` で面を、`EnsureBgra` で BGRA を受け取る (GPU へ送れなかったとき) |
 | GPU 側 | `YuvTextures`。SkiaSharp 2.88 には YUV の画像を作る API (`SKYuvaPixmaps`) がなく、SkSL も描画時に落ちるので、OpenGL ES 3 を直接使う。Y・U・V の面を R8 / RG8 のテクスチャに送り (`GL_UNPACK_ROW_LENGTH` で行の余白を飛ばす)、自前のシェーダで RGBA8 のテクスチャに描いて、`SKImage.FromTexture` で包む。使い終えたテクスチャは戻ってきて使い回す。GL を使ったあとは `GRContext.ResetContext` で Skia に知らせる |
-| 色 | CPU 描画と同じ絵になるように、sws の既定に合わせる。係数は BT.601 (J 形式はフルレンジ、ほかはリミテッド)。U・V は補間せずに 2x2 画素で同じ値 (sws の拡大縮小しない変換と同じ)。NV12 は sws の一般の変換と同じく、縦だけ補間する (U・V の行 k が Y の行 2k+1 の位置にあるとみなされる。sws で 1 点だけ値を入れて測った) |
+| 色 | CPU 描画と同じ絵になるように、sws の既定に合わせる。係数は BT.601 (J 形式はフルレンジ、ほかはリミテッド)。U・V は補間せずに 2x2 画素で同じ値 (sws の拡大縮小しない変換と同じ)。NV12 は sws の振る舞いが CPU の種類で違う (x64 は縦だけ補間し、U・V の行 k が Y の行 2k+1 の位置にあるとみなす。arm64 の NEON 版は補間しない)。初めて使うときに小さな NV12 を sws で変換して調べ (`VideoReader.SwsInterpolatesNv12ChromaVertically`)、同じ読み方にする |
 | 使わないとき | OpenGL ES 3 でない (画面と共有するデスクトップの OpenGL など)・シェーダを作れない・U・V を間引いた形式で幅か高さが奇数 (sws が別の変換を使うので絵が合わない)・行の長さが画素の大きさで割り切れない。これまでどおり BGRA で送る。環境変数 `VIDEO_BUILDER_GPU_YUV=0` で使わない |
 
 #### 読み戻しを待たない仕組み

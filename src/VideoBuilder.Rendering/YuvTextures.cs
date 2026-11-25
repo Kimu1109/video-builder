@@ -41,8 +41,8 @@ internal sealed unsafe class YuvTextures : IDisposable
             vec2 c = uv * chroma;
             float y = texture(ty, uv).r;
             vec2 uvc;
-            if (nv12 == 1) {
-                // sws の NV12 の変換と同じ読み方: 横は 2 画素で同じ値、縦は補間する。
+            if (nv12 == 2) {
+                // sws の NV12 の変換 (x64) と同じ読み方: 横は 2 画素で同じ値、縦は補間する。
                 // U・V の行 k は、Y の行 2k+1 の位置にあるとみなされる (sws で測った結果: 行 2k+1 で 1、行 2k・2k+2 で 0.5)
                 float lumaRow = uv.y * float(textureSize(ty, 0).y) - 0.5;
                 float row = (lumaRow - 1.0) * 0.5;
@@ -51,6 +51,8 @@ internal sealed unsafe class YuvTextures : IDisposable
                 vec2 a = texelFetch(tu, ivec2(x, clamp(r0, 0, csize.y - 1)), 0).rg;
                 vec2 b = texelFetch(tu, ivec2(x, clamp(r0 + 1, 0, csize.y - 1)), 0).rg;
                 uvc = mix(a, b, row - float(r0));
+            } else if (nv12 == 1) {
+                uvc = texture(tu, c).rg;   // 補間しない (arm64 の sws と同じ)
             } else {
                 uvc = vec2(texture(tu, c).r, texture(tv, c).r);
             }
@@ -148,7 +150,8 @@ internal sealed unsafe class YuvTextures : IDisposable
                 gl.Disable(cap);
             gl.ColorMask(1, 1, 1, 1);
             gl.UseProgram(_program);
-            gl.Uniform1i(_locNv12, nv12 ? 1 : 0);
+            // NV12 の U・V を縦に補間するかは、sws に合わせる (CPU の種類で違う)
+            gl.Uniform1i(_locNv12, !nv12 ? 0 : VideoReader.SwsInterpolatesNv12ChromaVertically ? 2 : 1);
             var (matrix, offset) = Coefficients(p.FullRange);
             fixed (float* mp = matrix) gl.UniformMatrix3fv(_locM, 1, 0, mp);
             gl.Uniform3f(_locOff, offset.X, offset.Y, offset.Z);
