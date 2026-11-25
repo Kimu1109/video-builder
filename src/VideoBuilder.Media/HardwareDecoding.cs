@@ -12,7 +12,7 @@ public enum HardwareDecodeMode
 }
 
 /// <summary>
-/// GPU を使った動画のデコード (NVDEC・VAAPI・Quick Sync・VideoToolbox・D3D11VA など)。
+/// GPU を使った動画のデコード (NVDEC・VAAPI・Quick Sync・VideoToolbox・D3D11VA・D3D12VA など)。
 /// VideoReader から使う。デバイスは種類ごとに 1 つだけ作り、すべての動画で共有する。
 /// <para>
 /// Linux では最後に V4L2 M2M (h264_v4l2m2m などの専用のデコーダ。Raspberry Pi 4・Qualcomm・Amlogic など ARM の SoC の多く) も試す (設計書 22.37)。
@@ -49,17 +49,28 @@ public static unsafe class HardwareDecoding
             var t = ffmpeg.av_hwdevice_find_type_by_name(PreferredDevice);
             return t == AVHWDeviceType.AV_HWDEVICE_TYPE_NONE ? Array.Empty<AVHWDeviceType>() : new[] { t };
         }
-        // Windows: NVIDIA (CUDA) → D3D11VA → DXVA2。描画に Intel / AMD の GPU を選んでいれば、D3D11VA を先に試す
-        if (OperatingSystem.IsWindows())
-            return Hint() is { Kind: "d3d11va" }
-                ? new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 }
-                : new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 };
+        if (OperatingSystem.IsWindows()) return WindowsOrder(PlatformInfo.IsArm64Process, Hint()?.Kind);
         if (OperatingSystem.IsMacOS())
             return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_VIDEOTOOLBOX };
         // Linux: NVIDIA (CUDA) → Intel / AMD (VAAPI)。描画に Intel / AMD の GPU を選んでいれば、VAAPI を先に試す
         if (Hint() is { Kind: "vaapi" })
             return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI, AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA };
         return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI };
+    }
+
+    /// <summary>
+    /// Windows で試す順番。
+    /// x64: NVIDIA (CUDA) → D3D11VA → DXVA2。描画に Intel / AMD の GPU を選んでいれば、D3D11VA を先に試す。
+    /// ARM64 (Snapdragon の Adreno など): CUDA (NVIDIA のドライバ) は ARM64 の Windows にないので試さず、
+    /// D3D11VA → D3D12VA (新しいドライバで D3D11VA が使えないとき) → DXVA2 の順にする。
+    /// </summary>
+    internal static AVHWDeviceType[] WindowsOrder(bool arm64, string? hintKind)
+    {
+        if (arm64)
+            return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D12VA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 };
+        return hintKind == "d3d11va"
+            ? new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 }
+            : new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 };
     }
 
     public static string NameOf(AVHWDeviceType type) => type switch
@@ -69,6 +80,7 @@ public static unsafe class HardwareDecoding
         AVHWDeviceType.AV_HWDEVICE_TYPE_QSV => "Quick Sync",
         AVHWDeviceType.AV_HWDEVICE_TYPE_VIDEOTOOLBOX => "VideoToolbox",
         AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA => "D3D11VA",
+        AVHWDeviceType.AV_HWDEVICE_TYPE_D3D12VA => "D3D12VA",
         AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 => "DXVA2",
         AVHWDeviceType.AV_HWDEVICE_TYPE_VDPAU => "VDPAU",
         _ => ffmpeg.av_hwdevice_get_type_name(type) ?? type.ToString(),
@@ -83,7 +95,8 @@ public static unsafe class HardwareDecoding
         var h = Hint();
         if (h is not { Device.Length: > 0 } hint) return null;
         if (type == AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI && hint.Kind == "vaapi") return hint.Device;
-        if (type == AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA && OperatingSystem.IsWindows() && hint.Device.All(char.IsAsciiDigit)) return hint.Device;
+        // D3D12VA も、D3D11VA と同じく DXGI のアダプタの番号で GPU を選ぶ
+        if (type is AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA or AVHWDeviceType.AV_HWDEVICE_TYPE_D3D12VA && OperatingSystem.IsWindows() && hint.Device.All(char.IsAsciiDigit)) return hint.Device;
         return null;
     }
 
@@ -333,7 +346,7 @@ public static unsafe class HardwareDecoding
         foreach (var type in DeviceOrder())
         {
             bool ok = SharedDevice(type, out var error) != null;
-            string where = DevicePath(type) is { } path ? type == AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA ? $" (GPU {path})" : $" ({path})" : "";
+            string where = DevicePath(type) is { } path ? type is AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA or AVHWDeviceType.AV_HWDEVICE_TYPE_D3D12VA ? $" (GPU {path})" : $" ({path})" : "";
             lines.Add(ok ? $"{NameOf(type)}{where}: 使用可能" : error ?? $"{NameOf(type)}: 使用不可");
         }
         if (TriesV4l2M2m) lines.Add(DescribeV4l2M2m());

@@ -2700,3 +2700,22 @@ UI: パラメータ名をクリックしたときのメニューに「動き方 
 
 **フェードのカーブ** (音声フェード): 直線 (以前から)・等パワー (sin。2 つを重ねたとき音の強さの和が一定で、つなぎ目で音量が下がらない)・なめらか (S 字)。
 右クリックのクロスフェードで付ける音声フェードは、等パワーにする。
+
+### 22.51 Windows on ARM (ARM64 の Windows)
+
+Snapdragon の PC (Adreno の GPU) などの ARM64 の Windows で、エミュレーションなしの ARM64 版として動かし、GPU を使う。
+描画の作り (ANGLE = Direct3D 11 の上の OpenGL ES、22.35) は x64 と同じで、GPU の会社ごとの仕組みがない分を、Windows の標準の仕組みで埋める。
+
+| 項目 | 内容 |
+|---|---|
+| ネイティブのライブラリ | ANGLE (`Avalonia.Angle.Windows.Natives`)・SkiaSharp・HarfBuzzSharp は、NuGet に `win-arm64` のライブラリが入っている。`publish-all.sh win-arm64` で発行し、ANGLE (`av_libglesv2.dll`) が入っていることも確かめる |
+| GPU の選択 | Adreno (`Qualcomm(R) Adreno(TM) X1-85 GPU`、ベンダー 0x5143) を `GpuAdapter.IsQualcomm` で見分ける。優先度は「その他の GPU」(10) で、WARP より優先する。Linux の freedreno (`FD750` など) も同じく見分ける |
+| 動画のデコード | ARM64 の Windows には CUDA (NVDEC) がないので試さない。D3D11VA → D3D12VA (D3D11VA の対応がない形式・ドライバのとき) → DXVA2 の順 (`HardwareDecoding.WindowsOrder`)。D3D12VA も DXGI の番号で、描画と同じ GPU を開く |
+| 動画のエンコード | NVENC・Quick Sync・AMF がないので、Media Foundation のハードウェアエンコーダ (`h264_mf`・`hevc_mf`・`av1_mf`) を候補にした。`hw_encoding=1` で CPU で動く Media Foundation のエンコーダには落とさない。品質の指定はドライバによって違うので、ビットレート (目安の値、上限はその 2 倍のピーク制限付き VBR) で指定し、速度の指定は `compression_level` (速度と品質の釣り合い) にする。B フレームは使わない。x64 の PC でも使えるが、同じ方式を NVENC などで使えるときは一覧に出さない (`WithoutCoveredMediaFoundation`) |
+| FFmpeg | Windows では `--enable-d3d11va --enable-dxva2 --enable-mediafoundation` を必ず付ける (`packaging/ffmpeg/build.sh` の `WINDOWS_FLAGS`)。ARM64 は MSYS2 の CLANGARM64 で作り、NVENC・AMF のヘッダと nasm は入れない |
+| エミュレーション | x64 版を ARM64 の Windows で動かしているときは (`PlatformInfo.IsEmulatedOnArm64`。.NET の `OSArchitecture` はエミュレーションの中でも本当の CPU を返す)、描画方式の説明に「x64 版をエミュレーションで実行中」と添えて、ARM64 版を勧める |
+| CI | `package.yml` の `windows` の job を、`windows-latest` (x64・UCRT64) と `windows-11-arm` (arm64・CLANGARM64) の 2 つで回す。作った FFmpeg に D3D11VA と `h264_mf` があること、本体・Skia・ANGLE・FFmpeg の DLL がその CPU 向け (PE の Machine が 0xAA64) であることを確かめる。`ci.yml` の `windows-gpu` も `windows-11-arm` で流す (WARP) |
+
+注意すること:
+- **実機 (Snapdragon X など) ではまだ確かめていない**。CI のランナーには GPU がないので、確かめるのは WARP での描画と、配布物を作れることまで。実機では、描画方式の説明に Adreno の名前と「画面と共有」が出るか、環境設定 > 動画のデコード で D3D11VA が使われるか、出力ダイアログに「ハードウェア (Media Foundation)」が出て出力できるかを見る。
+- GitHub の `windows-11-arm` ランナーは、公開リポジトリでは無料。非公開にすると使えないことがある。

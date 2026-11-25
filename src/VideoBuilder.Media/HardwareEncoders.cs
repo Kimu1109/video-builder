@@ -19,12 +19,16 @@ public static class HardwareEncoders
         new("h264_amf", "H.264", "AMF"), new("hevc_amf", "H.265", "AMF"), new("av1_amf", "AV1", "AMF"),
         new("h264_videotoolbox", "H.264", "VideoToolbox"), new("hevc_videotoolbox", "H.265", "VideoToolbox"),
         new("h264_v4l2m2m", "H.264", "V4L2"), new("hevc_v4l2m2m", "H.265", "V4L2"),   // ARM の SoC (設計書 22.37)
+        // Windows の Media Foundation (GPU のドライバが入れるハードウェアのエンコーダ)。
+        // Windows on ARM (Snapdragon の Adreno など) には NVENC・Quick Sync・AMF がないので、これで GPU のエンコーダを使う。
+        // ほかの仕組み (NVENC など) で同じ方式が使えるときは、そちらを使う (FindAvailable)
+        new("h264_mf", "H.264", "Media Foundation"), new("hevc_mf", "H.265", "Media Foundation"), new("av1_mf", "AV1", "Media Foundation"),
     };
 
     /// <summary>エンコーダ名から仕組みの種類を返す ("nvenc" など)。ソフトウェアエンコーダなら空文字。</summary>
     public static string FamilyOf(string encoder)
     {
-        foreach (var family in new[] { "nvenc", "qsv", "vaapi", "amf", "videotoolbox", "v4l2m2m" })
+        foreach (var family in new[] { "nvenc", "qsv", "vaapi", "amf", "videotoolbox", "v4l2m2m", "mf" })
             if (encoder.EndsWith("_" + family, StringComparison.Ordinal)) return family;
         return "";
     }
@@ -73,8 +77,15 @@ public static class HardwareEncoders
         }
     }
 
-    /// <summary>このマシンで使えるハードウェアエンコーダの一覧。初回は確認に少し時間がかかる。</summary>
-    public static List<HardwareEncoder> FindAvailable() => Candidates.Where(c => Probe(c.Encoder, out _)).ToList();
+    /// <summary>
+    /// このマシンで使えるハードウェアエンコーダの一覧。初回は確認に少し時間がかかる。
+    /// Media Foundation のものは、同じ方式 (H.264 など) をほかの仕組み (NVENC など、GPU の会社のもの) で使えないときだけ入れる
+    /// (同じ GPU を通すので、細かく設定できる方を使う)。
+    /// </summary>
+    public static List<HardwareEncoder> FindAvailable() => WithoutCoveredMediaFoundation(Candidates.Where(c => Probe(c.Encoder, out _)).ToList());
+
+    internal static List<HardwareEncoder> WithoutCoveredMediaFoundation(List<HardwareEncoder> found) =>
+        found.Where(e => FamilyOf(e.Encoder) != "mf" || !found.Any(o => FamilyOf(o.Encoder) != "mf" && o.Codec == e.Codec)).ToList();
 }
 
 /// <summary>映像エンコーダの設定と開始。ソフトウェア・ハードウェアの違いをここで吸収する。</summary>
@@ -141,6 +152,15 @@ internal static unsafe class VideoEncoderSetup
                 case "videotoolbox" or "v4l2m2m":
                     ctx->bit_rate = EstimateBitrate(ctx->width, ctx->height, s.Fps.Value, s.Crf);
                     break;
+                case "mf":
+                    // ドライバのエンコーダによって使える品質の指定が違うので、どれでも通じるビットレートで指定する。
+                    // 上限は目安の 2 倍まで (ピーク制限付き VBR。対応していなければドライバの既定の方式になる)
+                    ctx->bit_rate = EstimateBitrate(ctx->width, ctx->height, s.Fps.Value, s.Crf);
+                    ctx->rc_max_rate = ctx->bit_rate * 2;
+                    ctx->max_b_frames = 0;   // B フレームに対応していないエンコーダが多い
+                    // 速度と品質の釣り合い (0 = 速い 〜 100 = 高画質)
+                    ctx->compression_level = MediaFoundationQualityVsSpeed(s.Preset);
+                    break;
                 case "" when name is not ("libx264" or "libx265" or "libvpx-vp9" or "libsvtav1" or "prores_ks"):
                     ctx->bit_rate = (long)width * height * 4;
                     break;
@@ -189,6 +209,13 @@ internal static unsafe class VideoEncoderSetup
         return formats[0];
     }
 
+    /// <summary>速度の指定 (ultrafast … veryslow) を、Media Foundation の「速度と品質の釣り合い」(0 = 速い 〜 100 = 高画質) にする。</summary>
+    internal static int MediaFoundationQualityVsSpeed(string preset)
+    {
+        int speed = Array.IndexOf(new[] { "ultrafast", "veryfast", "fast", "medium", "slow", "veryslow" }, preset);
+        return (speed < 0 ? 3 : speed) * 20;
+    }
+
     /// <summary>品質の値 (小さいほど高画質) から、ビットレート指定しかできないエンコーダ用の目安を出す。</summary>
     internal static long EstimateBitrate(int width, int height, double fps, int quality)
     {
@@ -229,6 +256,12 @@ internal static unsafe class VideoEncoderSetup
             case "videotoolbox":
             case "v4l2m2m":
                 break;   // ビットレートで指定する (Open で設定)
+            case "mf":
+                // ソフトウェアの Media Foundation のエンコーダ (CPU で動く) に黙って落ちないよう、ハードウェアに限る
+                o["hw_encoding"] = "1";
+                o["rate_control"] = "pc_vbr";
+                o["scenario"] = "archive";
+                break;
             default:
                 switch (encoder)
                 {

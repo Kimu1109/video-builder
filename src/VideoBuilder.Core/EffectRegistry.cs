@@ -3,8 +3,12 @@ namespace VideoBuilder.Core;
 /// <summary>組み込みの効果定義。プラグインは Register で追加する。</summary>
 public static class EffectRegistry
 {
-    private static readonly Dictionary<string, EffectDefinition> Map = new();
-    private static readonly List<EffectDefinition> List = new();
+    // プラグインは別のスレッド (テストの並列実行・読み込み) から Register することがあるので、
+    // 一覧は書き換えるたびに作り直して差し替え (読む側は差し替え前の一覧をそのまま読める)、辞書は並列に使えるものにする
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, EffectDefinition> Map = new();
+    private static readonly object RegisterGate = new();
+    private static volatile EffectDefinition[] _list = Array.Empty<EffectDefinition>();
+    private static EffectDefinition[] List => _list;
 
     public static readonly string[] BlendModes =
     {
@@ -713,7 +717,10 @@ public static class EffectRegistry
 
     public static void Register(EffectDefinition def)
     {
-        if (Map.TryAdd(def.Id, def)) List.Add(def);
+        lock (RegisterGate)
+        {
+            if (Map.TryAdd(def.Id, def)) _list = [.. _list, def];
+        }
     }
 
     public static EffectDefinition Get(string id) =>
