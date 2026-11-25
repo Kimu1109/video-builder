@@ -51,7 +51,7 @@ public sealed class ClipPanel : UserControl
     {
         var item = Selected;
         string? id = _editor.SelectedId;
-        string state = item == null ? $"none:{_editor.Board?.Clips.Count}:{_editor.Layout.Length}" : JsonSerializer.Serialize(item, item.GetType());
+        string state = StateOf(item);
         if (id == _shownId && state == _shownState) return;
         _shownId = id; _shownState = state;
         _body.Children.Clear();
@@ -64,13 +64,21 @@ public sealed class ClipPanel : UserControl
         }
     }
 
+    /// <summary>欄の中身を決めるもの。これが変わったときだけ作り直す。</summary>
+    private string StateOf(object? item)
+    {
+        var board = _editor.Board;
+        string common = $"{board?.Clips.Count}:{board?.FitMusicToVideo}";
+        return item == null ? $"none:{common}:{_editor.Layout.Length}" : common + ":" + JsonSerializer.Serialize(item, item.GetType());
+    }
+
     private void Apply(string description, Action<StoryClip> change, string? mergeKey = null)
     {
         if (_editor.SelectedClip is not { } c) return;
         _applying = true;
         try { _editor.UpdateClip(c.Id, description, change, mergeKey); }
         finally { _applying = false; }
-        _shownState = JsonSerializer.Serialize(_editor.SelectedClip);
+        _shownState = StateOf(_editor.SelectedClip);
     }
 
     private void ApplyMusic(string description, Action<MusicClip> change, string? mergeKey = null)
@@ -79,7 +87,7 @@ public sealed class ClipPanel : UserControl
         _applying = true;
         try { _editor.UpdateMusic(m.Id, description, change, mergeKey); }
         finally { _applying = false; }
-        _shownState = JsonSerializer.Serialize(_editor.SelectedMusic);
+        _shownState = StateOf(_editor.SelectedMusic);
     }
 
     // ---------------- 部品 ----------------
@@ -158,6 +166,40 @@ public sealed class ClipPanel : UserControl
         return box;
     }
 
+    private void TrimAtPlayhead(bool start)
+    {
+        if (!_editor.TrimSelectedAt(_session.CurrentFrame, start))
+            _ = EditorCommands.ShowErrorAsync("現在位置を、選んでいるクリップの中に合わせてください。");
+    }
+
+    /// <summary>「すべてに同じ…を付ける」ボタン。付けられるほかのクリップがなければ出さない。</summary>
+    private void ApplyAllButton(StoryClip c, string text, string description, Action<StoryClip, StoryClip> copy, Func<StoryClip, bool>? target = null)
+    {
+        if (_editor.Board is not { } board || !board.Clips.Any(x => x.Id != c.Id && (target?.Invoke(x) ?? true))) return;
+        _body.Children.Add(Small(text, () =>
+        {
+            _applying = true;
+            try { _editor.ApplyToAll(c.Id, description, copy, target); }
+            finally { _applying = false; }
+            _shownState = StateOf(_editor.SelectedClip);
+        }));
+    }
+
+    /// <summary>「映像の終わりで止める」。ストーリーボード全体の設定 (すべての音楽に効く)。</summary>
+    private void FitMusicBox()
+    {
+        var fit = new CheckBox { Content = "映像の終わりで音楽を止める", IsChecked = _editor.Board?.FitMusicToVideo ?? true };
+        fit.IsCheckedChanged += (_, _) =>
+        {
+            _applying = true;
+            try { _editor.Change("音楽の長さの設定", b => b.FitMusicToVideo = fit.IsChecked == true); }
+            finally { _applying = false; }
+            _shownState = StateOf(Selected);
+        };
+        _body.Children.Add(fit);
+        Note("すべての音楽に共通の設定です。");
+    }
+
     // ---------------- 何も選んでいないとき ----------------
 
     private void BuildNothing()
@@ -170,6 +212,11 @@ public sealed class ClipPanel : UserControl
         Note(L.Format("長さ {0}", StoryboardStrip.FormatSeconds(_editor.Project.FrameToSeconds(layout.Length))));
         Note("クリップを選ぶと、ここで長さ・切り替え効果・キャプションなどを変えられます。");
         Note("ツールバーの「ビデオと写真」で素材を追加し、出来上がったら「動画の出力」で書き出します。");
+        if (music > 0)
+        {
+            Heading("音楽");
+            FitMusicBox();
+        }
     }
 
     // ---------------- クリップ ----------------
@@ -200,7 +247,7 @@ public sealed class ClipPanel : UserControl
             _body.Children.Add(new StackPanel
             {
                 Orientation = Orientation.Horizontal, Spacing = 6,
-                Children = { Small("開始位置を現在位置に", () => _editor.TrimSelectedAt(_session.CurrentFrame, true)), Small("終了位置を現在位置に", () => _editor.TrimSelectedAt(_session.CurrentFrame, false)) },
+                Children = { Small("開始位置を現在位置に", () => TrimAtPlayhead(true)), Small("終了位置を現在位置に", () => TrimAtPlayhead(false)) },
             });
             if (c.SourceSeconds > 0) Note(L.Format("素材の長さ {0}", StoryboardStrip.FormatSeconds(c.SourceSeconds)));
 
@@ -219,6 +266,9 @@ public sealed class ClipPanel : UserControl
         else
         {
             Row("表示時間 (秒)", Seconds(c.Duration, StoryClip.MinSeconds, 3600, v => Apply("表示時間の変更", x => x.Duration = v)));
+            bool photo = c.Kind == StoryClipKind.Photo;
+            ApplyAllButton(c, photo ? "すべての写真を同じ表示時間にする" : "すべてのタイトルを同じ表示時間にする", "表示時間をすべてに付ける",
+                (src, x) => x.Duration = src.Duration, x => x.Kind == c.Kind);
         }
 
         // ---- タイトル / キャプション ----
@@ -243,17 +293,17 @@ public sealed class ClipPanel : UserControl
         Row("種類", Combo(Transitions, Math.Clamp(c.Transition, 0, EffectRegistry.TransitionTypes.Length), i => Apply("切り替え効果の変更", x => x.Transition = i)));
         Row("長さ (秒)", Seconds(c.TransitionSeconds, 0.1, 10, v => Apply("切り替え効果の長さ", x => x.TransitionSeconds = v)));
         Note(_editor.Board?.Clips.IndexOf(c) == 0 ? "先頭のクリップでは、黒い画面から切り替わります。" : "前のクリップから、このクリップへ切り替わるときの効果です。");
-        if (_editor.Board is { Clips.Count: > 1 })
-            _body.Children.Add(Small("すべてのクリップに同じ効果を付ける", () => Apply("切り替え効果をすべてに付ける", _ =>
-            {
-                foreach (var other in _editor.Board!.Clips) { other.Transition = c.Transition; other.TransitionSeconds = c.TransitionSeconds; }
-            })));
+        ApplyAllButton(c, "すべてのクリップに同じ効果を付ける", "切り替え効果をすべてに付ける",
+            (src, x) => { x.Transition = src.Transition; x.TransitionSeconds = src.TransitionSeconds; });
 
         // ---- 効果 ----
         Heading("効果");
         if (c.Kind != StoryClipKind.Title)
             Row("動き", Combo(Motions, (int)c.Motion, i => Apply("動きの変更", x => x.Motion = (ClipMotion)i)));
+        if (c.Kind != StoryClipKind.Title)
+            ApplyAllButton(c, "すべての動画・写真に同じ動きを付ける", "動きをすべてに付ける", (src, x) => x.Motion = src.Motion, x => x.UsesFile);
         Row("見た目", Combo(Looks, (int)c.Look, i => Apply("見た目の変更", x => x.Look = (ClipLook)i)));
+        ApplyAllButton(c, "すべてのクリップに同じ見た目を付ける", "見た目をすべてに付ける", (src, x) => x.Look = src.Look);
         if (c.Kind != StoryClipKind.Title)
             Row("回転", new StackPanel
             {
@@ -312,13 +362,7 @@ public sealed class ClipPanel : UserControl
         Row("フェードイン (秒)", Seconds(m.FadeIn, 0, 30, v => ApplyMusic("フェードの変更", x => x.FadeIn = v)));
         Row("フェードアウト (秒)", Seconds(m.FadeOut, 0, 30, v => ApplyMusic("フェードの変更", x => x.FadeOut = v)));
 
-        var fit = new CheckBox { Content = "映像の終わりで止める", IsChecked = _editor.Board?.FitMusicToVideo ?? true };
-        fit.IsCheckedChanged += (_, _) =>
-        {
-            _applying = true;
-            try { _editor.Change("音楽の長さの設定", b => b.FitMusicToVideo = fit.IsChecked == true); }
-            finally { _applying = false; }
-        };
-        _body.Children.Add(fit);
+        Heading("すべての音楽");
+        FitMusicBox();
     }
 }

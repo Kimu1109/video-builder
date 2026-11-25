@@ -178,6 +178,7 @@ public sealed class SimpleWorkspace : IWorkspace
     {
         Menus.Item("ストーリーボードを拡大", "ZoomIn", () => Strip.PixelsPerSecond *= 1.25),
         Menus.Item("ストーリーボードを縮小", "ZoomOut", () => Strip.PixelsPerSecond /= 1.25),
+        Menus.Item("ストーリーボード全体を表示", "FitScreen", Strip.ZoomToFit),
     };
 
     private static IconButton Labeled(string icon, string text, string tip, Action click) =>
@@ -202,8 +203,18 @@ public sealed class SimpleWorkspace : IWorkspace
     {
         var menu = new ContextMenu();
         bool clip = id != null && _editor.Board?.FindClip(id) != null;
+        bool music = id != null && _editor.Board?.FindMusic(id) != null;
         if (id != null)
         {
+            if (music)
+            {
+                var project = _editor.Project;
+                menu.Items.Add(Menus.Item("ここから鳴らす", "MusicNote", () => _editor.MoveMusicTo(id, project.FrameToSeconds(frame))));
+                menu.Items.Add(Menus.Item("現在位置から鳴らす", null, () => _editor.MoveMusicTo(id, project.FrameToSeconds(_session.CurrentFrame))));
+                menu.Items.Add(Menus.Item("先頭から鳴らす", "FirstPage", () => _editor.MoveMusicTo(id, 0)));
+                menu.Items.Add(Menus.Item("鳴らし始めへ移動", null, () => { if (_editor.StartOf(id) is { } start) EditorCommands.Seek(start); }));
+                menu.Items.Add(Menus.Sep());
+            }
             if (clip)
             {
                 menu.Items.Add(Menus.Item("ここで分割", "Split", () => _editor.SplitAt(frame)));
