@@ -220,11 +220,7 @@ public static partial class Effects
             float rad = a.Track("angle") * MathF.PI / 180f;
             float dx = MathF.Cos(rad) * amount, dy = MathF.Sin(rad) * amount;
             int pad = clamp ? 0 : (int)MathF.Ceiling(MathF.Abs(amount)) + 1;
-            return Resample(s, a, pad, pad, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.ChromaticAberration(src, tmp, w, h, rb, dx, dy, radial, s.Cx + pad, s.Cy + pad, amount, clamp, a.Effect.GetInt("type"));
-                return tmp;
-            }) ?? s;
+            return ChromaticSprite(s, a, pad, pad, dx, dy, radial, s.Cx + pad, s.Cy + pad, amount, clamp, a.Effect.GetInt("type")) ?? s;
         }
     }
 
@@ -239,11 +235,7 @@ public static partial class Effects
             bool vertical = a.Check("vertical"), clamp = a.IsFrameBuffer;
             float phase = (float)(2 * Math.PI * speed * a.Time % (2 * Math.PI));
             int pad = clamp ? 0 : (int)MathF.Ceiling(MathF.Abs(amp)) + 1;
-            return Resample(s, a, vertical ? 0 : pad, vertical ? pad : 0, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.Raster(src, tmp, w, h, rb, amp, wave, phase, vertical, clamp);
-                return tmp;
-            }) ?? s;
+            return RasterSprite(s, a, vertical ? 0 : pad, vertical ? pad : 0, amp, wave, phase, vertical, clamp) ?? s;
         }
     }
 

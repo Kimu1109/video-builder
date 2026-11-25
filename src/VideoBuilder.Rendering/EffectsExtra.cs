@@ -233,11 +233,7 @@ public static partial class Effects
             float cx = s.Cx + a.Track("x"), cy = s.Cy + a.Track("y");
             float phase = (float)(2 * Math.PI * speed * a.Time % (2 * Math.PI));
             bool clamp = a.IsFrameBuffer;
-            return Resample(s, a, 0, 0, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.Ripple(src, tmp, w, h, rb, cx, cy, amp, wave, phase, decay, clamp);
-                return tmp;
-            }) ?? s;
+            return RippleSprite(s, a, 0, 0, cx, cy, amp, wave, phase, decay, clamp) ?? s;
         }
     }
 
@@ -249,11 +245,7 @@ public static partial class Effects
         {
             float zoom = Math.Max(0.01f, a.Track("zoom") / 100f), hole = a.Track("hole"), rot = a.Track("rotation"), swirl = a.Track("swirl") / 100f;
             float radius = Math.Min(s.Width, s.Height) / 2f * zoom;
-            return Resample(s, a, 0, 0, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.Polar(src, tmp, w, h, rb, radius, hole, rot, swirl);
-                return tmp;
-            }) ?? s;
+            return PolarSprite(s, a, radius, hole, rot, swirl) ?? s;
         }
     }
 
@@ -289,11 +281,7 @@ public static partial class Effects
             float rx = size / 2 * (aspect < 0 ? 1 + aspect : 1), ry = size / 2 * (aspect > 0 ? 1 - aspect : 1);
             float cx = s.Cx + a.Track("x"), cy = s.Cy + a.Track("y"), feather = a.Track("feather") / 100f;
             if (mode == 0 ? p1 == 0 && p2 == 0 : p1 == 0) return s;
-            return Resample(s, a, 0, 0, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.Displace(src, tmp, w, h, rb, mode, shape == 1, cx, cy, rx, ry, feather, p1, p2, clamp);
-                return tmp;
-            }) ?? s;
+            return DisplaceSprite(s, a, 0, 0, mode, shape == 1, cx, cy, rx, ry, feather, p1, p2, clamp) ?? s;
         }
     }
 
@@ -348,11 +336,7 @@ public static partial class Effects
             int n = Math.Clamp((int)MathF.Round(a.Track("count")), 1, 360);
             float cx = s.Cx + a.Track("x"), cy = s.Cy + a.Track("y"), rot = a.Track("rotation");
             bool clamp = a.IsFrameBuffer || a.Check("clamp");
-            return Resample(s, a, 0, 0, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.Kaleidoscope(src, tmp, w, h, rb, cx, cy, n * 2, rot, clamp);
-                return tmp;
-            }) ?? s;
+            return KaleidoSprite(s, a, 0, 0, cx, cy, n * 2, rot, clamp) ?? s;
         }
     }
 

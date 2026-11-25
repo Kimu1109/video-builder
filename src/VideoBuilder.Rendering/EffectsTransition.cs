@@ -188,11 +188,7 @@ public static partial class Effects
                 bool clamp = a.Check("screen");
                 int pad = clamp ? 0 : (int)MathF.Ceiling(amount) + 1;
                 float cx = G.MidX + pad, cy = G.MidY + pad;
-                return Resample(s, a, pad, pad, (src, dst, w2, h2, rb) =>
-                {
-                    PixelFx.ChromaticAberration(src, dst, w2, h2, rb, amount, 0, true, cx, cy, amount, clamp);
-                    return dst;
-                }) ?? s;
+                return ChromaticSprite(s, a, pad, pad, amount, 0, true, cx, cy, amount, clamp) ?? s;
             }
             case 78: return LightLeak(s, a, u, leaving, G, ref m);
             case 79:   // ピクセル化: モザイクが粗くなっていき、粗いまま切り替わってから細かく戻る
@@ -208,11 +204,7 @@ public static partial class Effects
                 float amp = w * 0.035f * G.Width;
                 if (amp < 0.3f) return s;
                 float cx = G.MidX, cy = G.MidY, wl = Math.Max(4, G.Width * 0.07f), phase = u * 24;
-                return Resample(s, a, 0, 0, (src, dst, w2, h2, rb) =>
-                {
-                    PixelFx.Ripple(src, dst, w2, h2, rb, cx, cy, amp, wl, phase, 0, true);
-                    return dst;
-                }) ?? s;
+                return RippleSprite(s, a, 0, 0, cx, cy, amp, wl, phase, 0, true) ?? s;
             }
             case 81: return Swirl(s, a, u, leaving, G, ref m);
             case 82: return Burn(s, a, eu, leaving, G);

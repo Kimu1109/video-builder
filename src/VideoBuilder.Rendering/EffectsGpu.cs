@@ -178,6 +178,16 @@ public static partial class Effects
             float4 p01 = fetch(f + float2(0, 1)), p11 = fetch(f + float2(1, 1));
             return lerp8(top, t.x == 0 ? p01 : lerp8(p01, p11, t.x), t.y);
         }
+        // PixelFx.Sample と同じ (重みを四捨五入で求める。絵の外は子のタイルで決まる)。sample8 は SampleFixed と同じく切り捨て
+        float4 sample8r(float2 q) {
+            float2 f = floor(q);
+            float2 t = floor((q - f) * 256 + 0.5);
+            float4 p00 = fetch(f), p10 = fetch(f + float2(1, 0)), p01 = fetch(f + float2(0, 1)), p11 = fetch(f + float2(1, 1));
+            float4 top = t.x == 0 ? p00 : lerp8(p00, p10, t.x);
+            if (t.y == 0) return top;
+            return lerp8(top, t.x == 0 ? p01 : lerp8(p01, p11, t.x), t.y);
+        }
+        half4 out8(float4 v) { return half4(v / 255); }
         // PixelFx.Average と同じ: 2 つの平均。up = 1 なら 0.5 を切り上げ、0 なら切り捨て
         half4 average(float4 a, float4 b, float up) { return half4(floor((a + b + up) / 2) / 255); }
         """;
@@ -206,7 +216,13 @@ public static partial class Effects
     /// GPU で、s に余白 (padX, padY) を付けた絵に passes を順にかける。各回は前の回の絵を子 "image" として読み、同じ大きさに描く。
     /// 結果は Resample と同じ位置 (余白の分だけ中心をずらす)。GPU 描画でない・使えないときは null。
     /// </summary>
-    private static Sprite? MultiPassOnGpu(Sprite s, EffectArgs a, int padX, int padY, Sksl sksl, bool clamp, int passes, Action<SKRuntimeEffectUniforms, int> uniforms)
+    private static Sprite? MultiPassOnGpu(Sprite s, EffectArgs a, int padX, int padY, Sksl sksl, bool clamp, int passes, Action<SKRuntimeEffectUniforms, int> uniforms) =>
+        MultiPassOnGpu(s, a, padX, padY, sksl, clamp ? SKShaderTileMode.Clamp : SKShaderTileMode.Decal, clamp ? SKShaderTileMode.Clamp : SKShaderTileMode.Decal,
+            passes, (u, i, _, _) => uniforms(u, i));
+
+    /// <summary>MultiPassOnGpu の、タイル (絵の外の読み方) を縦横で指定する版。uniforms には (回, 幅, 高さ) を渡す。</summary>
+    private static Sprite? MultiPassOnGpu(Sprite s, EffectArgs a, int padX, int padY, Sksl sksl, SKShaderTileMode tileX, SKShaderTileMode tileY,
+        int passes, Action<SKRuntimeEffectUniforms, int, int, int> uniforms)
     {
         if (a.Context.Gpu == null || GpuShadersDisabled || sksl.Effect is not { } effect) return null;
         padX = Math.Max(0, padX); padY = Math.Max(0, padY);
@@ -221,17 +237,16 @@ public static partial class Effects
             first.Canvas.DrawImage(s.Image, padX, padY);
             current = first.Snapshot();
         }
-        var tile = clamp ? SKShaderTileMode.Clamp : SKShaderTileMode.Decal;
         try
         {
             for (int i = 0; i < passes; i++)
             {
                 using var surface = a.Context.CreateSurface(w, h);
                 if (surface == null) return null;
-                using var image = current.ToShader(tile, tile);
+                using var image = current.ToShader(tileX, tileY);
                 var kids = new SKRuntimeEffectChildren(effect) { ["image"] = image };
                 var u = new SKRuntimeEffectUniforms(effect);
-                uniforms(u, i);
+                uniforms(u, i, w, h);
                 using var shader = effect.ToShader(u, kids);
                 using var paint = new SKPaint { Shader = shader, BlendMode = SKBlendMode.Src };
                 surface.Canvas.DrawRect(SKRect.Create(w, h), paint);
@@ -296,4 +311,179 @@ public static partial class Effects
         }
         return Resample(s, a, padX, padY, (src, tmp, w, h, rb) => PixelFx.RadialBlur(src, tmp, w, h, rb, cx, cy, range, clamp, maxPasses));
     }
+
+    // ---------------- 画素を動かす効果 (1 回で済むもの) ----------------
+
+    private static readonly Sksl ChromaticShader = new(SampleSksl + """
+        uniform float2 off;     // ずらす量 (radial でないとき)
+        uniform float radial;
+        uniform float2 center;
+        uniform float k;        // radial のとき: 中心からの距離あたりのずれ
+        uniform float pair;     // 0 = 赤と青, 1 = 赤と緑, 2 = 緑と青 (前にずらす色・後ろにずらす色)
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float2 o = radial > 0 ? (q - center) * k : off;
+            float4 r = sample8r(q - o), g = fetch(q), b = sample8r(q + o);
+            float al = max(r.a, max(g.a, b.a));
+            if (pair == 1) return out8(float4(r.r, b.g, g.b, al));
+            if (pair == 2) return out8(float4(g.r, r.g, b.b, al));
+            return out8(float4(r.r, g.g, b.b, al));
+        }
+        """);
+
+    /// <summary>色収差 (PixelFx.ChromaticAberration と同じ)。中心は余白を付けた絵の座標。</summary>
+    internal static Sprite? ChromaticSprite(Sprite s, EffectArgs a, int padX, int padY, float dx, float dy, bool radial, float cx, float cy, float amount, bool clamp, int pair = 0) =>
+        MultiPassOnGpu(s, a, padX, padY, ChromaticShader, Tile(clamp), Tile(clamp), 1, (u, _, w, h) =>
+        {
+            float far = MathF.Max(1, MathF.Sqrt(MathF.Max(cx * cx, (w - cx) * (w - cx)) + MathF.Max(cy * cy, (h - cy) * (h - cy))));
+            u["off"] = new[] { dx, dy }; u["radial"] = radial ? 1f : 0f; u["center"] = new[] { cx, cy };
+            u["k"] = amount / far; u["pair"] = (float)pair;
+        })
+        ?? Resample(s, a, padX, padY, (src, tmp, w, h, rb) => { PixelFx.ChromaticAberration(src, tmp, w, h, rb, dx, dy, radial, cx, cy, amount, clamp, pair); return tmp; });
+
+    private static readonly Sksl RasterShader = new(SampleSksl + """
+        uniform float amp;
+        uniform float k;        // 2π / 波長
+        uniform float phase;
+        uniform float vertical;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            if (vertical > 0) return out8(sample8r(float2(q.x, q.y - amp * sin(q.x * k + phase))));
+            return out8(sample8r(float2(q.x - amp * sin(q.y * k + phase), q.y)));
+        }
+        """);
+
+    /// <summary>ラスター (PixelFx.Raster と同じ)。</summary>
+    internal static Sprite? RasterSprite(Sprite s, EffectArgs a, int padX, int padY, float amp, float wavelength, float phase, bool vertical, bool clamp) =>
+        MultiPassOnGpu(s, a, padX, padY, RasterShader, Tile(clamp), Tile(clamp), 1, (u, _, _, _) =>
+        {
+            u["amp"] = amp; u["k"] = 2 * MathF.PI / MathF.Max(1, wavelength); u["phase"] = phase; u["vertical"] = vertical ? 1f : 0f;
+        })
+        ?? Resample(s, a, padX, padY, (src, tmp, w, h, rb) => { PixelFx.Raster(src, tmp, w, h, rb, amp, wavelength, phase, vertical, clamp); return tmp; });
+
+    private static readonly Sksl RippleShader = new(SampleSksl + """
+        uniform float2 center;
+        uniform float amp;
+        uniform float k;
+        uniform float phase;
+        uniform float decay;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float2 d = q - center;
+            float r = length(d);
+            if (r < 1e-3) return out8(fetch(q));
+            float m = amp * sin(r * k - phase);
+            if (decay > 0) m *= exp(-r / decay);
+            return out8(sample8r(center + d * ((r + m) / r)));
+        }
+        """);
+
+    /// <summary>波紋 (PixelFx.Ripple と同じ)。</summary>
+    internal static Sprite? RippleSprite(Sprite s, EffectArgs a, int padX, int padY, float cx, float cy, float amp, float wavelength, float phase, float decay, bool clamp) =>
+        MultiPassOnGpu(s, a, padX, padY, RippleShader, Tile(clamp), Tile(clamp), 1, (u, _, _, _) =>
+        {
+            u["center"] = new[] { cx, cy }; u["amp"] = amp; u["k"] = 2 * MathF.PI / MathF.Max(1, wavelength); u["phase"] = phase; u["decay"] = decay;
+        })
+        ?? Resample(s, a, padX, padY, (src, tmp, w, h, rb) => { PixelFx.Ripple(src, tmp, w, h, rb, cx, cy, amp, wavelength, phase, decay, clamp); return tmp; });
+
+    private static readonly Sksl KaleidoShader = new(SampleSksl + """
+        uniform float2 center;
+        uniform float seg;
+        uniform float rot;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float2 d = q - center;
+            float r = length(d);
+            float t = atan(d.y, d.x) - rot;
+            float n = floor(t / seg);
+            float an = t - n * seg;
+            if (mod(n, 2) == 1) an = seg - an;   // 1 つおきに折り返す
+            an += rot;
+            return out8(sample8r(center + r * float2(cos(an), sin(an))));
+        }
+        """);
+
+    /// <summary>万華鏡 (PixelFx.Kaleidoscope と同じ)。</summary>
+    internal static Sprite? KaleidoSprite(Sprite s, EffectArgs a, int padX, int padY, float cx, float cy, int segments, float rotation, bool clamp)
+    {
+        segments = Math.Clamp(segments, 1, 360);
+        return MultiPassOnGpu(s, a, padX, padY, KaleidoShader, Tile(clamp), Tile(clamp), 1, (u, _, _, _) =>
+            {
+                u["center"] = new[] { cx, cy }; u["seg"] = 2 * MathF.PI / segments; u["rot"] = rotation * MathF.PI / 180f;
+            })
+            ?? Resample(s, a, padX, padY, (src, tmp, w, h, rb) => { PixelFx.Kaleidoscope(src, tmp, w, h, rb, cx, cy, segments, rotation, clamp); return tmp; });
+    }
+
+    private static readonly Sksl DisplaceShader = new(SampleSksl + """
+        uniform float mode;      // 0 = ずらす, 1 = 拡大, 2 = 回転
+        uniform float rectShape;
+        uniform float2 center;
+        uniform float2 radius;
+        uniform float feather;
+        uniform float2 param;    // (p1, p2)
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float2 d = q - center, n = d / radius;
+            float dist = rectShape > 0 ? max(abs(n.x), abs(n.y)) : length(n);
+            float t = clamp((1 - dist) / feather, 0, 1);
+            if (t <= 0) return out8(fetch(q));
+            t = t * t * (3 - 2 * t);
+            float2 src;
+            if (mode == 0) src = q - param * t;
+            else if (mode == 1) src = center + d / max(0.01, 1 + param.x / 100 * t);
+            else {
+                float an = -param.x * 3.14159265358979 / 180 * t, cs = cos(an), sn = sin(an);
+                src = center + float2(d.x * cs - d.y * sn, d.x * sn + d.y * cs);
+            }
+            return out8(sample8r(src));
+        }
+        """);
+
+    /// <summary>ずらし (PixelFx.Displace と同じ)。</summary>
+    internal static Sprite? DisplaceSprite(Sprite s, EffectArgs a, int padX, int padY, int mode, bool rect, float cx, float cy, float rx, float ry, float feather, float p1, float p2, bool clamp)
+    {
+        float frx = MathF.Max(0.5f, rx), fry = MathF.Max(0.5f, ry), ff = Math.Clamp(feather, 0.001f, 1);
+        return MultiPassOnGpu(s, a, padX, padY, DisplaceShader, Tile(clamp), Tile(clamp), 1, (u, _, _, _) =>
+            {
+                u["mode"] = (float)mode; u["rectShape"] = rect ? 1f : 0f; u["center"] = new[] { cx, cy };
+                u["radius"] = new[] { frx, fry }; u["feather"] = ff; u["param"] = new[] { p1, p2 };
+            })
+            ?? Resample(s, a, padX, padY, (src, tmp, w, h, rb) => { PixelFx.Displace(src, tmp, w, h, rb, mode, rect, cx, cy, rx, ry, feather, p1, p2, clamp); return tmp; });
+    }
+
+    private static readonly Sksl PolarShader = new(SampleSksl + """
+        uniform float2 size;
+        uniform float radius;
+        uniform float hole;
+        uniform float rot;      // 回転 (1 = 1 周)
+        uniform float swirl;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float2 c = (size - 1) / 2;
+            float2 d = q - c;
+            float r = length(d);
+            // 円の縁と穴の縁は 1 ピクセルでなめらかにする
+            float cover = clamp(radius - r + 0.5, 0, 1) * clamp(r - hole + 0.5, 0, 1);
+            if (cover <= 0) return half4(0);
+            float rr = clamp((r - hole) / (radius - hole), 0, 1);
+            float u = atan(d.x, -d.y) / (2 * 3.14159265358979) + rot + swirl * rr;   // 0 = 真上、時計回り
+            // 横は繰り返し、縦は端 (子のタイル)。PixelFx.SampleWrapX と同じく、縦は絵の中に収める
+            float4 v = sample8r(float2(u * size.x - 0.5, clamp((1 - rr) * (size.y - 1), 0, size.y - 1)));
+            if (cover >= 1) return out8(v);
+            return out8(lerp8(float4(0), v, floor(cover * 256)));
+        }
+        """);
+
+    /// <summary>極座標変換 (PixelFx.Polar と同じ)。</summary>
+    internal static Sprite? PolarSprite(Sprite s, EffectArgs a, float radius, float hole, float rotation, float swirl)
+    {
+        float r = MathF.Max(1, radius), hl = Math.Clamp(hole, 0, r - 1);
+        return MultiPassOnGpu(s, a, 0, 0, PolarShader, SKShaderTileMode.Repeat, SKShaderTileMode.Clamp, 1, (u, _, w, h) =>
+            {
+                u["size"] = new[] { (float)w, h }; u["radius"] = r; u["hole"] = hl; u["rot"] = rotation / 360f; u["swirl"] = swirl;
+            })
+            ?? Resample(s, a, 0, 0, (src, tmp, w, h, rb) => { PixelFx.Polar(src, tmp, w, h, rb, radius, hole, rotation, swirl); return tmp; });
+    }
+
+    private static SKShaderTileMode Tile(bool clamp) => clamp ? SKShaderTileMode.Clamp : SKShaderTileMode.Decal;
 }

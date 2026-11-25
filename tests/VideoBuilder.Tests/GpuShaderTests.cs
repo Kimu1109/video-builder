@@ -64,6 +64,16 @@ public unsafe class GpuShaderTests
         { "filter.dirblur", "length,angle", new double[] { 40, 30 } },
         { "filter.dirblur", "length,angle,fixed", new double[] { 25, -60, 1 } },     // サイズ固定 (端は延ばす)
         { "filter.radialblur", "amount,x,y", new double[] { 30, 20, -10 } },
+        { "filter.chromatic", "amount,angle", new double[] { 6, 30 } },
+        { "filter.chromatic", "amount,radial,type", new double[] { 8, 1, 2 } },      // 中心から広がる・緑と青
+        { "filter.raster", "amplitude,wavelength", new double[] { 8, 40 } },
+        { "filter.raster", "amplitude,wavelength,vertical", new double[] { 6, 30, 1 } },
+        { "filter.ripple", "amplitude,wavelength,decay", new double[] { 6, 25, 60 } },
+        { "filter.polar", "hole,rotation,swirl", new double[] { 10, 30, 40 } },
+        { "filter.displace", "mode,param1,param2,size,feather", new double[] { 0, 15, -10, 120, 40 } },
+        { "filter.displace", "mode,param1,size,feather", new double[] { 1, 60, 120, 40 } },   // 拡大
+        { "filter.displace", "mode,param1,size,feather", new double[] { 2, 45, 120, 40 } },   // 回転
+        { "filter.kaleido", "count,rotation", new double[] { 3, 20 } },
     };
 
     [Theory]
