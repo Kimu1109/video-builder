@@ -34,6 +34,7 @@ public static partial class Effects
         var src = PixelPool.Rent(bytes);
         var tmp = PixelPool.Rent(bytes);
         if (padX > 0 || padY > 0) NativeMemory.Clear((void*)src, (nuint)bytes);
+        CountReadback(s.Image);
         if (!s.Image.ReadPixels(Info(s.Width, s.Height), src + padY * rowBytes + padX * 4, rowBytes, 0, 0))
         {
             PixelPool.Return(src, bytes); PixelPool.Return(tmp, bytes);
@@ -90,7 +91,7 @@ public static partial class Effects
             bool only = a.Check("only");
             if (strength <= 0) return only ? Redraw(s, a, 0, 0, 0, 0, (_, _, _) => { }) : s;
 
-            var bright = threshold > 0 ? WithPixels(s, a, (px, w, h, rb) => PixelFx.BrightPass(px, w, h, rb, threshold), alsoOnGpu: true) ?? s : s;
+            var bright = BrightPass(s, a, threshold);
             // 形: 0 = 通常 (まわりに広がる)、1 = 十字、2 = 横、3 = 縦 (光の筋を方向ブラーで作る)
             int shape = a.Effect.GetInt("shape");
             var glows = new List<Sprite>();
@@ -197,6 +198,8 @@ public static partial class Effects
         {
             float amount = a.Track("amount") / 100f, radius = a.Track("radius");
             if (amount <= 0 || radius <= 0) return s;
+            // GPU 描画では SkSL のシェーダーで (読み戻さない。設計書 22.54)
+            if (SharpenOnGpu(s, a, amount, radius) is { } onGpu) return onGpu;
             using var blurred = BlurOnCpu(s.Image, radius / 2, 0, true);
             if (blurred == null) return s;
             using var bp = blurred.PeekPixels();

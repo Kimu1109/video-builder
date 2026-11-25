@@ -147,7 +147,7 @@ public static partial class Effects
             float threshold = Math.Clamp(a.Track("threshold"), 0, 100) / 100f * 255f;
             if (strength <= 0 || length <= 0) return s;
             float ox = a.Track("x"), oy = a.Track("y");
-            var bright = threshold > 0 ? WithPixels(s, a, (px, w, h, rb) => PixelFx.BrightPass(px, w, h, rb, threshold), alsoOnGpu: true) ?? s : s;
+            var bright = BrightPass(s, a, threshold);
             int passes = a.IsDraft ? 8 : 10;
             // 光の筋は絵の外まで伸びるので、伸びるぶんの余白を付ける (いちばん遠い所が √(1 + 長さ) 倍まで伸びる)
             float far = MathF.Sqrt(s.Width * s.Width + s.Height * s.Height) / 2 + MathF.Sqrt(ox * ox + oy * oy);

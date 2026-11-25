@@ -145,9 +145,23 @@ public static partial class Effects
         return new Sprite(img, s.Cx, s.Cy);
     }
 
+    /// <summary>
+    /// 効果が GPU の絵を CPU に読み戻した回数 (計測・テスト用)。読み戻しは GPU が描き終えるのを待つので遅い。
+    /// SkSL で GPU のまま処理する効果 (設計書 22.54) では増えない。
+    /// </summary>
+    public static long GpuReadbacks => Interlocked.Read(ref _gpuReadbacks);
+    private static long _gpuReadbacks;
+
+    /// <summary>GPU の絵 (テクスチャ) を読み戻すなら数える。</summary>
+    internal static void CountReadback(SKImage image)
+    {
+        if (image.IsTextureBacked) Interlocked.Increment(ref _gpuReadbacks);
+    }
+
     /// <summary>画像の中身を、使い回しのバッファ (BGRA) に写す。失敗したら null。</summary>
     internal static (IntPtr Buffer, int RowBytes)? CopyPixels(Sprite s)
     {
+        CountReadback(s.Image);
         var info = Info(s.Width, s.Height);
         int rowBytes = info.Width * 4;
         long bytes = (long)rowBytes * info.Height;
@@ -575,8 +589,7 @@ public static partial class Effects
             else PixelOps.ChromaKey(b.Pointer, b.Width, b.Height, b.RowBytes, kh, ks, hueRange, satRange, edge);
         }
 
-        // SkSL シェーダ (SKRuntimeEffect) での実装は、SkiaSharp 2.88 では描画時にネイティブ側で
-        // クラッシュするため使わない。GPU 描画中でも、この効果だけは画像を読み戻して CPU で処理する。
+        // GPU 描画では SkSL のシェーダーで処理する (SkiaSharp 3。設計書 22.54)。CPU 描画・SkSL を使えないときは C# の処理
         public unsafe Sprite Apply(Sprite s, EffectArgs a)
         {
             var key = a.Color("color");
@@ -584,6 +597,7 @@ public static partial class Effects
             float hueRange = a.Track("hue") / 256f * 180f;     // 度
             float satRange = a.Track("saturation") / 256f * 100f;
             float edge = Math.Max(0.001f, a.Track("edge") / 100f);
+            if (ChromaKeyOnGpu(s, a, kh, ks, hueRange, satRange, edge) is { } onGpu) return onGpu;
 
             if (CopyPixels(s) is not { } copy) return s;
             if (a.Context.Draft) PixelOps.ChromaKeyFast(copy.Buffer, s.Width, s.Height, copy.RowBytes, kh, ks, hueRange, satRange, edge);
