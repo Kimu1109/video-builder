@@ -87,6 +87,29 @@ public sealed class StoryboardEditor
         Change(description, b => action(b.FindMusic(id)!), mergeKey);
     }
 
+    /// <summary>
+    /// クリップの設定を、ほかのクリップにも付ける (「すべてに同じ…を付ける」)。target が true のクリップ (null ならすべて) に、
+    /// 元のクリップ (sourceId) を渡して copy を行う。1 回の取り消しにまとめる。設定を変えたクリップの数を返す。
+    /// </summary>
+    public int ApplyToAll(string sourceId, string description, Action<StoryClip, StoryClip> copy, Func<StoryClip, bool>? target = null)
+    {
+        var source = Board?.FindClip(sourceId);
+        if (source == null) return 0;
+        int count = Board!.Clips.Count(c => c.Id != sourceId && (target?.Invoke(c) ?? true));
+        if (count == 0) return 0;
+        Change(description, b =>
+        {
+            var src = b.FindClip(sourceId)!;
+            foreach (var c in b.Clips)
+                if (c.Id != sourceId && (target?.Invoke(c) ?? true)) copy(src, c);
+        });
+        return count;
+    }
+
+    /// <summary>音楽の鳴らし始めを seconds (作品の先頭からの秒) にする。</summary>
+    public void MoveMusicTo(string id, double seconds) =>
+        UpdateMusic(id, "音楽の移動", m => m.StartSeconds = Math.Max(0, Math.Round(seconds, 3)));
+
     /// <summary>詳細編集での変更を捨てて、ストーリーボードからシーンを作り直す。</summary>
     public void Rebuild() => Change("シンプル編集の内容に戻す", _ => { });
 

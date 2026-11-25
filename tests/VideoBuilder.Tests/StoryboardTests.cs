@@ -200,6 +200,48 @@ public class StoryboardTests
     }
 
     [Fact]
+    public void Apply_to_all_copies_a_setting_to_matching_clips_in_one_undo()
+    {
+        var (s, ed) = NewEditor();
+        var photo = new StoryClip { Kind = StoryClipKind.Photo, File = "/a.png", Duration = 3, Look = ClipLook.Sepia };
+        var other = new StoryClip { Kind = StoryClipKind.Photo, File = "/b.png", Duration = 5 };
+        var title = Title("#FF0000", seconds: 4);
+        ed.AddClips(new[] { photo, title, other });
+
+        Assert.Equal(1, ed.ApplyToAll(photo.Id, "表示時間をすべてに付ける", (src, x) => x.Duration = src.Duration, x => x.Kind == StoryClipKind.Photo));
+        Assert.Equal((3, 4), (ed.Board!.FindClip(other.Id)!.Duration, ed.Board.FindClip(title.Id)!.Duration));   // タイトルはそのまま
+
+        Assert.Equal(2, ed.ApplyToAll(photo.Id, "見た目をすべてに付ける", (src, x) => x.Look = src.Look));
+        Assert.All(ed.Board!.Clips, c => Assert.Equal(ClipLook.Sepia, c.Look));
+        Assert.True(ed.CanEdit);
+
+        s.Undo();
+        Assert.Equal(ClipLook.None, ed.Board!.FindClip(title.Id)!.Look);
+        Assert.Equal(3, ed.Board.FindClip(other.Id)!.Duration);
+        s.Undo();
+        Assert.Equal(5, ed.Board!.FindClip(other.Id)!.Duration);
+
+        // 付けるほかのクリップがなければ、何もしない (取り消しも増えない)
+        long version = s.History.Version;
+        Assert.Equal(0, ed.ApplyToAll(photo.Id, "動きをすべてに付ける", (src, x) => x.Motion = src.Motion, x => x.Kind == StoryClipKind.Video));
+        Assert.Equal(version, s.History.Version);
+    }
+
+    [Fact]
+    public void Music_can_be_moved_to_a_time()
+    {
+        var (_, ed) = NewEditor();
+        ed.AddClips(new[] { Title("#FF0000", seconds: 10) });
+        var music = new MusicClip { File = "/m.wav", SourceSeconds = 20, StartSeconds = 2 };
+        ed.AddMusic(music);
+        ed.MoveMusicTo(music.Id, 4.5);
+        Assert.Equal(4.5, ed.Board!.FindMusic(music.Id)!.StartSeconds);
+        Assert.Equal(135, ed.StartOf(music.Id));
+        ed.MoveMusicTo(music.Id, -3);
+        Assert.Equal(0, ed.Board!.FindMusic(music.Id)!.StartSeconds);
+    }
+
+    [Fact]
     public void Splitting_a_video_divides_its_trim()
     {
         var (s, ed) = NewEditor();

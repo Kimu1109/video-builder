@@ -92,6 +92,19 @@ public sealed class StoryboardStrip : Control
     public double FrameToX(double frame) => Pad + frame / Fps * _pps - _scrollX;
     public int XToFrame(double x) => Math.Max(0, (int)Math.Floor((x - Pad + _scrollX) / _pps * Fps));
 
+    /// <summary>作品全体 (クリップと音楽) が横幅に収まる倍率にして、先頭から表示する。</summary>
+    public void ZoomToFit()
+    {
+        double width = Bounds.Width - Pad * 2;
+        if (width <= 0) return;
+        double seconds = Math.Max(_editor.Layout.Length, 1) / Fps;
+        _pps = Math.Clamp(width / seconds, 4, 600);
+        _scrollX = 0;
+        ClampScroll();
+        ViewChanged?.Invoke();
+        InvalidateVisual();
+    }
+
     public void EnsureFrameVisible(int frame)
     {
         double x = FrameToX(frame);
