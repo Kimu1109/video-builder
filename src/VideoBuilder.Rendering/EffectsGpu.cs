@@ -681,4 +681,181 @@ public static partial class Effects
             return half4(floor((v * k + 128) / 256) / 255);
         }
         """);
+
+    // ---------------- 縁の処理 (ライト・ベベル・縁ぼかし) ----------------
+
+    /// <summary>s を GPU でぼかした絵 (同じ大きさ。絵の外は透明)。アルファの面の代わりに使う。作れなければ null。</summary>
+    private static SKImage? BlurredOnGpu(Sprite s, EffectArgs a, float sigma, SKShaderTileMode tile)
+    {
+        using var surface = a.Context.CreateSurface(s.Width, s.Height);
+        if (surface == null) return null;
+        surface.Canvas.Clear(SKColors.Transparent);
+        using (var blur = SKImageFilter.CreateBlur(sigma, sigma, tile))
+        using (var paint = new SKPaint { ImageFilter = blur })
+            surface.Canvas.DrawImage(s.Image, 0, 0, paint);
+        return surface.Snapshot();
+    }
+
+    /// <summary>ぼかしたアルファを子 "blurred" に渡して、shader で描き直す。GPU 描画でない・使えないときは null。</summary>
+    private static Sprite? WithBlurredAlphaOnGpu(Sprite s, EffectArgs a, Sksl sksl, float sigma, SKShaderTileMode tile, Action<SKRuntimeEffectUniforms> uniforms)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || sksl.Effect == null) return null;
+        using var blurred = BlurredOnGpu(s, a, sigma, tile);
+        if (blurred == null) return null;
+        using var blurredShader = blurred.ToShader(tile, tile);
+        return ApplyGpuShader(s, a, sksl, uniforms, (kids, _, _) => kids["blurred"] = blurredShader);
+    }
+
+    private const string Fetch8Sksl = """
+        float4 px8(float2 q) { return floor(float4(image.eval(q + 0.5)) * 255 + 0.5); }
+        float ba8(float2 q) { return floor(float(blurred.eval(q + 0.5).a) * 255 + 0.5); }
+        """;
+
+    private static readonly Sksl RimLightShader = new("""
+        uniform shader image;
+        uniform shader blurred;
+        uniform float2 shiftPx;
+        uniform float k;
+        uniform float3 color;
+        """ + Fetch8Sksl + """
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float4 v = px8(q);
+            float al = v.a;
+            if (al == 0) return half4(0);
+            float rim = al - ba8(q + shiftPx);   // 縁の近く (周りが透明) ほど大きい
+            if (rim <= 0) return half4(v / 255);
+            float add = floor(rim * k / 256);
+            float amt = floor(add * al / 255);
+            v.rgb = min(float3(al), v.rgb + floor(color * amt / 256));
+            return half4(v / 255);
+        }
+        """);
+
+    private static readonly Sksl BevelShader = new("""
+        uniform shader image;
+        uniform shader blurred;
+        uniform float2 light;
+        uniform float k;
+        """ + Fetch8Sksl + """
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float4 v = px8(q);
+            float al = v.a;
+            if (al == 0) return half4(0);
+            // 端は端の値 (子のタイルが Clamp)
+            float gx = ba8(q + float2(1, 0)) - ba8(q - float2(1, 0));
+            float gy = ba8(q + float2(0, 1)) - ba8(q - float2(0, 1));
+            float shade = (-gx * light.x - gy * light.y) * 0.5 * k;
+            if (abs(shade) < 0.004) return half4(v / 255);
+            float target = shade > 0 ? al : 0;
+            float t = min(1, abs(shade));
+            v.rgb = floor(v.rgb + (target - v.rgb) * t);
+            return half4(v / 255);
+        }
+        """);
+
+    private static readonly Sksl EdgeFeatherShader = new("""
+        uniform shader image;
+        uniform shader blurred;
+        """ + Fetch8Sksl + """
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float4 v = px8(q);
+            float f = clamp((ba8(q) - 128) * 2 + 1, 0, 256);
+            if (f >= 256) return half4(v / 255);
+            return half4(floor((v * f + 128) / 256) / 255);
+        }
+        """);
+
+    // ---------------- 輪郭抽出・ノイズ ----------------
+
+    private static readonly Sksl EdgeDetectShader = new(SampleSksl + """
+        uniform float gain;
+        uniform float threshold;
+        uniform float alphaEdge;
+        uniform float4 color;     // 乗算済み (0〜255)
+        uniform float overlay;
+        float val(float2 q) {
+            float4 c = fetch(q);
+            return alphaEdge > 0 ? c.a : floor((c.r * 54 + c.g * 183 + c.b * 19) / 256);
+        }
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float gx = val(q + float2(1, -1)) + 2 * val(q + float2(1, 0)) + val(q + float2(1, 1))
+                     - val(q + float2(-1, -1)) - 2 * val(q + float2(-1, 0)) - val(q + float2(-1, 1));
+            float gy = val(q + float2(-1, 1)) + 2 * val(q + float2(0, 1)) + val(q + float2(1, 1))
+                     - val(q + float2(-1, -1)) - 2 * val(q + float2(0, -1)) - val(q + float2(1, -1));
+            float g = sqrt(gx * gx + gy * gy) / 1020 * gain;
+            float e = clamp((g - threshold) / max(0.001, 1 - threshold), 0, 1);
+            float4 edge = e <= 0 ? float4(0) : floor((color * floor(e * 256) + 128) / 256);
+            if (overlay <= 0) return out8(edge);
+            // PixelFx.Over: 上に重ねる (乗算済み)
+            float4 b = fetch(q);
+            if (edge.a == 0) return out8(b);
+            if (edge.a == 255) return out8(edge);
+            return out8(min(float4(255), edge + floor((b * (255 - edge.a) + 127) / 255)));
+        }
+        """);
+
+    /// <summary>輪郭抽出 (PixelFx.EdgeDetect と同じ。周りは端のピクセル)。</summary>
+    internal static Sprite? EdgeDetectSprite(Sprite s, EffectArgs a, int pad, float gain, float threshold, bool alphaEdge, uint premul, bool overlay) =>
+        MultiPassOnGpu(s, a, pad, pad, EdgeDetectShader, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, 1, (u, _, _, _) =>
+        {
+            u["gain"] = gain; u["threshold"] = threshold; u["alphaEdge"] = alphaEdge ? 1f : 0f; u["overlay"] = overlay ? 1f : 0f;
+            u["color"] = new float[] { premul >> 16 & 0xFF, premul >> 8 & 0xFF, premul & 0xFF, premul >> 24 };
+        })
+        ?? Resample(s, a, pad, pad, (src, tmp, w, h, rb) => { PixelFx.EdgeDetect(src, tmp, w, h, rb, gain, threshold, alphaEdge, premul, overlay); return tmp; });
+
+    private static readonly Sksl NoiseShader = new("""
+        uniform shader image;
+        uniform shader cells;     // マスごとの乱数 (PixelFx.Hash の下 3 バイト)
+        uniform float cell;
+        uniform float amp;
+        uniform float colored;
+        // C# の整数の割り算 (0 に向かって切り捨て)
+        float idiv(float x, float d) { return x < 0 ? -floor(-x / d) : floor(x / d); }
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float4 v = floor(float4(image.eval(p)) * 255 + 0.5);
+            float a = v.a;
+            if (a == 0) return half4(0);
+            // マスは画素の中心 (p) で決める。GPU は割り算を逆数の掛け算にすることがあり、q / cell がマスの境目ちょうどだと 1 つ前のマスになる
+            float3 r = floor(float3(cells.eval(floor(p / cell) + 0.5).rgb) * 255 + 0.5);
+            // -128〜127 → ×amp/256 (算術シフトなので切り下げ)
+            float n0 = floor((r.r - 128) * amp / 256);
+            float n1 = colored > 0 ? floor((r.g - 128) * amp / 256) : n0;
+            float n2 = colored > 0 ? floor((r.b - 128) * amp / 256) : n0;
+            if (a != 255) { n0 = idiv(n0 * a, 255); n1 = idiv(n1 * a, 255); n2 = idiv(n2 * a, 255); }
+            // 画素は B・G・R の順に n0・n1・n2
+            float3 o = clamp(float3(v.r + n2, v.g + n1, v.b + n0), 0, a);
+            return half4(half3(o / 255), half(a / 255));
+        }
+        """);
+
+    /// <summary>ノイズを GPU で (乱数は CPU で作って送る。送るのは待たない)。GPU 描画でなければ null。</summary>
+    private static Sprite? NoiseOnGpu(Sprite s, EffectArgs a, float amount, int cell, bool color, uint seed)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || NoiseShader.Effect == null) return null;
+        int amp = (int)MathF.Round(Math.Clamp(amount, 0, 255) * 2);
+        if (amp == 0) return s;
+        cell = Math.Max(1, cell);
+        int cw = (s.Width + cell - 1) / cell, ch = (s.Height + cell - 1) / cell;
+        var px = new byte[cw * ch * 4];
+        PixelOps.ForBands(cw, ch, (y0, y1) =>
+        {
+            for (int y = y0; y < y1; y++)
+                for (int x = 0; x < cw; x++)
+                {
+                    uint r = PixelFx.Hash((uint)x, (uint)y, seed);
+                    int i = (y * cw + x) * 4;
+                    px[i] = (byte)r; px[i + 1] = (byte)(r >> 8); px[i + 2] = (byte)(r >> 16); px[i + 3] = 255;
+                }
+        });
+        using var cells = SKImage.FromPixelCopy(new SKImageInfo(cw, ch, SKColorType.Rgba8888, SKAlphaType.Unpremul), px);
+        if (cells == null) return null;
+        using var cellShader = cells.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        return ApplyGpuShader(s, a, NoiseShader, u => { u["cell"] = (float)cell; u["amp"] = (float)amp; u["colored"] = color ? 1f : 0f; },
+            (kids, _, _) => kids["cells"] = cellShader);
+    }
 }

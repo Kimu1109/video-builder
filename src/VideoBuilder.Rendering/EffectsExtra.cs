@@ -223,6 +223,22 @@ public static partial class Effects
             var c = a.Color("color");
             return (px, w, h, rb) => PixelFx.RimLight(px, w, h, rb, width / 2, lx, ly, width * dir, c.Red, c.Green, c.Blue, strength);
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float strength = a.Track("strength") / 100f, width = a.Track("width"), dir = Math.Clamp(a.Track("direction") / 100f, 0, 1);
+            if (strength <= 0 || width <= 0) return s;
+            float rad = a.Track("angle") * MathF.PI / 180f;
+            float lx = MathF.Sin(rad), ly = -MathF.Cos(rad);
+            var c = a.Color("color");
+            float shift = width * dir;
+            return WithBlurredAlphaOnGpu(s, a, RimLightShader, MathF.Max(0.3f, width / 2), SKShaderTileMode.Decal, u =>
+            {
+                u["shiftPx"] = new[] { MathF.Round(lx * shift), MathF.Round(ly * shift) };
+                u["k"] = (float)(int)(Math.Clamp(strength, 0, 8) * 512);
+                u["color"] = new float[] { c.Red, c.Green, c.Blue };
+            });
+        }
     }
 
     /// <summary>凸エッジ: 縁を盛り上がったように見せる (光の当たる側を明るく、反対側を暗く)。</summary>
@@ -236,6 +252,19 @@ public static partial class Effects
             float rad = a.Track("angle") * MathF.PI / 180f;
             float lx = MathF.Sin(rad), ly = -MathF.Cos(rad);
             return (px, w, h, rb) => PixelFx.Bevel(px, w, h, rb, width / 2, height, lx, ly);
+        }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float width = a.Track("width"), height = a.Track("height") / 100f;
+            if (width <= 0 || height <= 0) return s;
+            float rad = a.Track("angle") * MathF.PI / 180f;
+            float sigma = MathF.Max(0.3f, width / 2);
+            return WithBlurredAlphaOnGpu(s, a, BevelShader, sigma, SKShaderTileMode.Clamp, u =>
+            {
+                u["light"] = new[] { MathF.Sin(rad), -MathF.Cos(rad) };
+                u["k"] = height * MathF.Max(1, width / 2) / 255f;
+            });
         }
     }
 
@@ -252,11 +281,7 @@ public static partial class Effects
             uint premul = (uint)(c.Blue * al / 255) | (uint)(c.Green * al / 255) << 8 | (uint)(c.Red * al / 255) << 16 | al << 24;
             // 絵の端に接する縁も線になるよう、周りに 1 ピクセルの透明な余白を付ける
             int pad = a.IsFrameBuffer ? 0 : 1;
-            return Resample(s, a, pad, pad, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.EdgeDetect(src, tmp, w, h, rb, gain, threshold, alphaEdge, premul, overlay);
-                return tmp;
-            }) ?? s;
+            return EdgeDetectSprite(s, a, pad, gain, threshold, alphaEdge, premul, overlay) ?? s;
         }
     }
 
@@ -541,6 +566,13 @@ public static partial class Effects
             float r = a.Track("radius");
             if (r <= 0) return null;
             return (px, w, h, rb) => PixelFx.EdgeFeather(px, w, h, rb, r / 2);
+        }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float r = a.Track("radius");
+            if (r <= 0 || r / 2 < 0.2f) return s;
+            return WithBlurredAlphaOnGpu(s, a, EdgeFeatherShader, r / 2, SKShaderTileMode.Decal, _ => { });
         }
     }
 

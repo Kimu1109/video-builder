@@ -113,6 +113,13 @@ public unsafe class GpuShaderTests
         { "filter.look", "strength,preset", new double[] { 90, 7 } },
         { "filter.look", "strength,preset", new double[] { 90, 9 } },
         { "filter.lut", "strength", new double[] { 80 } },
+        { "filter.light", "strength,width,direction", new double[] { 120, 10, 50 } },
+        { "filter.bevel", "width,height", new double[] { 10, 80 } },
+        { "filter.edgeblur", "radius", new double[] { 12 } },
+        { "filter.edge", "strength,threshold", new double[] { 150, 10 } },
+        { "filter.edge", "strength,threshold,overlay,type", new double[] { 150, 10, 1, 1 } },   // 不透明度の変わり目・重ねる
+        { "filter.noise", "amount,size", new double[] { 40, 3 } },
+        { "filter.noise", "amount,size,color", new double[] { 40, 1, 1 } },
     };
 
     [Theory]
@@ -151,7 +158,8 @@ public unsafe class GpuShaderTests
             Console.WriteLine($"BENCH sksl {id} mean={mean:0.000} max={max} effect-changes={changed:0.00}");
             Assert.True(changed > 0.05, $"{id}: 効果がかかっていない");
             // シャープはぼかしを GPU (Skia) で作るので、CPU の自前のぼかしとの違いの分だけ許す
-            double meanLimit = id == "filter.sharpen" ? 1.0 : 0.3;
+            // (ライト・ベベル・縁ぼかしも、アルファのぼかしを GPU で作る)
+            double meanLimit = id is "filter.sharpen" or "filter.light" or "filter.bevel" or "filter.edgeblur" ? 1.0 : 0.3;
             Assert.True(mean < meanLimit, $"{id}: 以前の描き方と違う mean={mean} max={max}");
             // 以前は読み戻していた。SkSL では読み戻さない
             Assert.True(oldReadbacks >= 1, $"{id}: 以前の描き方で読み戻していない");

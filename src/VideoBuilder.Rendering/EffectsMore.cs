@@ -271,6 +271,8 @@ public static partial class Effects
         {
             var (amount, cell, color, seed) = Read(a);
             if (amount <= 0) return s;
+            // GPU 描画では SkSL で (乱数は CPU で作って送る。読み戻さない)
+            if (NoiseOnGpu(s, a, amount, cell, color, seed) is { } onGpu) return onGpu;
             return WithPixels(s, a, (px, w, h, rb) => PixelFx.Noise(px, w, h, rb, amount, cell, color, seed), alsoOnGpu: true) ?? s;
         }
     }
