@@ -91,6 +91,12 @@ public sealed class ExportStats
     /// <summary>始めてからの時間 (終わったあとは出力全体の時間)。</summary>
     public TimeSpan Elapsed => _clock.Elapsed;
     public bool Finished { get; internal set; }
+    /// <summary>GPU で描いたフレームを、待たずに読み戻した (AsyncReadback) フレームの数。</summary>
+    public long AsyncReadbackFrames => Interlocked.Read(ref _asyncFrames);
+    /// <summary>待たずに読み戻せず、これまでどおりの読み戻しに戻ったか (理由)。null なら戻っていない。</summary>
+    public string? AsyncReadbackError { get; internal set; }
+    private long _asyncFrames;
+    internal void AddAsyncReadback() => Interlocked.Increment(ref _asyncFrames);
 
     /// <summary>1 秒あたりに書けたフレーム数。</summary>
     public double FramesPerSecond => Elapsed.TotalSeconds > 0 ? Frames / Elapsed.TotalSeconds : 0;

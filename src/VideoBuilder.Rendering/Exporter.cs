@@ -84,7 +84,7 @@ public static class Exporter
             for (int i = 0; i < total; i++)
             {
                 stop.Token.ThrowIfCancellationRequested();
-                if (!pool.TryTake(out var bitmap)) bitmap = new SKBitmap(Effects.Info(w, h));
+                if (!pool.TryTake(out var bitmap)) bitmap = new SKBitmap(ReadbackInfo(engine, w, h));
                 try { measure(() => engine.RenderToBitmap(project, scene, req.StartFrame + i, bitmap), stats == null ? null : stats.AddRender); }
                 catch { pool.Add(bitmap); throw; }
                 try { queue.Add((i, bitmap), stop.Token); }
@@ -101,6 +101,10 @@ public static class Exporter
         if (error != null) throw error;
         cancel.ThrowIfCancellationRequested();
     }
+
+    /// <summary>描いたフレームを受け取るビットマップの形式。GPU 描画なら RGBA (読み戻しで並べ替えない)。</summary>
+    private static SKImageInfo ReadbackInfo(RenderEngine engine, int w, int h) =>
+        Effects.Info(w, h).WithColorType(engine.ReadbackColorType);
 
     private static void RunCore(ExportRequest req, Project project, Scene scene, int total, int w, int h, ExportStats? stats,
         IProgress<(int Done, int Total)>? progress, CancellationToken cancel)
@@ -168,6 +172,81 @@ public static class Exporter
             }
         });
 
+        // GPU 描画なら、読み戻しを待たずに次のフレームを描く (GPU がフレーム N を描く間に、フレーム N-1 を色変換する)
+        AsyncReadback? readback = null;
+        if (gpu != null && hasVideo)
+        {
+            readback = AsyncReadback.Create(gpu, w, h, out var readbackError);
+            if (readback == null && stats != null) stats.AsyncReadbackError = readbackError;
+        }
+        // 読み戻しの途中のフレーム (描いた順)
+        var inFlight = new Queue<int>();
+
+        // フレームを描いて、エンコーダ用の形式に変換する (読み戻しを使わないとき、使えなくなったとき)
+        IntPtr RenderNow(int frame)
+        {
+            if (!pool.TryTake(out var target)) target = new SKBitmap(ReadbackInfo(engine, w, h));
+            try
+            {
+                Measure(() => engine.RenderToBitmap(project, scene, frame, target), stats == null ? null : stats.AddRender);
+                watch.Restart();
+                IntPtr prepared;
+                unsafe
+                {
+                    prepared = writer.PrepareVideoFrame(new ReadOnlySpan<byte>((void*)target.GetPixels(), target.RowBytes * h), target.RowBytes,
+                        rgba: target.ColorType == SKColorType.Rgba8888);
+                }
+                stats?.AddConvert(watch.Elapsed);
+                return prepared;
+            }
+            finally { pool.Add(target); }
+        }
+
+        // 映像 (変換済み) と、そのフレームの音声を、エンコードの待ち行列に入れる
+        void Enqueue(int frame, IntPtr prepared)
+        {
+            float[]? audio = null;
+            if (hasAudio)
+            {
+                long from = project.FrameToSample(frame), to = project.FrameToSample(frame + 1);
+                int n = (int)(to - from) * 2;
+                // 音声の入れ物も使い回す (長さはフレームごとに 1 サンプル違うことがある)
+                if (!audioPool.TryTake(out audio) || audio.Length != n) audio = new float[n];
+                var buffer = audio;
+                Measure(() => mixer.Mix(project, scene, from, buffer), stats == null ? null : stats.AddAudio);
+            }
+            watch.Restart();
+            queue.Add((prepared, audio), stop.Token);
+            stats?.AddWait(watch.Elapsed);
+        }
+
+        // いちばん古い読み戻しを受け取って、待ち行列に入れる。読み戻せなければ、読み戻しをやめて描き直す
+        void FinishOldest()
+        {
+            int frame = inFlight.Dequeue();
+            IntPtr prepared = IntPtr.Zero;
+            watch.Restart();
+            bool done = readback!.Finish((pixels, rowBytes) =>
+            {
+                unsafe { prepared = writer.PrepareVideoFrame(new ReadOnlySpan<byte>((void*)pixels, rowBytes * h), rowBytes, rgba: true); }
+            });
+            stats?.AddConvert(watch.Elapsed);
+            if (!done)
+            {
+                if (stats != null) stats.AsyncReadbackError = "読み戻せませんでした";
+                // 途中のものも含めて、これまでどおりの描き方に戻す
+                var rest = inFlight.ToList();
+                inFlight.Clear();
+                readback.Dispose();
+                readback = null;
+                Enqueue(frame, RenderNow(frame));
+                foreach (var f in rest) Enqueue(f, RenderNow(f));
+                return;
+            }
+            stats?.AddAsyncReadback();
+            Enqueue(frame, prepared);
+        }
+
         bool ok = false;
         try
         {
@@ -177,33 +256,21 @@ public static class Exporter
                 {
                     stop.Token.ThrowIfCancellationRequested();
                     int frame = req.StartFrame + i;
-                    IntPtr prepared = IntPtr.Zero;
-                    if (hasVideo)
+                    if (!hasVideo) { Enqueue(frame, IntPtr.Zero); continue; }
+                    if (readback == null) { Enqueue(frame, RenderNow(frame)); continue; }
+                    if (inFlight.Count >= AsyncReadback.Depth) FinishOldest();
+                    if (readback == null) { Enqueue(frame, RenderNow(frame)); continue; }
+                    var target = readback;
+                    Measure(() =>
                     {
-                        if (!pool.TryTake(out var target)) target = new SKBitmap(Effects.Info(w, h));
-                        Measure(() => engine.RenderToBitmap(project, scene, frame, target), stats == null ? null : stats.AddRender);
-                        watch.Restart();
-                        unsafe
-                        {
-                            prepared = writer.PrepareVideoFrame(new ReadOnlySpan<byte>((void*)target.GetPixels(), target.RowBytes * h), target.RowBytes);
-                        }
-                        stats?.AddConvert(watch.Elapsed);
-                        pool.Add(target);
-                    }
-                    float[]? audio = null;
-                    if (hasAudio)
-                    {
-                        long from = project.FrameToSample(frame), to = project.FrameToSample(frame + 1);
-                        int n = (int)(to - from) * 2;
-                        // 音声の入れ物も使い回す (長さはフレームごとに 1 サンプル違うことがある)
-                        if (!audioPool.TryTake(out audio) || audio.Length != n) audio = new float[n];
-                        var buffer = audio;
-                        Measure(() => mixer.Mix(project, scene, from, buffer), stats == null ? null : stats.AddAudio);
-                    }
-                    watch.Restart();
-                    queue.Add((prepared, audio), stop.Token);
-                    stats?.AddWait(watch.Elapsed);
+                        engine.RenderToGpuSurface(project, scene, frame, target.Surface);
+                        target.Start();
+                    }, stats == null ? null : stats.AddRender);
+                    inFlight.Enqueue(frame);
+                    // 1 つ前のフレームは、このフレームを GPU が描いている間に受け取る
+                    if (inFlight.Count >= 2) FinishOldest();
                 }
+                while (inFlight.Count > 0 && readback != null) FinishOldest();
             }
             finally
             {
@@ -222,6 +289,7 @@ public static class Exporter
         }
         finally
         {
+            readback?.Dispose();
             foreach (var b in pool) b.Dispose();
             while (queue.TryTake(out _)) { }
             queue.Dispose();

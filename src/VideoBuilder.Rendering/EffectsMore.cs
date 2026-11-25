@@ -356,7 +356,7 @@ public static partial class Effects
             bool identity = true;
             for (int i = 0; i < 256 && identity; i++) identity = lut[i] == i;
             if (identity) return s;
-            return WithPixels(s, a, (px, w, h, rb) => PixelFx.ApplyLut(px, w, h, rb, lut), alsoOnGpu: true) ?? s;
+            return ApplyLut(s, a, lut);
         }
     }
 
@@ -373,7 +373,7 @@ public static partial class Effects
             int n = Steps(a);
             if (n >= 256) return s;
             var lut = PixelFx.PosterizeLut(n);
-            return WithPixels(s, a, (px, w, h, rb) => PixelFx.ApplyLut(px, w, h, rb, lut), alsoOnGpu: true) ?? s;
+            return ApplyLut(s, a, lut);
         }
     }
 

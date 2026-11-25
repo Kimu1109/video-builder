@@ -229,8 +229,11 @@ public class PreviewSpeedTests : IDisposable
             var b = Frame(onGpu, p, f);
             Assert.True(MeanDifference(a, b) < 1.0, $"frame {f}: {MeanDifference(a, b):0.00}");
         }
-        Assert.True(onGpu.Media.DirectUploads >= 2 * 14, $"{onGpu.Media.DirectUploads} 回");   // 複製せずに GPU へ送った
+        // 複製せずに GPU へ送った (OpenGL ES 3 なら YUV のまま送って GPU で変換する。そうでなければ BGRA を直接送る)
+        long sent = onGpu.Media.DirectUploads + onGpu.Media.GpuYuvFrames;
+        Assert.True(sent >= 2 * 14, $"{onGpu.Media.DirectUploads} 回 + YUV {onGpu.Media.GpuYuvFrames} 回 ({onGpu.Media.GpuYuvError})");
         Assert.Equal(0, cpu.Media.DirectUploads);
+        Assert.Equal(0, cpu.Media.GpuYuvFrames);
     }
 
     /// <summary>ffmpeg で、ファイルの各フレームの中身の要約 (MD5) を取る。</summary>

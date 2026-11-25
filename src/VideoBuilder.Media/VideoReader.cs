@@ -2,6 +2,27 @@ using FFmpeg.AutoGen;
 
 namespace VideoBuilder.Media;
 
+/// <summary>YUV のフレームの面の並び。</summary>
+public enum YuvLayout
+{
+    /// <summary>Y と U と V が別々の面 (YUV420P・YUV422P・YUV444P)。</summary>
+    Planar,
+    /// <summary>Y の面と、U と V が交互に並んだ面 (NV12)。</summary>
+    Nv12,
+}
+
+/// <summary>
+/// デコードしたままの YUV (8 ビット) のフレーム。GPU 描画で、BGRA に変換せずに GPU へ送って、GPU で色を変換するのに使う。
+/// 色の変換は、BGRA に変換するとき (sws の既定) と同じく BT.601。FullRange は J 形式 (yuvj420p など) のとき。
+/// </summary>
+public readonly record struct YuvPlanes(
+    int Width, int Height, YuvLayout Layout, int ChromaShiftX, int ChromaShiftY, bool FullRange,
+    IntPtr Y, int YStride, IntPtr U, int UStride, IntPtr V, int VStride)
+{
+    public int ChromaWidth => (Width + (1 << ChromaShiftX) - 1) >> ChromaShiftX;
+    public int ChromaHeight => (Height + (1 << ChromaShiftY) - 1) >> ChromaShiftY;
+}
+
 /// <summary>動画ファイルから、指定した時刻のフレームを BGRA で取り出す。スレッドセーフではない。</summary>
 public sealed unsafe class VideoReader : IDisposable
 {
@@ -39,6 +60,11 @@ public sealed unsafe class VideoReader : IDisposable
     private int _divisor = 1;
     private int _pinned = -1;       // 書き換えない置き場 (PinCurrentFrame)。-1 ならなし
     private byte[] _managed = Array.Empty<byte>();
+    // PreferYuv のとき: 置き場ごとに、BGRA に変換するかわりに持っている YUV のフレーム (_slotYuv が true の置き場だけ)
+    private readonly AVFrame*[] _yuv = new AVFrame*[2];
+    private readonly bool[] _slotYuv = new bool[2];
+    private SwsContext* _swsYuv;      // YUV のまま縮める
+    private SwsContext* _swsLate;     // 持っている YUV を、あとから BGRA にする (先読みと同時に使うので _sws とは別)
 
     public string Path { get; }
     public int Width { get; }
@@ -74,6 +100,13 @@ public sealed unsafe class VideoReader : IDisposable
             if (_hasFrame && !_eof) _converted = false;
         }
     }
+
+    /// <summary>
+    /// 対応する形式 (8 ビットの YUV420P・YUV422P・YUV444P・NV12。透明な部分のある動画は除く) なら、
+    /// BGRA に変換せず、デコードしたままの YUV を持つ。GPU 描画で、GPU で色を変換するときに使う。
+    /// このとき GetFramePointer が返すポインタは目印で、中身は BGRA ではない。TryGetYuv で面を受け取るか、EnsureBgra で BGRA にすること。
+    /// </summary>
+    public bool PreferYuv { get; set; }
 
     /// <summary>OutputDivisor を n にしたときの、取り出すフレームの大きさ。</summary>
     public (int Width, int Height) OutputSizeFor(int divisor)
@@ -196,7 +229,7 @@ public sealed unsafe class VideoReader : IDisposable
     /// </summary>
     public byte[]? GetFrame(double seconds)
     {
-        var p = GetFramePointer(seconds);
+        var p = EnsureBgra(GetFramePointer(seconds));
         if (p == IntPtr.Zero) return null;
         int size = FrameWidth * FrameHeight * 4;
         if (_managed.Length != size) _managed = new byte[size];
@@ -330,9 +363,6 @@ public sealed unsafe class VideoReader : IDisposable
         int w = source->width, h = source->height;
         if (w <= 0 || h <= 0) return;
         var (ow, oh) = OutputSizeFor(_divisor);
-        _sws = ffmpeg.sws_getCachedContext(_sws, w, h, (AVPixelFormat)source->format, ow, oh,
-            AVPixelFormat.AV_PIX_FMT_BGRA, (int)SwsFlags.SWS_BILINEAR, null, null, null);
-        if (_sws == null) return;
         // 置き場は元の大きさで確保する (縮める大きさが変わっても確保し直さない)
         int capacity = Width * Height * 4;
         if (_native[0] == null || _nativeCapacity != capacity)
@@ -348,6 +378,19 @@ public sealed unsafe class VideoReader : IDisposable
         // 直前に返したフレームを残すため、もう一方の置き場に変換する
         // (押さえられた置き場があれば、何回変換してもそちらには書かない)
         int index = _pinned >= 0 ? _pinned ^ 1 : _nativeValid ? _nativeIndex ^ 1 : _nativeIndex;
+        if (PreferYuv && !HasAlpha && StoreYuv(index, source, ow, oh))
+        {
+            _nativeIndex = index;
+            FrameWidth = ow; FrameHeight = oh;
+            _converted = true;
+            _nativeValid = true;
+            _convertedCount++;
+            return;
+        }
+        ReleaseYuv(index);
+        _sws = ffmpeg.sws_getCachedContext(_sws, w, h, (AVPixelFormat)source->format, ow, oh,
+            AVPixelFormat.AV_PIX_FMT_BGRA, (int)SwsFlags.SWS_BILINEAR, null, null, null);
+        if (_sws == null) return;
         var dst = new byte*[4] { _native[index], null, null, null };
         var stride = new int[4] { ow * 4, 0, 0, 0 };
         ffmpeg.sws_scale(_sws, source->data, source->linesize, 0, h, dst, stride);
@@ -359,9 +402,150 @@ public sealed unsafe class VideoReader : IDisposable
         _convertedCount++;
     }
 
+    private static readonly Lazy<bool> Nv12Interpolated = new(ProbeNv12Interpolation);
+
+    /// <summary>
+    /// sws が NV12 → BGRA で U・V を縦に補間するか (x64 では補間し、arm64 の NEON 版では補間せず 2 行で同じ値を使う)。
+    /// GPU で色を変換するとき、CPU 描画と同じ絵にするために使う。FFmpeg を読み込んでから呼ぶこと。
+    /// </summary>
+    public static bool SwsInterpolatesNv12ChromaVertically => Nv12Interpolated.Value;
+
+    /// <summary>U・V の 1 行だけ値を変えた小さな NV12 を変換して、隣の行に影響が出るかで調べる。</summary>
+    private static bool ProbeNv12Interpolation()
+    {
+        const int w = 64, h = 8;
+        var y = new byte[w * h]; var uv = new byte[w * h / 2]; var bgra = new byte[w * h * 4];
+        Array.Fill(y, (byte)128); Array.Fill(uv, (byte)128);
+        for (int x = 0; x < w; x += 2) uv[1 * w + x] = 168;   // U・V の 1 行目の U だけ
+        var sws = ffmpeg.sws_getContext(w, h, AVPixelFormat.AV_PIX_FMT_NV12, w, h, AVPixelFormat.AV_PIX_FMT_BGRA, (int)SwsFlags.SWS_BILINEAR, null, null, null);
+        if (sws == null) return true;
+        try
+        {
+            fixed (byte* py = y, puv = uv, pb = bgra)
+            {
+                var src = new byte*[4] { py, puv, null, null };
+                var srcStride = new int[4] { w, w, 0, 0 };
+                var dst = new byte*[4] { pb, null, null, null };
+                var dstStride = new int[4] { w * 4, 0, 0, 0 };
+                ffmpeg.sws_scale(sws, src, srcStride, 0, h, dst, dstStride);
+            }
+        }
+        finally { ffmpeg.sws_freeContext(sws); }
+        // U・V の 1 行目は Y の 2・3 行目に使われる。補間しなければ 2 行とも同じ値になる (青で比べる)
+        int row2 = bgra[(2 * w + 8) * 4], row3 = bgra[(3 * w + 8) * 4];
+        return row2 != row3;
+    }
+
+    /// <summary>形式が YUV として渡せるものなら、その並び (U・V の間引き方と、フルレンジか)。</summary>
+    internal static (YuvLayout Layout, int ShiftX, int ShiftY, bool Full)? YuvFormatOf(AVPixelFormat f) => f switch
+    {
+        AVPixelFormat.AV_PIX_FMT_YUV420P => (YuvLayout.Planar, 1, 1, false),
+        AVPixelFormat.AV_PIX_FMT_YUVJ420P => (YuvLayout.Planar, 1, 1, true),
+        AVPixelFormat.AV_PIX_FMT_YUV422P => (YuvLayout.Planar, 1, 0, false),
+        AVPixelFormat.AV_PIX_FMT_YUVJ422P => (YuvLayout.Planar, 1, 0, true),
+        AVPixelFormat.AV_PIX_FMT_YUV444P => (YuvLayout.Planar, 0, 0, false),
+        AVPixelFormat.AV_PIX_FMT_YUVJ444P => (YuvLayout.Planar, 0, 0, true),
+        AVPixelFormat.AV_PIX_FMT_NV12 => (YuvLayout.Nv12, 1, 1, false),
+        _ => null,
+    };
+
+    /// <summary>
+    /// source を、置き場 index の YUV のフレームとして持つ。元の大きさならデコーダのフレームを参照するだけ (複製しない)。
+    /// 縮めるときは、YUV のまま縮める。持てない形式なら false (BGRA に変換する)。
+    /// </summary>
+    private bool StoreYuv(int index, AVFrame* source, int ow, int oh)
+    {
+        var format = (AVPixelFormat)source->format;
+        if (YuvFormatOf(format) is not { } layout) return false;
+        // U・V を間引いた形式で幅・高さが奇数だと、sws は U・V を補間する別の変換を使うので、GPU の変換と絵が合わない。
+        // そのときはこれまでどおり BGRA にする (このような動画はほとんどない)
+        if ((layout.ShiftX > 0 && (ow & 1) != 0) || (layout.ShiftY > 0 && (oh & 1) != 0)) return false;
+        var dst = _yuv[index];
+        if (dst == null) _yuv[index] = dst = ffmpeg.av_frame_alloc();
+        ffmpeg.av_frame_unref(dst);
+        _slotYuv[index] = false;
+        int w = source->width, h = source->height;
+        if (ow == w && oh == h && DecoderName != "V4L2")
+        {
+            // V4L2 のデコーダは受け取り用の置き場が少ないので、参照を持ち続けずに複製する (下)
+            if (ffmpeg.av_frame_ref(dst, source) < 0) return false;
+        }
+        else
+        {
+            dst->format = (int)format; dst->width = ow; dst->height = oh;
+            if (ffmpeg.av_frame_get_buffer(dst, 0) < 0) { ffmpeg.av_frame_unref(dst); return false; }
+            if (ow == w && oh == h)
+            {
+                if (ffmpeg.av_frame_copy(dst, source) < 0) { ffmpeg.av_frame_unref(dst); return false; }
+            }
+            else
+            {
+                _swsYuv = ffmpeg.sws_getCachedContext(_swsYuv, w, h, format, ow, oh, format, (int)SwsFlags.SWS_BILINEAR, null, null, null);
+                if (_swsYuv == null) { ffmpeg.av_frame_unref(dst); return false; }
+                ffmpeg.sws_scale(_swsYuv, source->data, source->linesize, 0, h, dst->data, dst->linesize);
+            }
+        }
+        _slotYuv[index] = true;
+        return true;
+    }
+
+    private void ReleaseYuv(int index)
+    {
+        _slotYuv[index] = false;
+        if (_yuv[index] != null) ffmpeg.av_frame_unref(_yuv[index]);
+    }
+
+    /// <summary>GetFramePointer が返したポインタ (目印) の置き場の番号。なければ -1。</summary>
+    private int SlotOf(IntPtr frame)
+    {
+        if (frame == IntPtr.Zero) return -1;
+        for (int i = 0; i < 2; i++)
+            if ((IntPtr)_native[i] == frame) return i;
+        return -1;
+    }
+
+    /// <summary>
+    /// GetFramePointer が返したフレームが YUV のまま持っているものなら、その面を返す。
+    /// 面の中身は、そのフレームの置き場が次に使われるまで (GetFramePointer の中身と同じ) 正しい。
+    /// </summary>
+    public bool TryGetYuv(IntPtr frame, out YuvPlanes planes)
+    {
+        planes = default;
+        int i = SlotOf(frame);
+        if (i < 0 || !_slotYuv[i]) return false;
+        var f = _yuv[i];
+        var layout = YuvFormatOf((AVPixelFormat)f->format)!.Value;
+        planes = new YuvPlanes(f->width, f->height, layout.Layout, layout.ShiftX, layout.ShiftY, layout.Full,
+            (IntPtr)f->data[0], f->linesize[0], (IntPtr)f->data[1], f->linesize[1],
+            layout.Layout == YuvLayout.Nv12 ? IntPtr.Zero : (IntPtr)f->data[2], layout.Layout == YuvLayout.Nv12 ? 0 : f->linesize[2]);
+        return true;
+    }
+
+    /// <summary>
+    /// GetFramePointer が返したフレームを、BGRA (FrameWidth*4 バイトの行) で読めるようにして、同じポインタを返す。
+    /// YUV のまま持っているフレームなら、ここで BGRA に変換する (GPU へ送れなかったときなど)。先読み中に呼んでもよい。
+    /// </summary>
+    public IntPtr EnsureBgra(IntPtr frame)
+    {
+        int i = SlotOf(frame);
+        if (i < 0 || !_slotYuv[i]) return frame;
+        var f = _yuv[i];
+        _swsLate = ffmpeg.sws_getCachedContext(_swsLate, f->width, f->height, (AVPixelFormat)f->format, f->width, f->height,
+            AVPixelFormat.AV_PIX_FMT_BGRA, (int)SwsFlags.SWS_BILINEAR, null, null, null);
+        if (_swsLate == null) return IntPtr.Zero;
+        var dst = new byte*[4] { _native[i], null, null, null };
+        var stride = new int[4] { f->width * 4, 0, 0, 0 };
+        ffmpeg.sws_scale(_swsLate, f->data, f->linesize, 0, f->height, dst, stride);
+        return frame;
+    }
+
     public void Dispose()
     {
         if (_frame != null) { var f = _frame; ffmpeg.av_frame_free(&f); _frame = null; }
+        for (int i = 0; i < 2; i++)
+            if (_yuv[i] != null) { var f = _yuv[i]; ffmpeg.av_frame_free(&f); _yuv[i] = null; }
+        if (_swsYuv != null) { ffmpeg.sws_freeContext(_swsYuv); _swsYuv = null; }
+        if (_swsLate != null) { ffmpeg.sws_freeContext(_swsLate); _swsLate = null; }
         if (_swFrame != null) { var f = _swFrame; ffmpeg.av_frame_free(&f); _swFrame = null; }
         if (_pkt != null) { var p = _pkt; ffmpeg.av_packet_free(&p); _pkt = null; }
         if (_sws != null) { ffmpeg.sws_freeContext(_sws); _sws = null; }

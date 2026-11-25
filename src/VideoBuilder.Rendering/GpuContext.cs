@@ -360,6 +360,31 @@ public sealed unsafe class GpuContext : IDisposable
 
     private IntPtr _display, _surface, _context;
     private GRGlInterface? _interface;
+    // Skia と同じ GL の関数の探し方 (Skia を通さない GL の処理でも使う)
+    private Func<string, IntPtr> _getProc = EglApi.Proc;
+    private GlFunctions? _gl;
+    private string? _glError;
+    private bool _glLoaded;
+
+    /// <summary>
+    /// Skia を通さずに使う OpenGL ES 3 の関数。OpenGL ES 3 でないなど、使えなければ null (GlError に理由)。
+    /// 初めて使うときに探すので、このコンテキストを有効にしたスレッドから呼ぶこと。
+    /// </summary>
+    internal GlFunctions? Gl
+    {
+        get
+        {
+            if (!_glLoaded)
+            {
+                _glLoaded = true;
+                try { _gl = GlFunctions.Load(_getProc, out _glError); }
+                catch (Exception ex) { _gl = null; _glError = ex.Message; }
+            }
+            return _gl;
+        }
+    }
+
+    internal string? GlError => _glError;
     // Windows: このコンテキストだけの Direct3D 11 のデバイスと、それを包む ANGLE のデバイス (Dispose で手放す)
     private IntPtr _d3dDevice, _angleDevice;
     private IntPtr _config;
@@ -757,7 +782,7 @@ public sealed unsafe class GpuContext : IDisposable
         gr.SetResourceCacheLimit(384L * 1024 * 1024);
         return new GpuContext
         {
-            Context = gr, _interface = gi, Renderer = renderer, Vendor = vendor,
+            Context = gr, _interface = gi, Renderer = renderer, Vendor = vendor, _getProc = getProcAddress,
             IsSoftware = IsSoftwareRenderer(renderer),
             _externalMakeCurrent = makeCurrent, _externalRelease = release,
         };
