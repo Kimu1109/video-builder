@@ -11,7 +11,10 @@ public sealed class StoryboardEditor
 {
     private readonly EditorSession _session;
     private string? _selected;
+    // 一緒に選んでいるクリップ (Ctrl / Shift を押しながらのクリック)。_selected (主に選んでいるもの) は含めない
+    private readonly HashSet<string> _extra = new();
     private List<StoryClip> _clipboard = new();
+    private MusicClip? _musicClipboard;
 
     public StoryboardEditor(EditorSession session)
     {
@@ -19,7 +22,9 @@ public sealed class StoryboardEditor
         // 取り消しなどで、選んでいたものがなくなったら選択を外す
         session.ProjectChanged += () =>
         {
+            int pruned = _extra.RemoveWhere(id => Board?.FindClip(id) == null);
             if (_selected != null && Board?.FindClip(_selected) == null && Board?.FindMusic(_selected) == null) Select(null);
+            else if (pruned > 0) SelectionChanged?.Invoke();
         };
         session.ProjectReplaced += () => Select(null);
     }
@@ -58,8 +63,63 @@ public sealed class StoryboardEditor
 
     public void Select(string? id)
     {
-        if (_selected == id) return;
+        if (_selected == id && _extra.Count == 0) return;
         _selected = id;
+        _extra.Clear();
+        SelectionChanged?.Invoke();
+    }
+
+    /// <summary>選んでいるクリップの ID (並びの順)。音楽を選んでいるときは空。</summary>
+    public IReadOnlyList<string> SelectedClipIds =>
+        Board?.Clips.Where(c => c.Id == _selected || _extra.Contains(c.Id)).Select(c => c.Id).ToList() ?? new List<string>();
+
+    /// <summary>2 つ以上のクリップを選んでいるか。</summary>
+    public bool HasMultipleSelection => _extra.Count > 0;
+
+    public bool IsSelected(string id) => id == _selected || _extra.Contains(id);
+
+    /// <summary>Ctrl を押しながらのクリック: クリップを選択に加える / 外す。音楽はそれだけを選ぶ。</summary>
+    public void ToggleSelect(string id)
+    {
+        if (Board?.FindClip(id) == null || SelectedMusic != null) { Select(id); return; }
+        if (_selected == id)
+        {
+            // 主に選んでいたものを外したら、残りの 1 つを主にする
+            var next = SelectedClipIds.FirstOrDefault(x => x != id);
+            if (next == null) { Select(null); return; }
+            _extra.Remove(next);
+            _selected = next;
+        }
+        else if (!_extra.Remove(id))
+        {
+            if (_selected != null) _extra.Add(_selected);
+            _selected = id;
+        }
+        SelectionChanged?.Invoke();
+    }
+
+    /// <summary>Shift を押しながらのクリック: 主に選んでいるクリップから id までを選ぶ。</summary>
+    public void SelectRange(string id)
+    {
+        var board = Board;
+        int to = board?.Clips.FindIndex(c => c.Id == id) ?? -1;
+        int from = SelectedClip is { } sel ? board!.Clips.IndexOf(sel) : -1;
+        if (to < 0 || from < 0) { Select(id); return; }
+        _extra.Clear();
+        for (int i = Math.Min(from, to); i <= Math.Max(from, to); i++)
+            if (board!.Clips[i].Id != id) _extra.Add(board.Clips[i].Id);
+        _selected = id;
+        SelectionChanged?.Invoke();
+    }
+
+    /// <summary>すべてのクリップを選ぶ。</summary>
+    public void SelectAllClips()
+    {
+        var clips = Board?.Clips;
+        if (clips == null || clips.Count == 0) return;
+        _selected = SelectedClip?.Id ?? clips[0].Id;
+        _extra.Clear();
+        foreach (var c in clips) if (c.Id != _selected) _extra.Add(c.Id);
         SelectionChanged?.Invoke();
     }
 
@@ -85,6 +145,14 @@ public sealed class StoryboardEditor
     {
         if (Board?.FindMusic(id) == null) return;
         Change(description, b => action(b.FindMusic(id)!), mergeKey);
+    }
+
+    /// <summary>選んでいるすべてのクリップの設定を変える (1 回の取り消し)。</summary>
+    public void UpdateSelectedClips(string description, Action<StoryClip> action, string? mergeKey = null)
+    {
+        var ids = SelectedClipIds;
+        if (ids.Count == 0) return;
+        Change(description, b => { foreach (var id in ids) if (b.FindClip(id) is { } c) action(c); }, mergeKey);
     }
 
     /// <summary>
@@ -152,12 +220,12 @@ public sealed class StoryboardEditor
         return sel != null ? board.Clips.IndexOf(sel) + 1 : board.Clips.Count;
     }
 
-    /// <summary>タイトルを追加する。選んでいるクリップの前 (なければ先頭) に入れる。</summary>
-    public StoryClip AddTitle(string text)
+    /// <summary>タイトルを追加する。選んでいるクリップの前 (なければ先頭) に入れる。atEnd なら最後に入れる (終わりのタイトル)。</summary>
+    public StoryClip AddTitle(string text, bool atEnd = false)
     {
         var clip = StoryClip.Title(text);
-        int at = SelectedClip is { } sel ? Board!.Clips.IndexOf(sel) : 0;
-        AddClips(new[] { clip }, at, "タイトルの追加");
+        int at = atEnd ? Board?.Clips.Count ?? 0 : SelectedClip is { } sel ? Board!.Clips.IndexOf(sel) : 0;
+        AddClips(new[] { clip }, at, atEnd ? "終わりのタイトルの追加" : "タイトルの追加");
         return clip;
     }
 
@@ -190,7 +258,12 @@ public sealed class StoryboardEditor
 
     public void RemoveSelected()
     {
-        if (_selected != null) Remove(_selected);
+        if (!HasMultipleSelection) { if (_selected != null) Remove(_selected); return; }
+        var ids = SelectedClipIds.ToHashSet();
+        int index = Board!.Clips.FindIndex(c => ids.Contains(c.Id));
+        Change("クリップの削除", b => b.Clips.RemoveAll(c => ids.Contains(c.Id)));
+        var clips = Board!.Clips;
+        Select(clips.Count == 0 ? null : clips[Math.Min(index, clips.Count - 1)].Id);
     }
 
     /// <summary>クリップを newIndex (並べ替えたあとの位置) に動かす。</summary>
@@ -209,17 +282,70 @@ public sealed class StoryboardEditor
         });
     }
 
-    /// <summary>選んでいるクリップを 1 つ前 (-1) / 後ろ (+1) へ動かす。</summary>
+    /// <summary>選んでいるクリップを 1 つ前 (-1) / 後ろ (+1) へ動かす。いくつも選んでいるときは、並びの順を保ったまま 1 つずつずらす。</summary>
     public void MoveSelected(int direction)
     {
         if (SelectedClip is not { } c) return;
-        Move(c.Id, Board!.Clips.IndexOf(c) + direction);
+        if (!HasMultipleSelection) { Move(c.Id, Board!.Clips.IndexOf(c) + direction); return; }
+        var ids = SelectedClipIds.ToHashSet();
+        var clips = Board!.Clips;
+        // 端に着いているものがあれば動かさない (並びが崩れないように)
+        if (direction < 0 ? ids.Contains(clips[0].Id) : ids.Contains(clips[^1].Id)) return;
+        Change("クリップの移動", b =>
+        {
+            var list = b.Clips;
+            if (direction < 0)
+            {
+                for (int i = 1; i < list.Count; i++)
+                    if (ids.Contains(list[i].Id) && !ids.Contains(list[i - 1].Id)) (list[i - 1], list[i]) = (list[i], list[i - 1]);
+            }
+            else
+            {
+                for (int i = list.Count - 2; i >= 0; i--)
+                    if (ids.Contains(list[i].Id) && !ids.Contains(list[i + 1].Id)) (list[i + 1], list[i]) = (list[i], list[i + 1]);
+            }
+        });
     }
 
     // ---------------- 分割・切り出し ----------------
 
-    /// <summary>frame の位置で、そこに見えているクリップを 2 つに分ける。分けたら後ろ半分を選ぶ。</summary>
+    /// <summary>
+    /// frame の位置で、そこに見えているクリップを 2 つに分ける。分けたら後ろ半分を選ぶ。
+    /// 音楽を選んでいて、frame がその中なら音楽を分ける。
+    /// </summary>
     public bool SplitAt(int frame)
+    {
+        if (SelectedMusic is { } music && Layout.FindMusic(music.Id) is { } ms && frame > ms.Start && frame <= ms.End)
+            return SplitMusicAt(music.Id, frame);
+        return SplitClipAt(frame);
+    }
+
+    /// <summary>音楽を frame の位置で 2 つに分ける。繰り返す音楽は、1 回目の中でだけ分けられる (分けると繰り返しは後ろに残る)。</summary>
+    public bool SplitMusicAt(string id, int frame)
+    {
+        var span = Layout.FindMusic(id);
+        if (span == null || frame <= span.Start || frame > span.End) return false;
+        var m = span.Music;
+        double offset = Project.FrameToSeconds(frame - span.Start);
+        if (offset < StoryClip.MinSeconds || m.Seconds - offset < StoryClip.MinSeconds) return false;
+        var second = m.Clone(newId: true);
+        Change("音楽の分割", b =>
+        {
+            var first = b.FindMusic(id)!;
+            double cut = Math.Round(first.TrimStart + offset, 3);
+            second.TrimStart = cut;
+            second.StartSeconds = Math.Round(first.StartSeconds + offset, 3);
+            second.FadeIn = 0;
+            first.TrimEnd = cut;
+            first.FadeOut = 0;
+            first.Loop = false;
+            b.Music.Insert(b.Music.IndexOf(first) + 1, second);
+        });
+        Select(second.Id);
+        return true;
+    }
+
+    private bool SplitClipAt(int frame)
     {
         var span = Layout.ClipAt(frame);
         if (span == null) return false;
@@ -274,25 +400,84 @@ public sealed class StoryboardEditor
 
     // ---------------- コピー・貼り付け ----------------
 
-    public bool HasClipboard => _clipboard.Count > 0;
+    public bool HasClipboard => _clipboard.Count > 0 || _musicClipboard != null;
 
+    /// <summary>選んでいるクリップ (いくつでも) か音楽をコピーする。</summary>
     public void CopySelected()
     {
-        if (SelectedClip is { } c) _clipboard = new List<StoryClip> { c.Clone() };
+        if (SelectedMusic is { } m) { _musicClipboard = m.Clone(); _clipboard = new(); return; }
+        var board = Board;
+        var ids = SelectedClipIds;
+        if (board == null || ids.Count == 0) return;
+        _clipboard = ids.Select(id => board.FindClip(id)!.Clone()).ToList();
+        _musicClipboard = null;
     }
 
     public void CutSelected()
     {
-        if (SelectedClip == null) return;
+        if (SelectedClip == null && SelectedMusic == null) return;
         CopySelected();
         RemoveSelected();
     }
 
-    /// <summary>コピーしたクリップを、選んでいるクリップの後ろに貼り付ける。</summary>
+    /// <summary>コピーしたクリップを、選んでいるクリップの後ろに貼り付ける。音楽なら現在位置から鳴らす。</summary>
     public void Paste()
     {
+        if (_musicClipboard is { } music)
+        {
+            var copy = music.Clone(newId: true);
+            copy.StartSeconds = Math.Round(Project.FrameToSeconds(_session.CurrentFrame), 3);
+            Change("貼り付け", b => b.Music.Add(copy));
+            Select(copy.Id);
+            return;
+        }
         if (_clipboard.Count == 0) return;
         AddClips(_clipboard.Select(c => c.Clone(newId: true)).ToList(), description: "貼り付け");
+    }
+
+    // ---------------- 端のドラッグ (長さを変える) ----------------
+
+    /// <summary>
+    /// クリップの長さを、元の設定 (original) から変える。startDelta はクリップの始まりを削る長さ、
+    /// endDelta は終わりを伸ばす長さ (どちらも画面の上の秒、負なら逆向き)。ドラッグ中は何度も呼んでよい (いつも original から計算する)。
+    /// </summary>
+    public void ResizeClip(string id, StoryClip original, double startDelta, double endDelta, string? mergeKey = null)
+    {
+        if (Board?.FindClip(id) == null) return;
+        UpdateClip(id, startDelta != 0 ? "開始位置の設定" : "終了位置の設定", c =>
+        {
+            if (c.Kind == StoryClipKind.Video)
+            {
+                double speed = original.EffectiveSpeed, min = StoryClip.MinSeconds * speed;
+                double end = original.EffectiveTrimEnd > 0 ? original.EffectiveTrimEnd : original.TrimStart + original.Seconds * speed;
+                double start = Math.Clamp(original.TrimStart + startDelta * speed, 0, Math.Max(0, end - min));
+                double newEnd = end + endDelta * speed;
+                if (original.SourceSeconds > 0) newEnd = Math.Min(newEnd, original.SourceSeconds);
+                c.TrimStart = Math.Round(start, 3);
+                c.TrimEnd = Math.Round(Math.Max(start + min, newEnd), 3);
+            }
+            else c.Duration = Math.Round(Math.Max(StoryClip.MinSeconds, original.Duration - startDelta + endDelta), 3);
+        }, mergeKey);
+    }
+
+    /// <summary>
+    /// 音楽の使う範囲を、元の設定 (original) から変える。始まりを削ると、残った音が同じ時刻に鳴るように鳴らし始めもずらす。
+    /// </summary>
+    public void ResizeMusic(string id, MusicClip original, double startDelta, double endDelta, string? mergeKey = null)
+    {
+        if (Board?.FindMusic(id) == null) return;
+        UpdateMusic(id, "音楽の範囲", m =>
+        {
+            double end = original.EffectiveTrimEnd > 0 ? original.EffectiveTrimEnd : original.TrimStart + original.Seconds;
+            // 始まりは、素材の先頭と作品の先頭より前には出せない
+            double d = Math.Max(startDelta, -Math.Min(original.TrimStart, original.StartSeconds));
+            double start = Math.Min(original.TrimStart + d, end - StoryClip.MinSeconds);
+            m.TrimStart = Math.Round(start, 3);
+            m.StartSeconds = Math.Round(original.StartSeconds + (start - original.TrimStart), 3);
+            double newEnd = end + endDelta;
+            if (original.SourceSeconds > 0) newEnd = Math.Min(newEnd, original.SourceSeconds);
+            m.TrimEnd = Math.Round(Math.Max(start + StoryClip.MinSeconds, newEnd), 3);
+        }, mergeKey);
     }
 
     // ---------------- 位置 ----------------

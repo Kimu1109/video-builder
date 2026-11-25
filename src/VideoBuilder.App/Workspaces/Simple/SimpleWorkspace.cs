@@ -158,10 +158,11 @@ public sealed class SimpleWorkspace : IWorkspace
 
     public IEnumerable<object> BuildEditMenu(IShell shell) => new object[]
     {
-        shell.Track(Menus.Item("切り取り", "Cut", Cut, Shortcuts.First("edit.cut")), ClipSelected),
-        shell.Track(Menus.Item("コピー", "Copy", Copy, Shortcuts.First("edit.copy")), ClipSelected),
+        shell.Track(Menus.Item("切り取り", "Cut", Cut, Shortcuts.First("edit.cut")), Selected),
+        shell.Track(Menus.Item("コピー", "Copy", Copy, Shortcuts.First("edit.copy")), Selected),
         shell.Track(Menus.Item("貼り付け", "Paste", Paste, Shortcuts.First("edit.paste")), () => CanPaste),
         shell.Track(Menus.Item("削除", "Delete", Delete, Shortcuts.First("edit.delete")), Selected),
+        shell.Track(Menus.Item("すべてのクリップを選択", "SelectAll", SelectAll, Shortcuts.First("edit.selectAll")), () => _editor.Board is { Clips.Count: > 0 }),
         Menus.Sep(),
         Menus.Item("現在位置で分割", "Split", Split, Shortcuts.First("edit.split")),
         shell.Track(Menus.Item("開始位置を現在位置に", null, () => TrimAtPlayhead(true), Shortcuts.First("simple.trimStart")), ClipSelected),
@@ -171,6 +172,7 @@ public sealed class SimpleWorkspace : IWorkspace
         Menus.Sep(),
         Menus.Item("ビデオと写真の追加...", "Movie", () => _ = AddVisualsAsync()),
         Menus.Item("タイトルの追加", "Title", AddTitle),
+        Menus.Item("終わりのタイトルの追加", "Title", AddEndTitle),
         Menus.Item("音楽の追加...", "MusicNote", () => _ = AddMusicAsync()),
     };
 
@@ -213,23 +215,26 @@ public sealed class SimpleWorkspace : IWorkspace
                 menu.Items.Add(Menus.Item("現在位置から鳴らす", null, () => _editor.MoveMusicTo(id, project.FrameToSeconds(_session.CurrentFrame))));
                 menu.Items.Add(Menus.Item("先頭から鳴らす", "FirstPage", () => _editor.MoveMusicTo(id, 0)));
                 menu.Items.Add(Menus.Item("鳴らし始めへ移動", null, () => { if (_editor.StartOf(id) is { } start) EditorCommands.Seek(start); }));
+                menu.Items.Add(Menus.Item("ここで分割", "Split", () => _editor.SplitMusicAt(id, frame)));
                 menu.Items.Add(Menus.Sep());
             }
             if (clip)
             {
-                menu.Items.Add(Menus.Item("ここで分割", "Split", () => _editor.SplitAt(frame)));
+                if (!_editor.HasMultipleSelection) menu.Items.Add(Menus.Item("ここで分割", "Split", () => _editor.SplitAt(frame)));
                 menu.Items.Add(Menus.Item("前へ移動", "ChevronLeft", () => _editor.MoveSelected(-1)));
                 menu.Items.Add(Menus.Item("後ろへ移動", "ChevronRight", () => _editor.MoveSelected(1)));
                 menu.Items.Add(Menus.Sep());
-                menu.Items.Add(Menus.Item("切り取り", "Cut", Cut, Shortcuts.First("edit.cut")));
-                menu.Items.Add(Menus.Item("コピー", "Copy", Copy, Shortcuts.First("edit.copy")));
             }
-            menu.Items.Add(Menus.Item("削除", "Delete", () => _editor.Remove(id), Shortcuts.First("edit.delete")));
+            menu.Items.Add(Menus.Item("切り取り", "Cut", Cut, Shortcuts.First("edit.cut")));
+            menu.Items.Add(Menus.Item("コピー", "Copy", Copy, Shortcuts.First("edit.copy")));
+            // 選んでいるもの (いくつも選んでいればそのすべて) を消す
+            menu.Items.Add(Menus.Item("削除", "Delete", () => { if (_editor.IsSelected(id)) Delete(); else _editor.Remove(id); }, Shortcuts.First("edit.delete")));
             menu.Items.Add(Menus.Sep());
         }
         menu.Items.Add(Menus.Item("貼り付け", "Paste", Paste, Shortcuts.First("edit.paste"), CanPaste));
         menu.Items.Add(Menus.Item("ビデオと写真の追加...", "Movie", () => _ = AddVisualsAsync()));
         menu.Items.Add(Menus.Item("タイトルの追加", "Title", AddTitle));
+        menu.Items.Add(Menus.Item("終わりのタイトルの追加", "Title", AddEndTitle));
         menu.Items.Add(Menus.Item("音楽の追加...", "MusicNote", () => _ = AddMusicAsync()));
         menu.Open(Strip);
     }
@@ -280,6 +285,13 @@ public sealed class SimpleWorkspace : IWorkspace
         if (_editor.StartOf(clip.Id) is { } start) EditorCommands.Seek(start);
     }
 
+    private void AddEndTitle()
+    {
+        if (!CanEdit) return;
+        var clip = _editor.AddTitle(L.T("おわり"), atEnd: true);
+        if (_editor.StartOf(clip.Id) is { } start) EditorCommands.Seek(start);
+    }
+
     private void AddCaption()
     {
         if (_editor.SelectedClip is not { Kind: not StoryClipKind.Title } clip) return;
@@ -306,7 +318,7 @@ public sealed class SimpleWorkspace : IWorkspace
     public void Paste() { if (CanEdit) _editor.Paste(); }
     public void Delete() { if (CanEdit) _editor.RemoveSelected(); }
     public void Split() { if (CanEdit) _editor.SplitAt(_session.CurrentFrame); }
-    public void SelectAll() { }
+    public void SelectAll() => _editor.SelectAllClips();
     public void Deselect() => _editor.Select(null);
 
     public Task ImportFilesAsync() => AddFilesFromPickerAsync();

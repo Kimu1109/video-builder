@@ -1476,6 +1476,109 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public void Dragging_a_clip_edge_changes_its_length_in_one_undo()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        ed.AddClips(new[] { ColorTitle("#FF0000", 4), ColorTitle("#00FF00", 4) });
+        ed.Select(null);
+        Pump();
+        var strip = w.Simple.Strip;
+        var span = ed.Layout.Clips[0];
+        double y = StoryboardStrip.ClipTop + 40;
+        var from = strip.TranslatePoint(new Point(strip.FrameToX(span.End + 1) - 2, y), w)!.Value;
+        var to = new Point(from.X - strip.PixelsPerSecond, from.Y);   // 1 秒短く
+        w.MouseDown(from, MouseButton.Left);
+        w.MouseMove(new Point(from.X - 10, from.Y));
+        w.MouseMove(to);
+        w.MouseUp(to, MouseButton.Left);
+        Pump();
+        Assert.Equal(3, ed.Board!.Clips[0].Duration, 1);
+        Assert.Equal(ed.Board.Clips[0].Id, ed.SelectedId);
+        Assert.Equal("#FF0000", ed.Board.Clips[0].Background);   // 並べ替えにはならない
+        Svc.Session.Undo();
+        Assert.Equal(4, ed.Board!.Clips[0].Duration);
+    }
+
+    [AvaloniaFact]
+    public void Ctrl_and_shift_click_select_several_clips_and_the_panel_edits_them_all()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        ed.AddClips(new[] { ColorTitle("#FF0000"), ColorTitle("#00FF00"), ColorTitle("#0000FF"), ColorTitle("#FFFFFF") });
+        ed.Select(null);
+        Pump();
+        var strip = w.Simple.Strip;
+        var layout = ed.Layout;
+        Point At(int i) => strip.TranslatePoint(new Point(strip.FrameToX((layout.Clips[i].Start + layout.Clips[i].End) / 2), StoryboardStrip.ClipTop + 40), w)!.Value;
+        void Click(int i, RawInputModifiers mods)
+        {
+            w.MouseDown(At(i), MouseButton.Left, mods); w.MouseUp(At(i), MouseButton.Left, mods);
+            Pump();
+        }
+
+        Click(0, RawInputModifiers.None);
+        Click(2, RawInputModifiers.Control);
+        Assert.Equal(new[] { ed.Board!.Clips[0].Id, ed.Board.Clips[2].Id }, ed.SelectedClipIds);
+        Assert.Contains(w.Simple.Panel.GetVisualDescendants().OfType<TextBlock>(), t => t.Text == L.Format("{0} 個のクリップを選んでいます", "2"));
+
+        // 見た目を選ぶと、選んでいる 2 つに付く
+        var look = w.Simple.Panel.GetVisualDescendants().OfType<ComboBox>().Single(c => c.ItemsSource is string[] items && items.Contains("セピア"));
+        look.SelectedIndex = Array.IndexOf(ClipPanel.Looks, "セピア");
+        Pump();
+        Assert.Equal(new[] { ClipLook.Sepia, ClipLook.None, ClipLook.Sepia, ClipLook.None }, ed.Board!.Clips.Select(c => c.Look));
+
+        Click(3, RawInputModifiers.Shift);   // 主に選んでいる 2 つ目 (番号 2) から 4 つ目まで
+        Assert.Equal(new[] { ed.Board.Clips[2].Id, ed.Board.Clips[3].Id }, ed.SelectedClipIds);
+
+        strip.Focus();
+        w.KeyPressQwerty(PhysicalKey.A, RawInputModifiers.Control);
+        Pump();
+        Assert.Equal(4, ed.SelectedClipIds.Count);
+        w.KeyPressQwerty(PhysicalKey.Delete, RawInputModifiers.None);
+        Pump();
+        Assert.Empty(ed.Board!.Clips);
+        Svc.Session.Undo();
+        Assert.Equal(4, ed.Board!.Clips.Count);
+    }
+
+    [AvaloniaFact]
+    public void Clip_panel_shows_the_new_settings_for_each_kind()
+    {
+        var w = OpenSimple();
+        var ed = Svc.Storyboard;
+        var video = new StoryClip { Kind = StoryClipKind.Video, File = "/v.mp4", SourceSeconds = 10, HasAudio = true, Speed = 2, Caption = "c" };
+        var photo = new StoryClip { Kind = StoryClipKind.Photo, File = "/p.png", Duration = 3 };
+        ed.AddClips(new[] { video, photo, ColorTitle("#000000") });
+        ed.AddMusic(new MusicClip { File = "/m.wav", SourceSeconds = 3 });
+        Pump();
+        List<string?> Checks() => w.Simple.Panel.GetVisualDescendants().OfType<CheckBox>().Select(c => c.Content as string).ToList();
+
+        ed.Select(video.Id); Pump();
+        Assert.Contains("音の高さを変えない", Checks());
+        Assert.Contains("後ろに帯を敷く (読みやすくする)", Checks());
+        Assert.Contains("画面いっぱいに広げる (はみ出た所は切れる)", Checks());
+        var keep = w.Simple.Panel.GetVisualDescendants().OfType<CheckBox>().Single(c => (string?)c.Content == "音の高さを変えない");
+        keep.IsChecked = true;
+        Pump();
+        Assert.True(ed.Board!.FindClip(video.Id)!.KeepPitch);
+
+        ed.Select(ed.Board.Clips[2].Id); Pump();
+        Assert.Contains(w.Simple.Panel.GetVisualDescendants().OfType<ComboBox>(), c => c.ItemsSource is string[] items && items.Contains("下から上へ流す (エンドロール)"));
+
+        ed.Select(ed.Board.Music[0].Id); Pump();
+        Assert.Contains("繰り返して、映像の終わりまで鳴らす", Checks());
+        Assert.Contains("動画の音声が鳴っている間は小さくする", Checks());
+
+        ed.Select(null); Pump();
+        var fade = w.Simple.Panel.GetVisualDescendants().OfType<CheckBox>().Single(c => (string?)c.Content == "最後に黒い画面へフェードアウト");
+        fade.IsChecked = true;
+        Pump();
+        Assert.True(ed.Board!.EndFadeSeconds > 0);
+        Assert.True(ed.CanEdit);
+    }
+
+    [AvaloniaFact]
     public void Speed_is_chosen_in_the_clip_panel_for_videos_only()
     {
         var w = OpenSimple();
