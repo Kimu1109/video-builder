@@ -74,6 +74,7 @@ public unsafe class GpuShaderTests
         { "filter.displace", "mode,param1,size,feather", new double[] { 1, 60, 120, 40 } },   // 拡大
         { "filter.displace", "mode,param1,size,feather", new double[] { 2, 45, 120, 40 } },   // 回転
         { "filter.kaleido", "count,rotation", new double[] { 3, 20 } },
+        { "filter.glow", "threshold,shape,radius", new double[] { 40, 1, 6 } },     // 十字の光の筋 (方向ブラーを 2 回)
     };
 
     [Theory]

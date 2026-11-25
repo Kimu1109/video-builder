@@ -104,11 +104,20 @@ public static partial class Effects
                     bool vertical = angle != 0;
                     int pp = a.IsFrameBuffer ? 0 : (int)MathF.Ceiling(len / 2) + 1;
                     // 同じぼかしを 2 回かけて、筋の先を細く消えるようにする (箱形のままだと端がはっきり切れる)
-                    var streak = Resample(bright, a, vertical ? 0 : pp, vertical ? pp : 0, (src, tmp, w, h, rb) =>
+                    Sprite? streak;
+                    if (a.Context.Gpu != null && DirectionalBlurSprite(bright, a, vertical ? 0 : pp, vertical ? pp : 0, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer) is { } once)
                     {
-                        var r1 = PixelFx.DirectionalBlur(src, tmp, w, h, rb, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
-                        return PixelFx.DirectionalBlur(r1, r1 == src ? tmp : src, w, h, rb, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
-                    });
+                        // GPU 描画: SkSL のまま 2 回目もかける (余白は 1 回目で付いている。読み戻さない)
+                        streak = DirectionalBlurSprite(once, a, 0, 0, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
+                    }
+                    else
+                    {
+                        streak = Resample(bright, a, vertical ? 0 : pp, vertical ? pp : 0, (src, tmp, w, h, rb) =>
+                        {
+                            var r1 = PixelFx.DirectionalBlur(src, tmp, w, h, rb, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
+                            return PixelFx.DirectionalBlur(r1, r1 == src ? tmp : src, w, h, rb, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
+                        });
+                    }
                     if (streak is { } st) glows.Add(st);
                 }
                 // 筋は細く伸ばすぶん暗くなるので、明るさを足す
