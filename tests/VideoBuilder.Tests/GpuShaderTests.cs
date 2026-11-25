@@ -42,8 +42,33 @@ public unsafe class GpuShaderTests
         ObjectFactory.AddFilter(o, "filter.gradient").Tracks["strength"] = new AnimatedValue(70);
         var e = ObjectFactory.AddFilter(o, id);
         var names = keys.Length == 0 ? Array.Empty<string>() : keys.Split(',');
-        for (int i = 0; i < names.Length; i++) Set(e, names[i], values[i]);
+        for (int i = 0; i < names.Length; i++)
+        {
+            // "名前:値" は文字の値 (色など)。values の同じ位置は使わない
+            if (names[i].Split(':') is [var key, var text]) e.Values[key] = text;
+            else Set(e, names[i], values[i]);
+        }
+        if (id == "filter.lut") e.Values["file"] = CubeFile();
         return (p, e);
+    }
+
+    private static string? _cube;
+
+    /// <summary>テスト用の 3D LUT (.cube)。色を少し入れ替えて、暖かくする。</summary>
+    private static string CubeFile()
+    {
+        if (_cube != null && File.Exists(_cube)) return _cube;
+        var path = Path.Combine(Path.GetTempPath(), $"vb-test-{Environment.ProcessId}.cube");
+        var sb = new System.Text.StringBuilder("LUT_3D_SIZE 9\n");
+        for (int b = 0; b < 9; b++)
+            for (int g = 0; g < 9; g++)
+                for (int r = 0; r < 9; r++)
+                {
+                    float R = r / 8f, G = g / 8f, B = b / 8f;
+                    sb.Append(System.FormattableString.Invariant($"{Math.Min(1, R * 0.9f + G * 0.2f):0.000000} {G * 0.95f:0.000000} {B * 0.7f + R * 0.1f:0.000000}\n"));
+                }
+        File.WriteAllText(path, sb.ToString());
+        return _cube = path;
     }
 
     private static (double Mean, int Max) Compare(SKBitmap a, SKBitmap b)
@@ -75,6 +100,19 @@ public unsafe class GpuShaderTests
         { "filter.displace", "mode,param1,size,feather", new double[] { 2, 45, 120, 40 } },   // 回転
         { "filter.kaleido", "count,rotation", new double[] { 3, 20 } },
         { "filter.glow", "threshold,shape,radius", new double[] { 40, 1, 6 } },     // 十字の光の筋 (方向ブラーを 2 回)
+        { "filter.hueconvert", "from:#10F020,hue,range", new double[] { 0, 90, 40 } },
+        { "filter.colorkey", "color:#10F020,luma,chroma,edge", new double[] { 0, 140, 140, 30 } },
+        { "filter.lumakey", "level,soft", new double[] { 120, 60 } },
+        { "filter.lumakey", "level,soft,type", new double[] { 120, 60, 1 } },
+        { "filter.curves", "p1,p3", new double[] { 100, 160 } },
+        { "filter.curves", "p1,p3,channel", new double[] { 100, 160, 1 } },
+        { "filter.shadowhighlight", "shadows,highlights", new double[] { 40, 30 } },
+        { "filter.gradmap", "strength,useMid", new double[] { 80, 1 } },
+        { "filter.look", "strength,preset", new double[] { 90, 1 } },
+        { "filter.look", "strength,preset", new double[] { 90, 5 } },
+        { "filter.look", "strength,preset", new double[] { 90, 7 } },
+        { "filter.look", "strength,preset", new double[] { 90, 9 } },
+        { "filter.lut", "strength", new double[] { 80 } },
     };
 
     [Theory]

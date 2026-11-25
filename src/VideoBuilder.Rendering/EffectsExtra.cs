@@ -59,7 +59,18 @@ public static partial class Effects
         /// <summary>何もしないなら null を返す。</summary>
         protected abstract Action<IntPtr, int, int, int>? Op(EffectArgs a);
         public void Process(PixelBuffer b, EffectArgs a) => Op(a)?.Invoke(b.Pointer, b.Width, b.Height, b.RowBytes);
-        public Sprite Apply(Sprite s, EffectArgs a) => Op(a) is { } op ? WithPixels(s, a, op, alsoOnGpu: true) ?? s : s;
+
+        /// <summary>
+        /// GPU 描画のとき、SkSL で GPU のまま処理した絵を返す (読み戻さない。設計書 22.54)。
+        /// GPU で処理しない効果・使えないときは null (読み戻して Op で処理する)。何もしない設定なら s を返すこと。
+        /// </summary>
+        protected virtual Sprite? OnGpu(Sprite s, EffectArgs a) => null;
+
+        public Sprite Apply(Sprite s, EffectArgs a)
+        {
+            if (a.Context.Gpu != null && !GpuShadersDisabled && OnGpu(s, a) is { } onGpu) return onGpu;
+            return Op(a) is { } op ? WithPixels(s, a, op, alsoOnGpu: true) ?? s : s;
+        }
     }
 
     // ================= 色・キー =================
@@ -91,6 +102,20 @@ public static partial class Effects
             if (MathF.Abs(shift % 360) < 1e-3f && sat == 1 && val == 1) return null;
             return (px, w, h, rb) => PixelFx.HueConvert(px, w, h, rb, fromHue, range, edge, shift, sat, val);
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            a.Color("from").ToHsv(out float fromHue, out _, out _);
+            a.Color("to").ToHsv(out float toHue, out _, out _);
+            float shift = toHue - fromHue + a.Track("hue");
+            float sat = a.Track("saturation") / 100f, val = a.Track("value") / 100f;
+            if (MathF.Abs(shift % 360) < 1e-3f && sat == 1 && val == 1) return s;
+            return ApplyGpuShader(s, a, HueConvertShader, u =>
+            {
+                u["keyHue"] = fromHue; u["range"] = a.Track("range"); u["edge"] = MathF.Max(0.001f, a.Track("edge"));
+                u["shift"] = shift; u["satScale"] = sat; u["valScale"] = val;
+            });
+        }
     }
 
     /// <summary>カラーキー: 指定の色に近い所 (明るさの差と色の差がそれぞれ範囲内) を透明にする。</summary>
@@ -102,6 +127,16 @@ public static partial class Effects
             var c = a.Color("color");
             float luma = a.Track("luma"), chroma = a.Track("chroma"), edge = Math.Max(0.001f, a.Track("edge") / 100f);
             return (px, w, h, rb) => PixelFx.ColorKey(px, w, h, rb, c.Red, c.Green, c.Blue, luma, chroma, edge);
+        }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            var c = a.Color("color");
+            return ApplyGpuShader(s, a, ColorKeyShader, u =>
+            {
+                u["key"] = new float[] { c.Red, c.Green, c.Blue };
+                u["lumaRange"] = a.Track("luma"); u["chromaRange"] = a.Track("chroma"); u["edge"] = Math.Max(0.001f, a.Track("edge") / 100f);
+            });
         }
     }
 
@@ -115,6 +150,12 @@ public static partial class Effects
             bool bright = a.Effect.GetInt("type") == 1;
             return (px, w, h, rb) => PixelFx.LumaKey(px, w, h, rb, level, soft, bright);
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a) =>
+            ApplyGpuShader(s, a, LumaKeyShader, u =>
+            {
+                u["level"] = a.Track("level"); u["soft"] = MathF.Max(0.5f, a.Track("soft")); u["bright"] = a.Effect.GetInt("type") == 1 ? 1f : 0f;
+            });
     }
 
     // ================= 光 =================

@@ -109,8 +109,10 @@ public static partial class Effects
             float lum = floor((v.r * 54 + v.g * 183 + v.b * 19) / 256);
             if (a < 255) lum = min(255, floor(lum * 255 / a));
             float t = clamp((lum - (threshold - 16)) / 32, 0, 1);
-            float keep = floor(t * t * (3 - 2 * t) * 256 + 0.5) / 256;
-            return c * half(keep);
+            float k = floor(t * t * (3 - 2 * t) * 256 + 0.5);
+            if (k >= 256) return c;
+            // PixelFx.Lerp(0, c, k) と同じ丸め
+            return half4(floor((float4(c) * 255 * k + 128) / 256) / 255);
         }
         """);
 
@@ -486,4 +488,197 @@ public static partial class Effects
     }
 
     private static SKShaderTileMode Tile(bool clamp) => clamp ? SKShaderTileMode.Clamp : SKShaderTileMode.Decal;
+
+    // ---------------- 1 画素ずつの色の処理 ----------------
+
+    /// <summary>
+    /// MapColors (EffectsFilters) と同じ流れの SkSL: アルファを戻した色 c (0〜1) を body で変え、strength の割合で元の色と混ぜ、
+    /// アルファを掛けて 8 ビットに丸める。decls には uniform や関数を書く。
+    /// </summary>
+    private static Sksl MapColorsSksl(string decls, string body) => new($$"""
+        uniform shader image;
+        uniform float strength;
+        {{decls}}
+        float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+        float3 saturate3(float3 c, float k) { float l = luma(c); return l + (c - l) * k; }
+        float smooth01(float t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+        half4 main(float2 p) {
+            half4 px = image.eval(p);
+            float a = floor(float(px.a) * 255 + 0.5);
+            if (a <= 0) return px;
+            float3 c0 = floor(float3(px.rgb) * 255 + 0.5) / a;
+            float3 c = c0;
+            {{body}}
+            if (strength < 1) c = c0 + (c - c0) * strength;
+            return half4(half3(floor(clamp(c, 0, 1) * a + 0.5) / 255), half(a / 255));
+        }
+        """);
+
+    private static Sprite? MapColorsOnGpu(Sprite s, EffectArgs a, Sksl sksl, float strength, Action<SKRuntimeEffectUniforms>? uniforms = null,
+        Action<SKRuntimeEffectChildren>? children = null) =>
+        strength <= 0 ? s : ApplyGpuShader(s, a, sksl, u => { u["strength"] = strength; uniforms?.Invoke(u); }, children == null ? null : (k, _, _) => children(k));
+
+    private static readonly Sksl ShadowHighlightShader = MapColorsSksl("uniform float sh; uniform float hi;", """
+        float l = luma(c);
+        float ws = (1 - l) * (1 - l) * 0.7, wh = l * l * 0.6;
+        c += sh * ws * (1 - c) - hi * wh * c;
+        """);
+
+    private static readonly Sksl GradientMapShader = MapColorsSksl("uniform float3 dark; uniform float3 mid; uniform float3 light; uniform float useMid;", """
+        float l = luma(c);
+        float3 g0 = dark, g1 = light;
+        float t = l;
+        if (useMid > 0) { if (l < 0.5) { g1 = mid; t = l * 2; } else { g0 = mid; t = l * 2 - 1; } }
+        c = (g0 + (g1 - g0) * t) / 255;
+        """);
+
+    private static readonly Sksl LookShader = MapColorsSksl("uniform float preset;", """
+        if (preset == 0) { float l = luma(c); c = float3(l * 1.07 + 0.05, l * 0.88 + 0.02, l * 0.66); }
+        else if (preset == 1) { float t = smooth01(luma(c)); c += float3(-0.08 + 0.2 * t, 0.02, 0.1 - 0.24 * t); c = saturate3(c, 1.1); }
+        else if (preset == 2) { c = saturate3(c, 0.7); c = float3(0.08 + c.r * 0.86 + 0.02, 0.08 + c.g * 0.84, 0.07 + c.b * 0.8); }
+        else if (preset == 3) { c = float3(c.r * 0.9, c.g * 0.98, c.b * 1.06 + 0.03); }
+        else if (preset == 4) { c = float3(c.r * 1.06 + 0.03, c.g, c.b * 0.88); }
+        else if (preset == 5) { float l = smooth01((luma(c) - 0.5) * 1.5 + 0.5); c = float3(l); }
+        else if (preset == 6) { c = saturate3(c, 1.45); c = (c - 0.5) * 1.1 + 0.5; }
+        else if (preset == 7) { c = saturate3(c, 0.45); c = float3(smooth01((c.r - 0.5) * 1.25 + 0.5), smooth01((c.g - 0.5) * 1.25 + 0.5), smooth01((c.b - 0.5) * 1.25 + 0.5)); }
+        else if (preset == 8) { float t = luma(c); c = float3(c.r * 1.1 + 0.06 * t + 0.03, c.g * 0.92, c.b * 0.78 + 0.08 * (1 - t)); }
+        else { c = saturate3(c, 0.45); c = float3(c.r * 0.75, c.g * 0.85, c.b * 1.05 + 0.04); }
+        """);
+
+    // 3D LUT: 横に b の段を並べた 2D の画像 (幅 n*n、高さ n)。SampleCube と同じ 8 点の補間
+    private static readonly Sksl CubeShader = MapColorsSksl("""
+        uniform shader cube;
+        uniform float n;
+        float3 cubeAt(float r, float g, float b) { return float3(cube.eval(float2(r + b * n + 0.5, g + 0.5)).rgb); }
+        """, """
+        float m = n - 1;
+        float3 f = clamp(c, 0, 1) * m;
+        float3 i0 = min(floor(f), m - 1);
+        float3 t = f - i0;
+        float3 acc = float3(0);
+        for (int k = 0; k < 8; k++) {
+            float dr = mod(float(k), 2), dg = mod(floor(float(k) / 2), 2), db = floor(float(k) / 4);
+            float wgt = (dr == 1 ? t.r : 1 - t.r) * (dg == 1 ? t.g : 1 - t.g) * (db == 1 ? t.b : 1 - t.b);
+            acc += cubeAt(i0.r + dr, i0.g + dg, i0.b + db) * wgt;
+        }
+        c = acc;
+        """);
+
+    // トーンカーブ (1 色だけ): 256 個の表 (横 256 の画像の赤)。Map と同じく四捨五入した位置を引く
+    private static readonly Sksl CurveChannelShader = MapColorsSksl("""
+        uniform shader table;
+        uniform float channel;
+        float mapv(float v) { return floor(float(table.eval(float2(clamp(floor(v * 255 + 0.5), 0, 255) + 0.5, 0.5)).r) * 255 + 0.5) / 255; }
+        """, """
+        if (channel == 1) c.r = mapv(c.r); else if (channel == 2) c.g = mapv(c.g); else c.b = mapv(c.b);
+        """);
+
+    /// <summary>3D LUT を GPU の画像 (半精度) にしたもの。LUT ごとに 1 つ作って使い回す。</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<CubeLut, SKImage> CubeImages = new();
+
+    private static SKImage? CubeImage(CubeLut lut)
+    {
+        if (CubeImages.TryGetValue(lut, out var img)) return img;
+        int n = lut.Size;
+        var info = new SKImageInfo(n * n, n, SKColorType.RgbaF32, SKAlphaType.Unpremul);
+        var data = new float[n * n * n * 4];
+        for (int b = 0; b < n; b++)
+            for (int g = 0; g < n; g++)
+                for (int r = 0; r < n; r++)
+                {
+                    int src = ((b * n + g) * n + r) * 3, dst = (g * n * n + b * n + r) * 4;
+                    data[dst] = lut.Data[src]; data[dst + 1] = lut.Data[src + 1]; data[dst + 2] = lut.Data[src + 2]; data[dst + 3] = 1;
+                }
+        unsafe
+        {
+            fixed (float* p = data) img = SKImage.FromPixelCopy(info, (IntPtr)p, n * n * 16);
+        }
+        if (img != null) CubeImages.AddOrUpdate(lut, img);
+        return img;
+    }
+
+    private static readonly Sksl HueConvertShader = new("""
+        uniform shader image;
+        uniform float keyHue;
+        uniform float range;
+        uniform float edge;
+        uniform float shift;
+        uniform float satScale;
+        uniform float valScale;
+        half4 main(float2 p) {
+            half4 px = image.eval(p);
+            float a = floor(float(px.a) * 255 + 0.5);
+            if (a <= 0) return px;
+            float3 c = min(floor(float3(px.rgb) * 255 + 0.5) / a, 1.0);
+            float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b)), d = mx - mn;
+            if (d <= 1e-4) return px;
+            float hue;
+            if (mx == c.r) hue = 60 * ((c.g - c.b) / d);
+            else if (mx == c.g) hue = 60 * ((c.b - c.r) / d + 2);
+            else hue = 60 * ((c.r - c.g) / d + 4);
+            if (hue < 0) hue += 360;
+            float dh = abs(hue - keyHue);
+            if (dh > 180) dh = 360 - dh;
+            float wgt = dh <= range ? 1 : max(0, 1 - (dh - range) / edge);
+            float sat = d / mx;
+            wgt *= clamp(sat * 5, 0, 1);
+            if (wgt <= 0) return px;
+            hue = mod(hue + shift * wgt, 360);
+            sat = clamp(sat * (1 + (satScale - 1) * wgt), 0, 1);
+            float val = clamp(mx * (1 + (valScale - 1) * wgt), 0, 1);
+            // HSV → RGB (PixelFx.HueConvert と同じ)
+            float cc = val * sat, hh = hue / 60, xx = cc * (1 - abs(mod(hh, 2) - 1)), mm = val - cc;
+            float3 n;
+            float sector = floor(hh);
+            if (sector == 0) n = float3(cc, xx, 0);
+            else if (sector == 1) n = float3(xx, cc, 0);
+            else if (sector == 2) n = float3(0, cc, xx);
+            else if (sector == 3) n = float3(0, xx, cc);
+            else if (sector == 4) n = float3(xx, 0, cc);
+            else n = float3(cc, 0, xx);
+            return half4(half3(min(float3(a), floor((n + mm) * a + 0.5)) / 255), px.a);
+        }
+        """);
+
+    private static readonly Sksl ColorKeyShader = new("""
+        uniform shader image;
+        uniform float3 key;      // キー色 (0〜255)
+        uniform float lumaRange;
+        uniform float chromaRange;
+        uniform float edge;
+        half4 main(float2 p) {
+            half4 px = image.eval(p);
+            float a = floor(float(px.a) * 255 + 0.5);
+            if (a <= 0) return px;
+            float4 v = floor(float4(px) * 255 + 0.5);
+            float3 c = min(v.rgb * (255 / a), 255);
+            float ky = 0.299 * key.r + 0.587 * key.g + 0.114 * key.b, kcb = key.b - ky, kcr = key.r - ky;
+            float yy = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b, cb = c.b - yy - kcb, cr = c.r - yy - kcr;
+            float dy = abs(yy - ky), dc = sqrt(cb * cb + cr * cr);
+            float dist = max(lumaRange <= 0 ? (dy > 0.5 ? 2 : 0) : dy / lumaRange, chromaRange <= 0 ? (dc > 0.5 ? 2 : 0) : dc / chromaRange);
+            float keep = clamp((dist - 1) / edge + 1, 0, 1);
+            if (keep >= 1) return px;
+            return half4(floor(v * keep) / 255);
+        }
+        """);
+
+    private static readonly Sksl LumaKeyShader = new("""
+        uniform shader image;
+        uniform float level;
+        uniform float soft;
+        uniform float bright;
+        half4 main(float2 p) {
+            half4 px = image.eval(p);
+            float a = floor(float(px.a) * 255 + 0.5);
+            if (a <= 0) return px;
+            float4 v = floor(float4(px) * 255 + 0.5);
+            float lum = floor((v.r * 54 + v.g * 183 + v.b * 19) / 256);
+            if (a < 255) lum = min(255, floor(lum * 255 / a));
+            float t = clamp((lum - (level - soft / 2)) / soft, 0, 1);
+            t = t * t * (3 - 2 * t);
+            float k = floor((bright > 0 ? 1 - t : t) * 256 + 0.5);
+            if (k >= 256) return px;
+            return half4(floor((v * k + 128) / 256) / 255);
+        }
+        """);
 }

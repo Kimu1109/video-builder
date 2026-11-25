@@ -155,6 +155,16 @@ public static partial class Effects
             if (lut == null || k <= 0) return null;
             return (px, w, h, rb) => MapColors(px, w, h, rb, k, (ref float r, ref float g, ref float b) => SampleCube(lut, ref r, ref g, ref b));
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            var lut = LoadCube(a.Effect.GetString("file"));
+            float k = Math.Clamp(a.Track("strength") / 100f, 0, 1);
+            if (lut == null || k <= 0) return s;
+            if (CubeImage(lut) is not { } cube) return null;
+            using var cubeShader = cube.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+            return MapColorsOnGpu(s, a, CubeShader, k, u => u["n"] = (float)lut.Size, kids => kids["cube"] = cubeShader);
+        }
     }
 
     /// <summary>5 点 (入力 0・64・128・192・255) を通るなめらかな曲線の変換表 (単調な 3 次補間)。</summary>
@@ -205,6 +215,22 @@ public static partial class Effects
                 if (channel == 1) r = Map(r); else if (channel == 2) g = Map(g); else b = Map(b);
             });
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float[] outs = { a.Track("p0"), a.Track("p1"), a.Track("p2"), a.Track("p3"), a.Track("p4") };
+            if (outs[0] == 0 && outs[1] == 64 && outs[2] == 128 && outs[3] == 192 && outs[4] == 255) return s;
+            var lut = CurveLut(outs);
+            int channel = a.Effect.GetInt("channel");
+            // 全部の色: 表のカラーフィルタ (レベル補正と同じ。GPU のまま)
+            if (channel == 0) return ApplyLut(s, a, lut);
+            var px = new byte[256 * 4];
+            for (int i = 0; i < 256; i++) { px[i * 4] = lut[i]; px[i * 4 + 3] = 255; }
+            using var table = SKImage.FromPixelCopy(new SKImageInfo(256, 1, SKColorType.Rgba8888, SKAlphaType.Unpremul), px);
+            if (table == null) return null;
+            using var tableShader = table.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+            return MapColorsOnGpu(s, a, CurveChannelShader, 1, u => u["channel"] = (float)channel, kids => kids["table"] = tableShader);
+        }
     }
 
     /// <summary>色温度・色かぶり: 青 ↔ 黄、緑 ↔ 赤紫の向きに色を寄せる (色の変換なので、ほかの色の変換とまとめて処理される)。</summary>
@@ -238,6 +264,13 @@ public static partial class Effects
                 b += sh * ws * (1 - b) - hi * wh * b;
             });
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float sh = Math.Clamp(a.Track("shadows") / 100f, -1, 1), hi = Math.Clamp(a.Track("highlights") / 100f, -1, 1);
+            if (sh == 0 && hi == 0) return s;
+            return MapColorsOnGpu(s, a, ShadowHighlightShader, 1, u => { u["sh"] = sh; u["hi"] = hi; });
+        }
     }
 
     /// <summary>グラデーションマップ: 明るさに合わせて、暗い所・中間・明るい所の色に置き換える (2 色ならデュオトーン、3 色ならトライトーン)。</summary>
@@ -259,6 +292,18 @@ public static partial class Effects
                 r = (c0.Red + (c1.Red - c0.Red) * t) / 255f;
                 g = (c0.Green + (c1.Green - c0.Green) * t) / 255f;
                 b = (c0.Blue + (c1.Blue - c0.Blue) * t) / 255f;
+            });
+        }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float k = Math.Clamp(a.Track("strength") / 100f, 0, 1);
+            if (k <= 0) return s;
+            var dark = a.Color("dark"); var mid = a.Color("mid"); var light = a.Color("light");
+            return MapColorsOnGpu(s, a, GradientMapShader, k, u =>
+            {
+                u["dark"] = new float[] { dark.Red, dark.Green, dark.Blue }; u["mid"] = new float[] { mid.Red, mid.Green, mid.Blue };
+                u["light"] = new float[] { light.Red, light.Green, light.Blue }; u["useMid"] = a.Check("useMid") ? 1f : 0f;
             });
         }
     }
@@ -318,6 +363,15 @@ public static partial class Effects
                 },
             };
             return (px, w, h, rb) => MapColors(px, w, h, rb, k, f);
+        }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float k = Math.Clamp(a.Track("strength") / 100f, 0, 1);
+            if (k <= 0) return s;
+            int preset = a.Effect.GetInt("preset");
+            // 0〜8 以外 (負の数も) は月明かり (CPU の switch の既定と同じ)
+            return MapColorsOnGpu(s, a, LookShader, k, u => u["preset"] = preset is >= 0 and <= 8 ? preset : 9f);
         }
     }
 
