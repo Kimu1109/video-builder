@@ -424,6 +424,8 @@ public static partial class Effects
             // 行ベクトルの行列なので、列を取り出して 3x3 (行優先) にする
             var r = new[] { m.M11, m.M21, m.M31, m.M12, m.M22, m.M32, m.M13, m.M23, m.M33 };
             float shade = Math.Clamp(a.Track("shade") / 100f, 0, 1);
+            // GPU 描画では SkSL で (読み戻さない。設計書 22.54)
+            if (SphereOnGpu(s, a, d, r, shade) is { } onGpu) return onGpu;
             if (CopyPixels(s) is not { } copy) return s;
             try
             {

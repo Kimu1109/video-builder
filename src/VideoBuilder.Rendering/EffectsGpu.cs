@@ -1943,4 +1943,54 @@ public static partial class Effects
             u["origin"] = new[] { gl, gt }; u["scale"] = scale; u["drift"] = drift; u["level"] = level;
         }, (kids, _, _) => lats.Set(kids));
     }
+    // ---------------- 球体 ----------------
+
+    private static readonly Sksl SphereShader = new(SampleSksl + """
+        uniform float2 src;      // 元の絵の大きさ
+        uniform float size;      // 描く先 (正方形) の一辺
+        uniform float3 m0;       // 画面の向き → 球の向きの回転 (行)
+        uniform float3 m1;
+        uniform float3 m2;
+        uniform float shade;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float R = size / 2, c = (size - 1) / 2;
+            float nx = (q.x - c) / R, ny = (q.y - c) / R;
+            float d2 = nx * nx + ny * ny;
+            float edge = clamp((1 - sqrt(d2)) * R + 0.5, 0, 1);
+            if (edge <= 0) return half4(0);
+            float nz = sqrt(max(0, 1 - d2));   // 手前向き
+            float px = m0.x * nx + m0.y * ny + m0.z * nz;
+            float py = m1.x * nx + m1.y * ny + m1.z * nz;
+            float pz = m2.x * nx + m2.y * ny + m2.z * nz;
+            float u = atan(px, pz) / (2 * 3.14159265) + 0.5;
+            float v = asin(clamp(py, -1, 1)) / 3.14159265 + 0.5;
+            // PixelFx.SampleWrapX と同じ (横は回り込み、縦は端)
+            float x = u * src.x - 0.5, y = clamp(v * (src.y - 1), 0, src.y - 1);
+            x -= floor(x / src.x) * src.x;
+            float fx = floor(x), fy = floor(y);
+            float x0 = fx >= src.x ? 0 : fx;
+            float x1 = x0 + 1 >= src.x ? 0 : x0 + 1, y1 = min(src.y - 1, fy + 1);
+            float tx = floor((x - fx) * 256 + 0.5), ty = floor((y - fy) * 256 + 0.5);
+            float4 col = lerp8(lerp8(fetch(float2(x0, fy)), fetch(float2(x1, fy)), tx), lerp8(fetch(float2(x0, y1)), fetch(float2(x1, y1)), tx), ty);
+            float light = 1 - shade * (1 - nz);
+            // 色だけを暗くする (乗算済みなので、色をアルファ以下に保ったまま)
+            if (light < 1) col.rgb = lerp8(float4(0), col, floor(clamp(light, 0, 1) * 256)).rgb;
+            float a = floor(edge * 256);
+            return out8(a >= 256 ? col : lerp8(float4(0), col, a));
+        }
+        """);
+
+    /// <summary>球体 (PixelFx.Sphere と同じ)。結果は一辺 d の正方形。m は 3x3 の回転 (行優先)。GPU 描画でない・使えないときは null。</summary>
+    internal static Sprite? SphereOnGpu(Sprite s, EffectArgs a, int d, float[] m, float shade)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || SphereShader.Effect is not { } effect) return null;
+        using var image = s.Image.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        var img = RunOnGpu(a, d, d, effect, u =>
+        {
+            u["src"] = new float[] { s.Width, s.Height }; u["size"] = (float)d;
+            u["m0"] = new[] { m[0], m[1], m[2] }; u["m1"] = new[] { m[3], m[4], m[5] }; u["m2"] = new[] { m[6], m[7], m[8] }; u["shade"] = shade;
+        }, kids => kids["image"] = image);
+        return img == null ? null : new Sprite(a.Context.Own(img), d / 2f, d / 2f);
+    }
 }

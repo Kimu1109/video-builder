@@ -190,6 +190,8 @@ public unsafe class GpuShaderTests
         { "filter.transition", "type,in,out,frame:50", new double[] { 82, 0, 1, 0 } }, // 焼けて消える (出る側。縁が燃える)
         { "filter.transition", "type", new double[] { 83 } },                       // フィルム焼け
         { "filter.transition", "type,in,out", new double[] { 65, 0, 2 } },          // ディゾルブ (出る側)
+        { "filter.sphere", "rx,ry,shade", new double[] { 20, 40, 60 } },
+        { "filter.sphere", "size,rz", new double[] { 90, 30 } },
     };
 
     [Theory]
