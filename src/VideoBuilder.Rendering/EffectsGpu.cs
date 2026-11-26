@@ -1626,7 +1626,7 @@ public static partial class Effects
         }
         """);
 
-    /// <summary>EffectsFilters.BoxBlur と同じ箱型のぼかし (端は端の値を繰り返す)。半径は 512 まで。</summary>
+    /// <summary>EffectsFilters.BoxBlur と同じ箱型のぼかし (端は端の値を繰り返す)。半径 512 まで (それより大きいときは BoxBlurChunkShader)。</summary>
     private static readonly Sksl BoxBlur24Shader = new(Val24Sksl + Enc24Sksl + """
         uniform shader src;
         uniform float r;
@@ -1640,6 +1640,37 @@ public static partial class Effects
                 sum += val24(src.eval(p + dir * d));
             }
             return enc24(sum * k);
+        }
+        """);
+
+    /// <summary>
+    /// 半径が 512 より大きい箱型のぼかしの 1 回ぶん (BoxBlur24Shader と同じ結果)。絵の中の範囲 [t - r, t + r] を 1024 個ずつの塊に分け、
+    /// chunk 番目の塊の合計 × k を acc に足す。絵の外 (端の値を繰り返す所) は、chunk 0 で端の値 × 数を足す。
+    /// </summary>
+    private static readonly Sksl BoxBlurChunkShader = new(Val24Sksl + Enc24Sksl + """
+        uniform shader src;
+        uniform shader acc;
+        uniform float r;
+        uniform float k;
+        uniform float n;        // 並びの長さ
+        uniform float2 dir;
+        uniform float chunk;
+        half4 main(float2 p) {
+            float2 q = floor(p);
+            float t = dot(q, dir), other = dot(q, 1 - dir);
+            float a = max(0, t - r), b = min(n - 1, t + r);
+            float o = a + chunk * 1024, e = min(b, o + 1023);
+            float sum = 0;
+            for (int i = 0; i < 1024; i++) {
+                float u = o + float(i);
+                if (u > e) break;
+                sum += val24(src.eval(dir * u + (1 - dir) * other + 0.5));
+            }
+            if (chunk == 0) {
+                sum += max(0, r - t) * val24(src.eval((1 - dir) * other + 0.5));
+                sum += max(0, t + r - (n - 1)) * val24(src.eval(dir * (n - 1) + (1 - dir) * other + 0.5));
+            }
+            return enc24(val24(acc.eval(p)) + sum * k);
         }
         """);
 
@@ -1665,8 +1696,9 @@ public static partial class Effects
     /// <summary>スケッチ (EffectsFilters.Sketch と同じ)。GPU 描画でない・使えないときは null。</summary>
     internal static Sprite? SketchOnGpu(Sprite s, EffectArgs a, float strength, bool color, SKColor paper, int radius)
     {
-        if (a.Context.Gpu == null || GpuShadersDisabled || radius > 512) return null;
-        if (SketchLumShader.Effect is not { } lumFx || BoxBlur24Shader.Effect is not { } blurFx || SketchShader.Effect == null) return null;
+        if (a.Context.Gpu == null || GpuShadersDisabled) return null;
+        if (SketchLumShader.Effect is not { } lumFx || BoxBlur24Shader.Effect is not { } blurFx || BoxBlurChunkShader.Effect is not { } chunkFx
+            || SketchShader.Effect == null) return null;
         int w = s.Width, h = s.Height;
         SKImage? cur;
         SKShader? invShader = null;
@@ -1678,10 +1710,27 @@ public static partial class Effects
             {
                 using var src = cur.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
                 bool horizontal = pass % 2 == 0;
-                var next = RunOnGpu(a, w, h, blurFx, u =>
+                var dir = horizontal ? new float[] { 1, 0 } : new float[] { 0, 1 };
+                SKImage? next;
+                if (radius <= 512)
+                    next = RunOnGpu(a, w, h, blurFx, u => { u["r"] = (float)radius; u["dir"] = dir; u["k"] = 1f / (2 * radius + 1); }, kids => kids["src"] = src);
+                else
                 {
-                    u["r"] = (float)radius; u["dir"] = horizontal ? new float[] { 1, 0 } : new float[] { 0, 1 }; u["k"] = 1f / (2 * radius + 1);
-                }, kids => kids["src"] = src);
+                    // 大きな半径: 絵の中の範囲を 1024 個ずつの塊に分けて、順に足す (ぼかしの半径に上限がない)
+                    int n = horizontal ? w : h, chunks = (Math.Min(2 * radius + 1, n) + 1023) / 1024;
+                    next = ValueImage(1, 1, (_, _) => 0);
+                    for (int c = 0; c < chunks && next != null; c++)
+                    {
+                        using var accShader = next.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+                        float chunk = c;
+                        var sum = RunOnGpu(a, w, h, chunkFx, u =>
+                        {
+                            u["r"] = (float)radius; u["k"] = 1f / (2 * radius + 1); u["n"] = (float)n; u["dir"] = dir; u["chunk"] = chunk;
+                        }, kids => { kids["src"] = src; kids["acc"] = accShader; });
+                        next.Dispose();
+                        next = sum;
+                    }
+                }
                 cur.Dispose();
                 cur = next;
             }
@@ -2498,68 +2547,176 @@ public static partial class Effects
         finally { foreach (var d in owned) d.Dispose(); }
     }
     // ---------------- 油絵・水彩 (大きな筆) ----------------
+    //
+    // 区画 (左上・右上・左下・右下) の合計を、総和の表 (左上からの累積和) 4 か所の足し引きで求める (筆の大きさに上限がない)。
+    // 足す量は R・G・B と、(明るさ - 128)² × 64 を四捨五入した整数 Q (20 ビット) の 256 進の 3 桁 (どれも 0〜255)。
+    // 累積和は最大 16384² × 255 で 24 ビットを超えるので、4096 単位の上位と下位の 2 枚に分けて持つ (どの途中の値も 2^24 未満の整数)。
+    // 作り方: 横の累積和 (32 個ずつの塊の合計 → 塊の累積和 → 塊の中を足す。1 行の合計は 16384 × 255 で 24 ビットに収まる)、
+    // それを縦に同じように累積する (こちらは上位・下位に分ける)。
 
-    /// <summary>BigPaintOnGpu で扱う筆の大きさの上限 (縦に読むループの大きさの都合。128 回は通る)。</summary>
-    private const int MaxBigPaintRadius = 127;
+    // 足す量 (量の番号 q: 0〜2 = R・G・B、3〜5 = Q の 3 桁 (256 進)。どれも 0〜255)。子 image を読む
+    private const string PaintValueSksl = """
+        float pv(float4 c, float q) {
+            if (q < 3) return q == 0 ? c.r : q == 1 ? c.g : c.b;
+            float l = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+            float v = min(1048575, floor((l - 128) * (l - 128) * 64 + 0.5)), va = floor(v / 65536), vb = floor((v - va * 65536) / 256);
+            return q == 3 ? va : q == 4 ? vb : v - va * 65536 - vb * 256;
+        }
+        float4 px8(float2 q) { return floor(float4(image.eval(q)) * 255 + 0.5); }
+        """;
 
-    // 横の区画の合計: side 0 = 左 [x - r, x]、1 = 右 [x, x + r] (絵の外は数えない)。
-    // what: 0〜2 = R・G・B、3 = (明るさ - 128)² × 8 を四捨五入した整数 (どれも合計が 24 ビットに収まる)
-    private static readonly Sksl PaintRowShader = new(Enc24Sksl + """
+    // 横の塊 (32 個) の合計: 出力 (bx, y)
+    private static readonly Sksl PaintRowBlockShader = new(Enc24Sksl + """
         uniform shader image;
-        uniform float r;
-        uniform float width;
-        uniform float side;
-        uniform float what;
+        uniform float w;
+        uniform float q;
+        """ + PaintValueSksl + """
         half4 main(float2 p) {
-            float2 q = p - 0.5;
-            float x0 = side == 0 ? max(0, q.x - r) : q.x, x1 = side == 0 ? q.x : min(width - 1, q.x + r);
+            float2 c = floor(p);
             float sum = 0;
-            for (int i = 0; i < 128; i++) {
-                float x = x0 + float(i);
-                if (x > x1) break;
-                float3 c = floor(float3(image.eval(float2(x, q.y) + 0.5).rgb) * 255 + 0.5);
-                float l = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
-                sum += what == 0 ? c.r : what == 1 ? c.g : what == 2 ? c.b : floor((l - 128) * (l - 128) * 8 + 0.5);
+            for (int i = 0; i < 32; i++) {
+                float x = c.x * 32 + float(i);
+                if (x >= w) break;
+                sum += pv(px8(float2(x, c.y) + 0.5), q);
             }
             return enc24(sum / 16777216);
         }
         """);
 
-    private static readonly Sksl BigPaintShader = new(Val24Sksl + """
+    // 累積 (自分より前の塊の合計)。axis の向きに、塊の画像 src を 0〜index - 1 まで足す。
+    // 2 枚 (上位 hiSrc・下位 loSrc) を足して、part 0 = 下位をそのまま、1 = 上位、2 = 下位 (4096 未満)
+    private static Sksl PaintPrefixOf(string output) => new(Val24Sksl + Enc24Sksl + $$"""
+
+        uniform shader hiSrc;
+        uniform shader loSrc;
+        uniform float2 axis;
+        half4 main(float2 p) {
+            float2 c = floor(p);
+            float idx = dot(c, axis), other = dot(c, 1 - axis), sh = 0, sl = 0;
+            for (int i = 0; i < 513; i++) {
+                float t = float(i);
+                if (t >= idx) break;
+                float2 q = axis * t + (1 - axis) * other + 0.5;
+                sh += idx24(hiSrc.eval(q));
+                sl += idx24(loSrc.eval(q));
+            }
+            float carry = floor(sl / 4096);
+            {{output}}
+        }
+        """);
+
+    private static readonly Sksl PaintPrefixPlainShader = PaintPrefixOf("return enc24(sl / 16777216);");
+    private static readonly Sksl PaintPrefixHiShader = PaintPrefixOf("return enc24((sh + carry) / 16777216);");
+    private static readonly Sksl PaintPrefixLoShader = PaintPrefixOf("return enc24((sl - carry * 4096) / 16777216);");
+
+    // 横の累積和 P(x, y) = 塊の累積 + 塊の中の x までの合計 (最大 16384 × 255)
+    private static readonly Sksl PaintRowPrefixShader = new(Val24Sksl + Enc24Sksl + """
         uniform shader image;
-        uniform shader l0; uniform shader l1; uniform shader l2; uniform shader l3;
-        uniform shader r0; uniform shader r1; uniform shader r2; uniform shader r3;
+        uniform shader blocks;  // 塊の累積 (横 bx, 縦 y)
+        uniform float q;
+        """ + PaintValueSksl + """
+        half4 main(float2 p) {
+            float2 c = floor(p);
+            float bx = floor(c.x / 32);
+            float sum = idx24(blocks.eval(float2(bx, c.y) + 0.5));
+            for (int i = 0; i < 32; i++) {
+                float x = bx * 32 + float(i);
+                if (x > c.x) break;
+                sum += pv(px8(float2(x, c.y) + 0.5), q);
+            }
+            return enc24(sum / 16777216);
+        }
+        """);
+
+    // 縦: 横の累積和 rows を、上から 32 行ずつの塊で合計 (block = 1) するか、塊の累積 (prefix) に塊の中の y までを足す (block = 0)。
+    // part 1 = 上位、2 = 下位
+    private static readonly Sksl PaintColumnShader = new(Val24Sksl + Enc24Sksl + """
+        uniform shader rows;
+        uniform shader prefixHi;
+        uniform shader prefixLo;
+        uniform float h;
+        uniform float block;
+        uniform float part;
+        half4 main(float2 p) {
+            float2 c = floor(p);
+            float by = block > 0 ? c.y : floor(c.y / 32);
+            float last = block > 0 ? min(h - 1, by * 32 + 31) : c.y;
+            float sh = block > 0 ? 0 : idx24(prefixHi.eval(float2(c.x, by) + 0.5));
+            float sl = block > 0 ? 0 : idx24(prefixLo.eval(float2(c.x, by) + 0.5));
+            for (int i = 0; i < 32; i++) {
+                float y = by * 32 + float(i);
+                if (y > last) break;
+                float v = idx24(rows.eval(float2(c.x, y) + 0.5)), vh = floor(v / 4096);
+                sh += vh;
+                sl += v - vh * 4096;
+            }
+            float carry = floor(sl / 4096);
+            return enc24((part == 1 ? sh + carry : sl - carry * 4096) / 16777216);
+        }
+        """);
+
+    private static readonly Sksl SatPaintShader = new(Val24Sksl + """
+        uniform shader image;
         uniform float r;
         uniform float2 size;
         uniform float water;
-        """ + VNoiseSksl(1) + """
+        """ + VNoiseSksl(1) + string.Concat(Enumerable.Range(0, 6).Select(k => $$"""
+
+        uniform shader sh{{k}};
+        uniform shader sl{{k}};
+        // 総和の表の (x, y) (どちらかが -1 なら 0)。上位・下位
+        float2 at{{k}}(float x, float y) {
+            if (x < 0 || y < 0) return float2(0);
+            float2 q = float2(x, y) + 0.5;
+            return float2(idx24(sh{{k}}.eval(q)), idx24(sl{{k}}.eval(q)));
+        }
+        // 長方形 [x0, x1] × [y0, y1] の合計 (上位・下位。下位は 4096 以上・負にもなりうる)
+        float2 rect{{k}}(float x0, float x1, float y0, float y1) {
+            return at{{k}}(x1, y1) - at{{k}}(x0 - 1, y1) - at{{k}}(x1, y0 - 1) + at{{k}}(x0 - 1, y0 - 1);
+        }
+        """)) + """
+
         float lum(float3 c) { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
-        float4 L(float2 q) { return float4(idx24(l0.eval(q)), idx24(l1.eval(q)), idx24(l2.eval(q)), idx24(l3.eval(q))); }
-        float4 R(float2 q) { return float4(idx24(r0.eval(q)), idx24(r1.eval(q)), idx24(r2.eval(q)), idx24(r3.eval(q))); }
+        // 画素の数 a × b を、上位 (4096 単位)・下位に分ける
+        float2 count(float a, float b) {
+            float ah = floor(a / 64), al = a - ah * 64;
+            float u = ah * b, t = al * b;
+            float uh = floor(u / 64);
+            float r = (u - uh * 64) * 64 + t;
+            float rh = floor(r / 4096);
+            return float2(uh + rh, r - rh * 4096);
+        }
+        // (hi × 4096 + lo) / n を、商は正確に (整数の差で直す)、端数は浮動小数点で
+        float meanHL(float2 v, float2 n) {
+            float q = floor((v.x * 4096 + v.y) / (n.x * 4096 + n.y));
+            for (int i = 0; i < 3; i++) {
+                float d = (v.x - q * n.x) * 4096 + (v.y - q * n.y);
+                float e = (v.x - (q + 1) * n.x) * 4096 + (v.y - (q + 1) * n.y);
+                if (d < 0) q -= 1; else if (e >= 0) q += 1;
+            }
+            float rem = (v.x - q * n.x) * 4096 + (v.y - q * n.y);
+            return q + rem / (n.x * 4096 + n.y);
+        }
         half4 main(float2 p) {
             float2 q = p - 0.5;
             float al = floor(float(image.eval(p).a) * 255 + 0.5);
             if (al == 0) return half4(0);
-            // 4 つの区画 (左上・右上・左下・右下) の合計 = 横の区画の合計を、上下 r 行ぶん足したもの
-            float4 s0 = float4(0), s1 = float4(0), s2 = float4(0), s3 = float4(0);
-            for (int i = 0; i < 128; i++) {
-                float d = float(i);
-                if (d > r) break;
-                float yt = q.y - d, yb = q.y + d;
-                if (yt >= 0) { s0 += L(float2(p.x, yt + 0.5)); s1 += R(float2(p.x, yt + 0.5)); }
-                if (yb < size.y) { s2 += L(float2(p.x, yb + 0.5)); s3 += R(float2(p.x, yb + 0.5)); }
-            }
-            float wl = q.x - max(0, q.x - r) + 1, wr = min(size.x - 1, q.x + r) - q.x + 1;
-            float ht = q.y - max(0, q.y - r) + 1, hb = min(size.y - 1, q.y + r) - q.y + 1;
+            float x0 = max(0, q.x - r), x1 = min(size.x - 1, q.x + r), y0 = max(0, q.y - r), y1 = min(size.y - 1, q.y + r);
             float best = 1e30;
             float3 bc = float3(0);
             for (int k = 0; k < 4; k++) {
-                float4 sk = k == 0 ? s0 : k == 1 ? s1 : k == 2 ? s2 : s3;
-                float n = (mod(float(k), 2) == 0 ? wl : wr) * (k < 2 ? ht : hb);
-                float3 m = sk.rgb / n;
+                // 区画 k: 横は左 [x0, x] か右 [x, x1]、縦は上 [y0, y] か下 [y, y1]
+                bool right = mod(float(k), 2) == 1, bottom = k >= 2;
+                float ax = right ? q.x : x0, bx = right ? x1 : q.x, ay = bottom ? q.y : y0, by = bottom ? y1 : q.y;
+                float2 n = count(bx - ax + 1, by - ay + 1);
+                float3 m = float3(meanHL(rect0(ax, bx, ay, by), n), meanHL(rect1(ax, bx, ay, by), n), meanHL(rect2(ax, bx, ay, by), n));
+                // (明るさ - 128)² の平均 = Q の平均 / 64
+                float eq = (meanHL(rect3(ax, bx, ay, by), n) * 65536 + meanHL(rect4(ax, bx, ay, by), n) * 256 + meanHL(rect5(ax, bx, ay, by), n)) / 64;
                 float dm = lum(m) - 128;
-                // ばらつき = (明るさ - 128)² の平均 - (平均の明るさ - 128)²
-                float variance = sk.a / 8 / n - dm * dm;
+                float variance = eq - dm * dm;
+                // Q をまるめた分 (1/128 まで) の差は 0 とみなす。一色の区画のばらつきが色によって ±1/128 ずれると、
+                // 一色の区画どうし (CPU ではばらつき 0 で並ぶ) で選ぶ区画が CPU と変わるため
+                if (abs(variance) < 1.0 / 128) variance = 0;
                 if (variance < best) { best = variance; bc = m; }
             }
             if (water > 0) {
@@ -2572,41 +2729,72 @@ public static partial class Effects
         """);
 
     /// <summary>
-    /// 大きな筆の油絵・水彩。区画の合計を、横の合計 (左右 8 枚の画像) → 縦に足す、の 2 段で求める。
-    /// ばらつきの 2 乗の和は整数にまるめる (1/8 の単位) ので、ばらつきがほぼ同じ区画どうしは CPU と違う区画を選ぶことがある。
+    /// 大きな筆の油絵・水彩 (筆の大きさに上限はない)。区画の合計を総和の表で求める。ばらつきの 2 乗の和は 1/64 の単位にまるめるので、
+    /// ばらつきがほぼ同じ区画どうしは CPU と違う区画を選ぶことがある。
     /// </summary>
     private static Sprite? BigPaintOnGpu(Sprite s, EffectArgs a, int radius, bool water, uint noiseSeed)
     {
-        if (radius > MaxBigPaintRadius || PaintRowShader.Effect is not { } rowFx || BigPaintShader.Effect == null) return null;
-        int w = s.Width, h = s.Height;
+        if (PaintRowBlockShader.Effect is not { } blockFx || PaintPrefixPlainShader.Effect is not { } plainFx || PaintPrefixHiShader.Effect is not { } hiFx
+            || PaintPrefixLoShader.Effect is not { } loFx || PaintRowPrefixShader.Effect is not { } rowFx || PaintColumnShader.Effect is not { } colFx
+            || SatPaintShader.Effect == null) return null;
+        int w = s.Width, h = s.Height, nbx = (w + 31) / 32, nby = (h + 31) / 32;
         var owned = new List<IDisposable>();
         try
         {
+            SKShader? Run(int ow, int oh, SKRuntimeEffect fx, Action<SKRuntimeEffectUniforms> uniforms, Action<SKRuntimeEffectChildren> children)
+            {
+                var img = RunOnGpu(a, ow, oh, fx, uniforms, children);
+                if (img == null) return null;
+                owned.Add(img);
+                var sh2 = img.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+                owned.Add(sh2);
+                return sh2;
+            }
             var image = s.Image.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
             owned.Add(image);
-            var rows = new SKShader[8];
-            for (int side = 0; side < 2; side++)
-                for (int what = 0; what < 4; what++)
-                {
-                    float sd = side, wt = what;
-                    var img = RunOnGpu(a, w, h, rowFx, u => { u["r"] = (float)radius; u["width"] = (float)w; u["side"] = sd; u["what"] = wt; }, k => k["image"] = image);
-                    if (img == null) return null;
-                    owned.Add(img);
-                    rows[side * 4 + what] = img.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
-                    owned.Add(rows[side * 4 + what]);
-                }
+            var zeroImg = ValueImage(1, 1, (_, _) => 0);
+            if (zeroImg == null) return null;
+            owned.Add(zeroImg);
+            var zero = zeroImg.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+            owned.Add(zero);
+            var sat = new SKShader[12];
+            for (int k = 0; k < 6; k++)
+            {
+                float qk = k;
+                // 横の累積和
+                var blocks = Run(nbx, h, blockFx, u => { u["w"] = (float)w; u["q"] = qk; }, kids => kids["image"] = image);
+                if (blocks == null) return null;
+                var blockPrefix = Run(nbx, h, plainFx, u => u["axis"] = new float[] { 1, 0 }, kids => { kids["hiSrc"] = zero; kids["loSrc"] = blocks; });
+                if (blockPrefix == null) return null;
+                var rows = Run(w, h, rowFx, u => u["q"] = qk, kids => { kids["image"] = image; kids["blocks"] = blockPrefix; });
+                if (rows == null) return null;
+                // 縦: 32 行ずつの塊の合計 → 塊の累積 → 塊の中を足す (上位・下位)
+                SKShader? Column(int oh, bool block, int part, SKShader prefixHi, SKShader prefixLo) =>
+                    Run(w, oh, colFx, u => { u["h"] = (float)h; u["block"] = block ? 1f : 0f; u["part"] = (float)part; },
+                        kids => { kids["rows"] = rows; kids["prefixHi"] = prefixHi; kids["prefixLo"] = prefixLo; });
+                var cbHi = Column(nby, true, 1, zero, zero);
+                var cbLo = Column(nby, true, 2, zero, zero);
+                if (cbHi == null || cbLo == null) return null;
+                var cpHi = Run(w, nby, hiFx, u => u["axis"] = new float[] { 0, 1 }, kids => { kids["hiSrc"] = cbHi; kids["loSrc"] = cbLo; });
+                var cpLo = Run(w, nby, loFx, u => u["axis"] = new float[] { 0, 1 }, kids => { kids["hiSrc"] = cbHi; kids["loSrc"] = cbLo; });
+                if (cpHi == null || cpLo == null) return null;
+                var satHi = Column(h, false, 1, cpHi, cpLo);
+                var satLo = Column(h, false, 2, cpHi, cpLo);
+                if (satHi == null || satLo == null) return null;
+                sat[k * 2] = satHi; sat[k * 2 + 1] = satLo;
+            }
             var lats = new Lattices();
             owned.Add(lats);
             lats.Add(water ? LatticeImage(0, (w - 1) * 0.08f, 0, (h - 1) * 0.08f, noiseSeed) : (ValueImage(1, 1, (_, _) => 0), 0, 0));
             if (lats.Failed) return null;
-            return ApplyGpuShader(s, a, BigPaintShader, u =>
+            return ApplyGpuShader(s, a, SatPaintShader, u =>
             {
                 lats.Set(u);
                 u["r"] = (float)radius; u["size"] = new float[] { w, h }; u["water"] = water ? 1f : 0f;
             }, (kids, _, _) =>
             {
                 lats.Set(kids);
-                for (int c = 0; c < 4; c++) { kids["l" + c] = rows[c]; kids["r" + c] = rows[4 + c]; }
+                for (int k = 0; k < 6; k++) { kids["sh" + k] = sat[k * 2]; kids["sl" + k] = sat[k * 2 + 1]; }
             });
         }
         finally { foreach (var d in owned) d.Dispose(); }

@@ -253,6 +253,68 @@ public unsafe class GpuShaderTests
         finally { ctx.DisposeTemporaries(); }
     }
 
+    /// <summary>
+    /// 筆・ぼかしがとても大きいとき (絵の倍率 Scale が小さいと、筆の大きさ ÷ Scale が大きくなる)。上限なしに GPU で処理し、
+    /// 以前の描き方 (読み戻して CPU で処理) と同じ絵になることを確かめる。
+    /// </summary>
+    [Theory]
+    [InlineData("filter.paint", "type,radius", new double[] { 0, 20 }, 0.1)]      // 筆 200
+    [InlineData("filter.paint", "type,radius", new double[] { 1, 30 }, 0.05)]     // 筆 600 (水彩)
+    [InlineData("filter.paint", "type,radius", new double[] { 0, 30 }, 0.01)]     // 筆 3000 (絵より大きい)
+    [InlineData("filter.paint", "type,radius", new double[] { 0, 9 }, 0.5)]       // 筆 18
+    [InlineData("filter.paint", "type,radius", new double[] { 0, 15 }, 1.0)]      // 筆 15 (1 回の描画で処理する大きさ。比べる用)
+    [InlineData("filter.paint", "type,radius", new double[] { 0, 16 }, 1.0)]      // 筆 16
+    [InlineData("filter.sketch", "strength", new double[] { 100 }, 0.005)]        // ぼかし 800
+    [InlineData("filter.sketch", "strength,color", new double[] { 150, 1 }, 0.001)] // ぼかし 4000 (絵より大きい)
+    public void Huge_brushes_on_gpu_match_the_readback_path(string id, string keys, double[] values, double scale)
+    {
+        using var gpu = Gpu();
+        if (gpu == null) return;
+        gpu.MakeCurrent();
+        const int w = 1300, h = 900;
+        using var bmp = new SKBitmap(new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Premul));
+        using (var canvas = new SKCanvas(bmp))
+        {
+            canvas.Clear(SKColors.Transparent);
+            using var grad = SKShader.CreateLinearGradient(new SKPoint(0, 0), new SKPoint(w, h), new[] { SKColors.OrangeRed, SKColors.SeaGreen, SKColors.Navy }, SKShaderTileMode.Clamp);
+            using var paint = new SKPaint { Shader = grad, IsAntialias = true };
+            canvas.DrawCircle(w * 0.45f, h * 0.5f, h * 0.45f, paint);
+            using var stripe = new SKPaint { Color = new SKColor(250, 240, 200, 200) };
+            for (int x = 0; x < w; x += 97) canvas.DrawRect(x, 0, 23, h, stripe);
+        }
+        var (p, e) = Scene(w, h, id, keys, values);
+        using var raster = SKImage.FromBitmap(bmp);
+        using var texture = raster.ToTextureImage(gpu.Context);
+        var sprite = new Sprite(texture, w / 2f, h / 2f, (float)scale);
+        SKBitmap Run()
+        {
+            var ctx = new RenderContext { Project = p, Frame = 0, Gpu = gpu.Context };
+            try
+            {
+                var o = p.Root.Objects[1];
+                var result = Effects.Find(id)!.Apply(sprite, new EffectArgs { Effect = e, Object = o, Bounds = o.Bounds, Context = ctx });
+                var bmpOut = new SKBitmap(new SKImageInfo(result.Width, result.Height, SKColorType.Bgra8888, SKAlphaType.Premul));
+                Assert.True(result.Image.ReadPixels(bmpOut.Info, bmpOut.GetPixels(), bmpOut.RowBytes, 0, 0));
+                return bmpOut;
+            }
+            finally { ctx.DisposeTemporaries(); }
+        }
+        long before = Effects.GpuReadbacks;
+        using var sksl = Run();
+        long skslReadbacks = Effects.GpuReadbacks - before;
+        SKBitmap readback;
+        Effects.GpuShadersDisabled = true;
+        try { readback = Run(); }
+        finally { Effects.GpuShadersDisabled = false; }
+        using (readback)
+        {
+            var (mean, max) = Compare(readback, sksl);
+            Console.WriteLine($"BENCH huge {id} {keys}={string.Join('/', values)} scale={scale} mean={mean:0.000} max={max} readbacks={skslReadbacks}");
+            Assert.Equal(0, skslReadbacks);
+            Assert.True(mean < 0.3, $"{id}: 以前の描き方と違う mean={mean} max={max}");
+        }
+    }
+
     private static void Check(string id, string keys, double[] values, int width, int height)
     {
         using var gpu = Gpu();
