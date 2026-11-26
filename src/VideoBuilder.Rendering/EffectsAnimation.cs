@@ -252,6 +252,11 @@ public static partial class Effects
         double c = cycles - Math.Floor(cycles);
         float visible = c < 0.5 ? 1 : 1 - Math.Clamp(a.Track("depth") / 100f, 0, 1);
         if (visible <= 0) return s;
+        float textH = a.Object?.Main is { } tm && tm.DefinitionId == EffectRegistry.Text && a.Bounds != null ? (float)tm.Eval("size", a.Bounds, a.Frame) / s.Scale : 0;
+        var barColor = a.Color("color");
+        barColor = barColor.WithAlpha((byte)(barColor.Alpha * visible));
+        // GPU 描画では、最後の行と右端を GPU で求めて棒も SkSL で描く (読み戻さない。設計書 22.54)
+        if (CursorOnGpu(s, a, textH, a.Track("width"), barColor) is { } onGpu) return onGpu;
         // いちばん下の、何か描かれている行のまとまり (最後の行) と、その右端を探す
         int bottom = -1, top = -1, right = -1;
         if (CopyPixels(s) is { } copy)

@@ -194,6 +194,7 @@ public unsafe class GpuShaderTests
         { "filter.sphere", "size,rz", new double[] { 90, 30 } },
         { "filter.ascii", "size", new double[] { 10 } },
         { "filter.ascii", "size,color,chars", new double[] { 8, 1, 1 } },
+        { "filter.anim", "type,depth,width", new double[] { 28, 50, 12 } },          // カーソル点滅
     };
 
     [Theory]

@@ -2149,4 +2149,150 @@ public static partial class Effects
                 }
         });
     }
+    // ---------------- カーソル点滅 ----------------
+
+    // 横に 32 個ずつの最大 (1 回目は絵のアルファから「描かれている所の x + 1」、2 回目からは前の回の値)
+    private static readonly Sksl RowRightShader = new(Val24Sksl + Enc24Sksl + """
+        uniform shader src;
+        uniform float n;        // 読む側の幅
+        uniform float first;    // 1 なら src は絵
+        half4 main(float2 p) {
+            float o = floor(p.x) * 32, m = 0;
+            for (int j = 0; j < 32; j++) {
+                float x = o + float(j);
+                if (x >= n) break;
+                half4 c = src.eval(float2(x + 0.5, p.y));
+                float v = first > 0 ? (floor(float(c.a) * 255 + 0.5) > 16 ? x + 1 : 0) : idx24(c);
+                m = max(m, v);
+            }
+            return enc24(m / 16777216);
+        }
+        """);
+
+    // 縦に 32 個ずつの最大。mode 0: 何か描かれている行の y + 1 (1 回目)、1: bottom より上の、何もない行の y + 1、
+    // 2: top〜bottom の行の右端 + 1、3: 前の回の値の最大
+    private static readonly Sksl ColumnMaxShader = new(Val24Sksl + Enc24Sksl + """
+        uniform shader src;     // 1 列 (行ごとの右端 + 1。0 は何もない)、mode 3 では前の回の値
+        uniform shader bottom;  // 1 × 1: いちばん下の描かれている行 + 1
+        uniform shader top;     // 1 × 1: 最後の行のまとまりの上端 (= その上の何もない行 + 1)
+        uniform float n;
+        uniform float mode;
+        half4 main(float2 p) {
+            float o = floor(p.y) * 32, m = 0;
+            float b = mode == 1 || mode == 2 ? idx24(bottom.eval(float2(0.5))) : 0;
+            float t = mode == 2 ? idx24(top.eval(float2(0.5))) : 0;
+            for (int j = 0; j < 32; j++) {
+                float y = o + float(j);
+                if (y >= n) break;
+                float r = idx24(src.eval(float2(0.5, y + 0.5)));
+                float v = mode == 0 ? (r > 0 ? y + 1 : 0)
+                        : mode == 1 ? (r == 0 && y + 1 < b ? y + 1 : 0)
+                        : mode == 2 ? (y >= t && y < b ? r : 0)
+                        : r;
+                m = max(m, v);
+            }
+            return enc24(m / 16777216);
+        }
+        """);
+
+    private static readonly Sksl CursorBarShader = new(Val24Sksl + """
+        uniform shader bottom;
+        uniform shader top;
+        uniform shader right;
+        uniform float2 origin;   // 絵の左上 (描く先の座標)
+        uniform float textH;     // テキストの文字の大きさ (絵の座標)。0 ならテキストでない
+        uniform float h;         // 絵の高さ
+        uniform float cy;        // 絵の中心 (縦)
+        uniform float widthPct;
+        uniform float4 color;    // 乗算済み
+        half4 main(float2 p) {
+            float b = idx24(bottom.eval(float2(0.5))), t = idx24(top.eval(float2(0.5))), r = idx24(right.eval(float2(0.5)));
+            float lineH = b > 0 ? b - t : h;
+            if (textH > 0) lineH = textH;
+            lineH = max(2, lineH);
+            float barW = max(1, lineH * widthPct / 100), gap = lineH * 0.08;
+            float x0 = r > 0 ? r + gap : 0;
+            float y1 = b > 0 ? b : cy + lineH / 2, y0 = y1 - lineH;
+            // 画素と棒の重なる面積
+            float2 q = p - 0.5 - origin;
+            float cx = clamp(min(q.x + 1, x0 + barW) - max(q.x, x0), 0, 1), cyv = clamp(min(q.y + 1, y1) - max(q.y, y0), 0, 1);
+            return half4(color * cx * cyv);
+        }
+        """);
+
+    /// <summary>
+    /// カーソル点滅 (EffectsAnimation.BlinkingCursor と同じ) を GPU で。最後の行のまとまりと右端は、32 個ずつの最大を何回か取って GPU で求め、
+    /// 棒も SkSL で描く (位置を CPU に戻さない)。余白は棒が届きうるいちばん外まで付ける。textH はテキストの文字の大きさ (0 ならテキストでない)。
+    /// </summary>
+    internal static Sprite? CursorOnGpu(Sprite s, EffectArgs a, float textH, float widthPct, SKColor color)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled) return null;
+        if (RowRightShader.Effect is not { } rowFx || ColumnMaxShader.Effect is not { } colFx || CursorBarShader.Effect is not { } barFx) return null;
+        int w = s.Width, h = s.Height;
+        var owned = new List<IDisposable>();
+        try
+        {
+            SKImage? Keep(SKImage? img) { if (img != null) owned.Add(img); return img; }
+            SKShader Sh(SKImage img) { var sh = img.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp); owned.Add(sh); return sh; }
+            // 行ごとの右端 + 1 (1 列になるまで)
+            SKImage? cur = null;
+            int n = w;
+            var srcShader = s.Image.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+            owned.Add(srcShader);
+            do
+            {
+                int nn = (n + 31) / 32;
+                var src = cur == null ? srcShader : Sh(cur);
+                float first = cur == null ? 1 : 0, width = n;
+                cur = Keep(RunOnGpu(a, nn, h, rowFx, u => { u["n"] = width; u["first"] = first; }, k => k["src"] = src));
+                if (cur == null) return null;
+                n = nn;
+            } while (n > 1);
+            var rows = cur;
+            using var empty = ValueImage(1, 1, (_, _) => 0);
+            if (empty == null) return null;
+            // 縦の最大 (mode の値を 1 × 1 になるまで)
+            SKImage? Column(int mode, SKImage? bottom, SKImage? top)
+            {
+                SKImage? c = rows;
+                int m = h, md = mode;
+                do
+                {
+                    int mm = (m + 31) / 32;
+                    var src = Sh(c!);
+                    var bs = Sh(bottom ?? empty); var ts = Sh(top ?? empty);
+                    float count = m, modeNow = md;
+                    c = Keep(RunOnGpu(a, 1, mm, colFx, u => { u["n"] = count; u["mode"] = modeNow; }, k => { k["src"] = src; k["bottom"] = bs; k["top"] = ts; }));
+                    if (c == null) return null;
+                    m = mm; md = 3;
+                } while (m > 1);
+                return c;
+            }
+            var bottomImg = Column(0, null, null);
+            var topImg = bottomImg == null ? null : Column(1, bottomImg, null);
+            var rightImg = topImg == null ? null : Column(2, bottomImg, topImg);
+            if (bottomImg == null || topImg == null || rightImg == null) return null;
+            // 棒が届きうるいちばん外までの余白 (CPU の処理は棒の位置に合わせるが、GPU では位置を知らないので)
+            float lineMax = Math.Max(2, textH > 0 ? textH : h);
+            float barMax = Math.Max(1, lineMax * widthPct / 100), gapMax = lineMax * 0.08f;
+            int padR = Math.Max(0, (int)MathF.Ceiling(barMax + gapMax) + 1);
+            float noneTop = s.Cy + lineMax / 2 - lineMax;
+            int padT = Math.Max(0, (int)MathF.Ceiling(Math.Max(-noneTop, textH > 0 ? textH - 1 : 0)));
+            var bShader = Sh(bottomImg); var tShader = Sh(topImg); var rShader = Sh(rightImg);
+            var premul = new[] { color.Red / 255f * color.Alpha / 255f, color.Green / 255f * color.Alpha / 255f, color.Blue / 255f * color.Alpha / 255f, color.Alpha / 255f };
+            return Redraw(s, a, 0, padT, padR, 0, (cv, x, y) =>
+            {
+                cv.DrawImage(s.Image, x, y);
+                var kids = new SKRuntimeEffectChildren(barFx) { ["bottom"] = bShader, ["top"] = tShader, ["right"] = rShader };
+                var u = new SKRuntimeEffectUniforms(barFx)
+                {
+                    ["origin"] = new[] { x, y }, ["textH"] = textH, ["h"] = (float)h, ["cy"] = s.Cy, ["widthPct"] = widthPct, ["color"] = premul,
+                };
+                using var shader = barFx.ToShader(u, kids);
+                using var paint = new SKPaint { Shader = shader };
+                cv.DrawRect(SKRect.Create(0, 0, w + x + padR, h + y), paint);
+            }) with { Scale = s.Scale };
+        }
+        finally { foreach (var d in owned) d.Dispose(); }
+    }
 }
