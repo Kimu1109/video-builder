@@ -1017,7 +1017,8 @@ public static partial class Effects
             float angle = a.Track("angle") * MathF.PI / 180;
             if (MathF.Abs(angle) < 1e-3f) return s;
             float R = Math.Max(1, a.Track("radius") / s.Scale);
-            return RadialWarp(s, a, s.Cx + a.Track("x") / s.Scale, s.Cy + a.Track("y") / s.Scale, R, d => d, d => angle * (1 - d) * (1 - d));
+            float cx = s.Cx + a.Track("x") / s.Scale, cy = s.Cy + a.Track("y") / s.Scale;
+            return RadialWarpOnGpu(s, a, cx, cy, R, 0, angle) ?? RadialWarp(s, a, cx, cy, R, d => d, d => angle * (1 - d) * (1 - d));
         }
     }
 
@@ -1031,7 +1032,8 @@ public static partial class Effects
             if (MathF.Abs(amount) < 1e-3f) return s;
             float R = Math.Max(1, a.Track("radius") / s.Scale);
             float power = amount > 0 ? 1 + amount * 1.5f : 1 / (1 - amount * 1.5f);
-            return RadialWarp(s, a, s.Cx + a.Track("x") / s.Scale, s.Cy + a.Track("y") / s.Scale, R, d => MathF.Pow(d, power));
+            float cx = s.Cx + a.Track("x") / s.Scale, cy = s.Cy + a.Track("y") / s.Scale;
+            return RadialWarpOnGpu(s, a, cx, cy, R, 1, power) ?? RadialWarp(s, a, cx, cy, R, d => MathF.Pow(d, power));
         }
     }
 
@@ -1045,7 +1047,7 @@ public static partial class Effects
             if (MathF.Abs(k) < 1e-3f) return s;
             float R = MathF.Sqrt(s.Width * s.Width + s.Height * s.Height) / 2 + 1;
             // r_src = r × (1 − k + k r²): 魚眼 (k > 0) は中心を拡大し、端はそのまま
-            return RadialWarp(s, a, s.Width / 2f, s.Height / 2f, R, d => d * (1 - k + k * d * d));
+            return RadialWarpOnGpu(s, a, s.Width / 2f, s.Height / 2f, R, 2, k) ?? RadialWarp(s, a, s.Width / 2f, s.Height / 2f, R, d => d * (1 - k + k * d * d));
         }
     }
 
@@ -1058,6 +1060,8 @@ public static partial class Effects
             int nx = Math.Max(1, (int)a.Track("countX")), ny = Math.Max(1, (int)a.Track("countY"));
             if (nx == 1 && ny == 1) return s;
             bool mirror = a.Check("mirror");
+            // GPU 描画では SkSL で (読み戻さない。設計書 22.54)
+            if (MirrorTileOnGpu(s, a, nx, ny, mirror) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;

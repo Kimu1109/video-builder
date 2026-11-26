@@ -49,7 +49,24 @@ public unsafe class GpuShaderTests
             else Set(e, names[i], values[i]);
         }
         if (id == "filter.lut") e.Values["file"] = CubeFile();
+        if (id == "filter.displace" && e.Values.GetValueOrDefault("shape") == "2") e.Values["file"] = MapFile();
         return (p, e);
+    }
+
+    private static string? _map;
+
+    /// <summary>テスト用のずらしのマップ (赤と緑が場所で変わる画像)。</summary>
+    private static string MapFile()
+    {
+        if (_map != null && File.Exists(_map)) return _map;
+        var path = Path.Combine(Path.GetTempPath(), $"vb-map-{Environment.ProcessId}.png");
+        using var bmp = new SKBitmap(new SKImageInfo(64, 48, SKColorType.Bgra8888, SKAlphaType.Premul));
+        for (int y = 0; y < 48; y++)
+            for (int x = 0; x < 64; x++)
+                bmp.SetPixel(x, y, new SKColor((byte)(x * 4), (byte)(255 - y * 5), 128, (byte)(x < 8 ? 120 : 255)));
+        using (var data = bmp.Encode(SKEncodedImageFormat.Png, 100))
+        using (var fs = File.Create(path)) data.SaveTo(fs);
+        return _map = path;
     }
 
     private static string? _cube;
@@ -130,6 +147,13 @@ public unsafe class GpuShaderTests
         { "filter.mosaic", "size", new double[] { 13 } },     // 割り切れない大きさ (端のマスは欠ける)
         { "filter.anim", "type,strength,speed", new double[] { 24, 12, 1 } },      // 旗のようになびく
         { "filter.transition", "type", new double[] { 81 } },                       // 渦巻き
+        { "filter.swirl", "angle,radius", new double[] { 120, 80 } },
+        { "filter.bulge", "amount,radius", new double[] { 60, 70 } },
+        { "filter.bulge", "amount,radius", new double[] { -60, 70 } },
+        { "filter.fisheye", "strength", new double[] { 70 } },
+        { "filter.mirrortile", "countX,countY", new double[] { 3, 2 } },
+        { "filter.mirrortile", "countX,countY,mirror", new double[] { 3, 2, 1 } },
+        { "filter.displace", "shape,param1,param2", new double[] { 2, 12, -8 } },   // マップの画像でずらす
         { "filter.transition", "type", new double[] { 77 } },                       // 色収差
         { "filter.transition", "type", new double[] { 79 } },                       // ピクセル化 (モザイク)
         { "filter.transition", "type", new double[] { 80 } },                       // 波紋

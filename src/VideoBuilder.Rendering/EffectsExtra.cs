@@ -335,6 +335,8 @@ public static partial class Effects
                 int w0 = s.Width, h0 = s.Height;
                 using var mapPaint = new SKPaint { FilterQuality = SKFilterQuality.Medium };
                 using var stretched = PixelOps.DrawParallel(w0, h0, c => c.DrawImage(map, SKRect.Create(w0, h0), mapPaint));
+                // GPU 描画では SkSL で (引き伸ばしたマップは GPU へ送るだけ。絵は読み戻さない)
+                if (DisplaceByMapOnGpu(s, a, stretched, p1, p2, clamp) is { } onGpu) return onGpu;
                 using var mp = stretched.PeekPixels();
                 if (mp == null) return s;
                 return Resample(s, a, 0, 0, (src, tmp, w, h, rb) =>

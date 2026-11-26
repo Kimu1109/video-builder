@@ -224,7 +224,7 @@ public static partial class Effects
 
     /// <summary>MultiPassOnGpu の、タイル (絵の外の読み方) を縦横で指定する版。uniforms には (回, 幅, 高さ) を渡す。</summary>
     private static Sprite? MultiPassOnGpu(Sprite s, EffectArgs a, int padX, int padY, Sksl sksl, SKShaderTileMode tileX, SKShaderTileMode tileY,
-        int passes, Action<SKRuntimeEffectUniforms, int, int, int> uniforms)
+        int passes, Action<SKRuntimeEffectUniforms, int, int, int> uniforms, Action<SKRuntimeEffectChildren>? children = null)
     {
         if (a.Context.Gpu == null || GpuShadersDisabled || sksl.Effect is not { } effect) return null;
         padX = Math.Max(0, padX); padY = Math.Max(0, padY);
@@ -247,6 +247,7 @@ public static partial class Effects
                 if (surface == null) return null;
                 using var image = current.ToShader(tileX, tileY);
                 var kids = new SKRuntimeEffectChildren(effect) { ["image"] = image };
+                children?.Invoke(kids);
                 var u = new SKRuntimeEffectUniforms(effect);
                 uniforms(u, i, w, h);
                 using var shader = effect.ToShader(u, kids);
@@ -999,4 +1000,79 @@ public static partial class Effects
             u["mode"] = (float)mode; u["height"] = (float)h;
         })
         ?? Resample(s, a, 0, 0, (src, tmp, w, h, rb) => { PixelFx.Deinterlace(src, tmp, w, h, rb, mode); return tmp; });
+
+    // ---------------- 半径方向のゆがみ・ミラータイル・マップでずらす ----------------
+
+    private static readonly Sksl RadialWarpShader = new(SampleSksl + """
+        uniform float2 center;
+        uniform float radius;
+        uniform float mode;     // 0 = 渦巻き (ねじるだけ), 1 = 膨張・収縮 (d^power), 2 = 魚眼 (d (1 - k + k d²))
+        uniform float param;    // 渦巻きの角度・膨張の power・魚眼の k
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float2 o = q - center;
+            float r = length(o);
+            if (r >= radius || r < 1e-4) return out8(fetch(q));
+            float d = r / radius;
+            float sd = mode == 1 ? pow(d, param) : mode == 2 ? d * (1 - param + param * d * d) : d;
+            float2 so = o * (sd / d);
+            if (mode == 0) {
+                float an = param * (1 - d) * (1 - d), cs = cos(an), sn = sin(an);
+                so = float2(so.x * cs - so.y * sn, so.x * sn + so.y * cs);
+            }
+            return out8(sample8r(center + so));
+        }
+        """);
+
+    /// <summary>半径方向のゆがみ (EffectsFilters.RadialWarp と同じ。絵の外は透明)。GPU 描画でない・使えないときは null。</summary>
+    internal static Sprite? RadialWarpOnGpu(Sprite s, EffectArgs a, float cx, float cy, float radius, int mode, float param) =>
+        MultiPassOnGpu(s, a, 0, 0, RadialWarpShader, SKShaderTileMode.Decal, SKShaderTileMode.Decal, 1, (u, _, _, _) =>
+        {
+            u["center"] = new[] { cx, cy }; u["radius"] = radius; u["mode"] = (float)mode; u["param"] = param;
+        });
+
+    private static readonly Sksl MirrorTileShader = new(SampleSksl + """
+        uniform float2 count;
+        uniform float mirror;
+        uniform float2 size;
+        half4 main(float2 p) {
+            float2 uv = p / size * count;
+            float2 t = floor(uv);
+            float2 f = uv - t;
+            if (mirror > 0) {
+                if (mod(t.x, 2) == 1) f.x = 1 - f.x;
+                if (mod(t.y, 2) == 1) f.y = 1 - f.y;
+            }
+            return out8(sample8r(f * size - 0.5));
+        }
+        """);
+
+    /// <summary>ミラータイル (EffectsFilters.MirrorTile と同じ。絵の外は端のピクセル)。</summary>
+    internal static Sprite? MirrorTileOnGpu(Sprite s, EffectArgs a, int nx, int ny, bool mirror) =>
+        MultiPassOnGpu(s, a, 0, 0, MirrorTileShader, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, 1, (u, _, w, h) =>
+        {
+            u["count"] = new float[] { nx, ny }; u["mirror"] = mirror ? 1f : 0f; u["size"] = new float[] { w, h };
+        });
+
+    private static readonly Sksl DisplaceMapShader = new(SampleSksl + """
+        uniform shader map;
+        uniform float2 amount;   // (mx, my)
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float4 m = floor(float4(map.eval(p)) * 255 + 0.5);
+            if (m.a == 0) return out8(fetch(q));
+            // 乗算済みを戻して、128 からの差をずれにする (地図が半透明なら、そのぶん弱める)
+            float r = min(255, m.r * 255 / m.a), g = min(255, m.g * 255 / m.a);
+            float k = m.a / 255;
+            return out8(sample8r(float2(q.x - (r - 128) / 128 * amount.x * k, q.y - (g - 128) / 128 * amount.y * k)));
+        }
+        """);
+
+    /// <summary>マップの絵の色でずらす (PixelFx.DisplaceByMap と同じ)。map は絵と同じ大きさ。</summary>
+    internal static Sprite? DisplaceByMapOnGpu(Sprite s, EffectArgs a, SKImage map, float mx, float my, bool clamp)
+    {
+        using var mapShader = map.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        return MultiPassOnGpu(s, a, 0, 0, DisplaceMapShader, Tile(clamp), Tile(clamp), 1, (u, _, _, _) => u["amount"] = new[] { mx, my },
+            kids => kids["map"] = mapShader);
+    }
 }
