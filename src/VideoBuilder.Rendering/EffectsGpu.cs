@@ -1798,6 +1798,8 @@ public static partial class Effects
                 float3 m = sk.rgb / n;
                 float dm = lum(m) - lc;
                 float variance = sk.a / n - dm * dm;
+                // 一色の区画はばらつき 0 (CPU と同じく、0 どうしなら先の区画)。GPU によっては計算の順序の違いで ±ごくわずかずれるので、そろえる
+                if (abs(variance) < 1.0 / 128) variance = 0;
                 if (variance < best) { best = variance; bc = m; }
             }
             if (water > 0) {
