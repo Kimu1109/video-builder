@@ -1083,7 +1083,14 @@ public static partial class Effects
     /// </summary>
     private const string Val24Sksl = """
         float val24(half4 c) { float3 b = floor(float3(c.rgb) * 255 + 0.5); return (b.r * 65536 + b.g * 256 + b.b) / 16777216; }
+        float idx24(half4 c) { float3 b = floor(float3(c.rgb) * 255 + 0.5); return b.r * 65536 + b.g * 256 + b.b; }
         """;
+
+    /// <summary>
+    /// 整数 (0〜2^24 - 1) を持つ、横 1 列の画像。idx24 で読む。
+    /// 「x / 幅 の切り捨て」のような区切りは、GPU では割り算が逆数の掛け算になり境目ちょうどで 1 つずれることがあるので、CPU で求めて送る。
+    /// </summary>
+    private static SKImage? IndexImage(int n, Func<int, int> index) => ValueImage(n, 1, (x, _) => index(x) / 16777216f);
 
     /// <summary>value(x, y) (0〜1) を 24 ビットにして持つ、幅 w・高さ h の画像 (不透明。GPU へ送るのは待たない)。</summary>
     private static SKImage? ValueImage(int w, int h, Func<int, int, float> value)
@@ -1165,5 +1172,161 @@ public static partial class Effects
         {
             u["range"] = range; u["shift"] = shift; u["sat"] = sat; u["noise"] = noise; u["k"] = k;
         }, kids => { kids["rows"] = rowsShader; kids["rnd"] = rndShader; kids["band"] = bandShader; });
+    }
+    // ---------------- ブラウン管 ----------------
+
+    private static readonly Sksl CrtShader = new(SampleSksl + Val24Sksl + """
+        uniform shader cols;    // 列ごとの RGB の格子の色 (0〜2)
+        uniform float2 size;
+        uniform float scan;
+        uniform float mask;
+        uniform float curve;
+        uniform float vig;
+        uniform float pitch;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float cx = size.x / 2, cy = size.y / 2;
+            float nx = (q.x - cx) / cx, ny = (q.y - cy) / cy, r2 = nx * nx + ny * ny;
+            float k = 1 + curve * 0.12 * r2;
+            float sx = cx + nx * k * cx, sy = cy + ny * k * cy;
+            if (sx < -0.5 || sy < -0.5 || sx > size.x - 0.5 || sy > size.y - 0.5) return half4(0, 0, 0, half(fetch(q).a / 255));
+            float4 c = sample8r(float2(sx, sy));
+            float al = c.a;
+            float sl = abs(sin(3.14159265 * sy / pitch));
+            float line = 1 - scan * 0.55 * sl * sl;
+            float col = idx24(cols.eval(float2(p.x, 0.5)));
+            float dim = 1 - mask * 0.55;
+            float3 m = float3(col == 0 ? 1 : dim, col == 1 ? 1 : dim, col == 2 ? 1 : dim);
+            float v = 1 - vig * 0.6 * pow(r2 / 2, 1.5);
+            float boost = 1 + 0.25 * (scan + mask) / 2;
+            float3 o = floor(clamp(c.rgb * line * m * v * boost, 0, al));
+            return half4(half3(o / 255), half(al / 255));
+        }
+        """);
+
+    /// <summary>ブラウン管 (EffectsFilters.Crt と同じ)。GPU 描画でない・使えないときは null。</summary>
+    internal static Sprite? CrtOnGpu(Sprite s, EffectArgs a, float scan, float mask, float curve, float vig, float pitch)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || CrtShader.Effect == null) return null;
+        using var cols = IndexImage(s.Width, x => (int)(x / (pitch / 3)) % 3);
+        if (cols == null) return null;
+        using var colShader = cols.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        return MultiPassOnGpu(s, a, 0, 0, CrtShader, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, 1, (u, _, w, h) =>
+        {
+            u["size"] = new float[] { w, h }; u["scan"] = scan; u["mask"] = mask; u["curve"] = curve; u["vig"] = vig; u["pitch"] = pitch;
+        }, kids => kids["cols"] = colShader);
+    }
+
+    // ---------------- グリッチ ----------------
+
+    private static readonly Sksl GlitchShader = new(SampleSksl + Val24Sksl + """
+        uniform shader cols;    // 列ごとのブロックの番号 (横)
+        uniform shader rows;    // 行ごとのブロックの番号 (縦)
+        uniform shader offs;    // ブロックごとのずれ (range で戻す)
+        uniform shader invs;    // ブロックごとの反転 (0.5 以上なら反転)
+        uniform shader rowOffs; // ブロックの行ごとのずれ
+        uniform float range;
+        uniform float split;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float bx = idx24(cols.eval(float2(p.x, 0.5))), by = idx24(rows.eval(float2(0.5, p.y)));
+            float2 b = float2(bx, by) + 0.5;
+            float off = (val24(offs.eval(b)) - 0.5) * range;
+            float rowOff = (val24(rowOffs.eval(float2(0.5, b.y))) - 0.5) * range;
+            float sx = q.x - off - rowOff;
+            float4 r = sample8r(float2(sx - split, q.y)), c = sample8r(float2(sx, q.y)), bl = sample8r(float2(sx + split, q.y));
+            float al = max(c.a, max(r.a, bl.a));
+            float3 o = float3(r.r, c.g, bl.b);
+            // まれに色を反転したブロック (どの色もアルファ以下なので、桁は借りない)
+            if (val24(invs.eval(b)) >= 0.5) o = al - o;
+            return half4(half3(o / 255), half(al / 255));
+        }
+        """);
+
+    /// <summary>
+    /// グリッチ (EffectsFilters.Glitch と同じ)。ブロックごとの乱数は CPU で作って画像で送る。
+    /// off(bx, by)・rowOff(by)・inverted(bx, by) はブロックの番号から。GPU 描画でない・使えないときは null。
+    /// </summary>
+    internal static Sprite? GlitchOnGpu(Sprite s, EffectArgs a, float block, float split, Func<int, int, float> off, Func<int, float> rowOff, Func<int, int, bool> inverted)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || GlitchShader.Effect == null) return null;
+        int w = s.Width, h = s.Height;
+        int nbx = (int)((w - 1) / (block * 3)) + 1, nby = (int)((h - 1) / block) + 1;
+        var o = new float[nbx * nby];
+        var ro = new float[nby];
+        float max = 0;
+        for (int by = 0; by < nby; by++)
+        {
+            ro[by] = rowOff(by); max = Math.Max(max, MathF.Abs(ro[by]));
+            for (int bx = 0; bx < nbx; bx++) { o[by * nbx + bx] = off(bx, by); max = Math.Max(max, MathF.Abs(o[by * nbx + bx])); }
+        }
+        float range = max * 2 + 2;
+        using var cols = IndexImage(w, x => (int)(x / (block * 3)));
+        using var rows = ValueImage(1, h, (_, y) => (int)(y / block) / 16777216f);
+        using var offs = ValueImage(nbx, nby, (x, y) => o[y * nbx + x] / range + 0.5f);
+        using var invs = ValueImage(nbx, nby, (x, y) => inverted(x, y) ? 0.75f : 0);
+        using var rowOffs = ValueImage(1, nby, (_, y) => ro[y] / range + 0.5f);
+        if (cols == null || rows == null || offs == null || invs == null || rowOffs == null) return null;
+        using var c1 = cols.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var c2 = rows.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var c3 = offs.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var c4 = invs.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var c5 = rowOffs.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        return MultiPassOnGpu(s, a, 0, 0, GlitchShader, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, 1, (u, _, _, _) =>
+        {
+            u["range"] = range; u["split"] = split;
+        }, kids => { kids["cols"] = c1; kids["rows"] = c2; kids["offs"] = c3; kids["invs"] = c4; kids["rowOffs"] = c5; });
+    }
+
+    // ---------------- 網点 ----------------
+
+    private static readonly Sksl HalftoneShader = new(SampleSksl + """
+        uniform float size;
+        uniform float mode;
+        uniform float4 cs;   // 網点の角度の cos (mode 2 は C・M・Y・K の順。ほかは x だけ)
+        uniform float4 sn;
+        float3 un(float4 q) { return q.a == 0 ? float3(0) : q.rgb / q.a; }
+        // kind: 0 = 明るさ, 1〜3 = C・M・Y, 4 = K
+        float dotAt(float2 xy, float c, float s, float kind) {
+            float u = xy.x * c + xy.y * s, v = -xy.x * s + xy.y * c;
+            float cu = (floor(u / size) + 0.5) * size, cv = (floor(v / size) + 0.5) * size;
+            float3 q = un(sample8r(float2(cu * c - cv * s, cu * s + cv * c)));
+            float amount;
+            if (kind == 0) amount = 1 - (0.2126 * q.r + 0.7152 * q.g + 0.0722 * q.b);
+            else {
+                float k0 = 1 - max(q.r, max(q.g, q.b));
+                float ch = kind == 1 ? q.r : kind == 2 ? q.g : q.b;
+                amount = kind == 4 ? k0 * 0.9 : k0 >= 1 ? 0 : (1 - ch - k0) / (1 - k0);
+            }
+            float radius = size * 0.71 * sqrt(clamp(amount, 0, 1));
+            float d = sqrt((u - cu) * (u - cu) + (v - cv) * (v - cv));
+            return clamp(radius - d + 0.5, 0, 1);
+        }
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float4 orig = fetch(q);
+            float al = orig.a;
+            if (al == 0) return half4(0);
+            float3 o;
+            if (mode == 2) {
+                float c = dotAt(q, cs.x, sn.x, 1), m = dotAt(q, cs.y, sn.y, 2), y = dotAt(q, cs.z, sn.z, 3), k = dotAt(q, cs.w, sn.w, 4);
+                o = float3((1 - c) * (1 - k), (1 - m) * (1 - k), (1 - y) * (1 - k));
+            } else {
+                float d = dotAt(q, cs.x, sn.x, 0);
+                o = mode == 1 ? 1 - d + d * un(orig) : float3(1 - d);
+            }
+            return half4(half3(floor(clamp(o, 0, 1) * al) / 255), half(al / 255));
+        }
+        """);
+
+    /// <summary>網点 (EffectsFilters.Halftone と同じ)。GPU 描画でない・使えないときは null。</summary>
+    internal static Sprite? HalftoneOnGpu(Sprite s, EffectArgs a, float size, float angle, int mode)
+    {
+        float[] angles = mode == 2 ? [15 * MathF.PI / 180, 75 * MathF.PI / 180, 0, 45 * MathF.PI / 180] : [angle, 0, 0, 0];
+        return MultiPassOnGpu(s, a, 0, 0, HalftoneShader, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, 1, (u, _, _, _) =>
+        {
+            u["size"] = size; u["mode"] = (float)mode;
+            u["cs"] = angles.Select(MathF.Cos).ToArray(); u["sn"] = angles.Select(MathF.Sin).ToArray();
+        });
     }
 }

@@ -487,6 +487,7 @@ public static partial class Effects
             float scan = a.Track("scanline") / 100f, mask = a.Track("mask") / 100f, curve = a.Track("curvature") / 100f, vig = a.Track("vignette") / 100f;
             if (scan <= 0 && mask <= 0 && curve <= 0 && vig <= 0) return s;
             float pitch = Math.Max(2, 3 / s.Scale);
+            if (CrtOnGpu(s, a, scan, mask, curve, vig, pitch) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
@@ -535,6 +536,10 @@ public static partial class Effects
             if (k <= 0 || Rand01(slot, seed, 81) >= freq) return s;
             uint fs = (uint)a.Frame * 2654435761u + seed;
             float block = Math.Max(2, a.Track("block") / s.Scale);
+            float W = s.Width;
+            float BlockOff(int bx, int by) => Rand01((uint)(by * 977 + bx), fs, 82) < 0.25f * k ? (Rand01((uint)(by * 977 + bx), fs, 83) - 0.5f) * k * W * 0.2f : 0;
+            float RowOff(int by) => Rand01((uint)by, fs, 84) < 0.2f * k ? (Rand01((uint)by, fs, 85) - 0.5f) * k * W * 0.08f : 0;
+            if (GlitchOnGpu(s, a, block, k * W * 0.012f, BlockOff, RowOff, (bx, by) => Rand01((uint)(by * 977 + bx), fs, 82) > 1 - 0.04f * k) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
@@ -575,6 +580,7 @@ public static partial class Effects
         {
             float size = Math.Max(2, a.Track("size") / s.Scale), angle = a.Track("angle") * MathF.PI / 180;
             int mode = a.Effect.GetInt("mode");
+            if (HalftoneOnGpu(s, a, size, angle, mode) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;

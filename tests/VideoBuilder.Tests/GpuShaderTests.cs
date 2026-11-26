@@ -163,6 +163,11 @@ public unsafe class GpuShaderTests
         { "filter.deinterlace", "mode", new double[] { 3 } },
         { "filter.vhs", "strength,noise,wobble", new double[] { 80, 60, 70 } },
         { "filter.vhs", "strength,noise,wobble", new double[] { 100, 0, 100 } },
+        { "filter.crt", "scanline,mask,curvature,vignette", new double[] { 60, 50, 40, 50 } },
+        { "filter.glitch", "strength,frequency,block", new double[] { 100, 100, 12 } },
+        { "filter.halftone", "size,angle,mode", new double[] { 8, 45, 0 } },
+        { "filter.halftone", "size,angle,mode", new double[] { 6, 0, 1 } },
+        { "filter.halftone", "size,mode", new double[] { 9, 2 } },
     };
 
     [Theory]
