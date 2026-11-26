@@ -410,6 +410,14 @@ public static partial class Effects
                 }
             });
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float amount = a.Track("amount") / 100f * 0.35f, size = Math.Max(0.5f, a.Track("size"));
+            if (amount <= 0) return s;
+            uint seed = (uint)(int)a.Track("seed") * 7919u + (a.Check("animate") ? (uint)a.Frame * 2654435761u : 0);
+            return GrainOnGpu(s, a, amount, size, a.Check("color"), seed);
+        }
     }
 
     /// <summary>VHS: 色のにじみとずれ、横の揺れ、ノイズの帯、下端の乱れ。</summary>

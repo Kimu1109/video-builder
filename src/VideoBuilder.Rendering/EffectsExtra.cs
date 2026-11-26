@@ -505,8 +505,13 @@ public static partial class Effects
             int k = 1;
             while (k < 8 && radius / k > 12) k *= 2;
             if (k == 1)
-                return Resample(s, a, pad, pad, (src, tmp, w, h, rb) => { PixelFx.LensBlur(src, tmp, w, h, rb, radius, boost, clamp); return tmp; }) ?? s;
+                return LensBlurOnGpu(s, a, pad, radius, boost, clamp) ?? Resample(s, a, pad, pad, (src, tmp, w, h, rb) => { PixelFx.LensBlur(src, tmp, w, h, rb, radius, boost, clamp); return tmp; }) ?? s;
             // 縮小 (余白も付ける) → ぼかす → 元の大きさに戻す
+            if (SmallLensBlurOnGpu(s, a, pad, k, radius, boost, clamp) is { } onGpu)
+            {
+                using var gpuUp = new SKPaint { FilterQuality = SKFilterQuality.Low, BlendMode = SKBlendMode.Src };
+                return Redraw(s, a, pad, pad, pad, pad, (c, _, _) => c.DrawImage(onGpu.Image, SKRect.Create(onGpu.Width, onGpu.Height), SKRect.Create(0, 0, onGpu.Width * k, onGpu.Height * k), gpuUp));
+            }
             SKImage? raster = null;
             using var pm = s.Image.PeekPixels();
             if (pm == null && CopyPixels(s) is { } cp) raster = PixelPool.ToImage(cp.Buffer, Info(s.Width, s.Height), cp.RowBytes);

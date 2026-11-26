@@ -1578,4 +1578,190 @@ public static partial class Effects
             u["r"] = (float)radius; u["size"] = new float[] { w, h }; u["water"] = water ? 1f : 0f;
         }, kids => kids["lattice"] = latticeShader);
     }
+    // ---------------- フィルム粒子 ----------------
+
+    private static readonly Sksl GrainShader = new(Val24Sksl + """
+        uniform shader image;
+        uniform shader lat0;
+        uniform shader lat1;
+        uniform shader lat2;
+        uniform float2 o0;      // 格子の画像の左上の格子の番号
+        uniform float2 o1;
+        uniform float2 o2;
+        uniform float2 off1;    // 2 つ目・3 つ目の ValueNoise の座標のずれ
+        uniform float2 off2;
+        uniform float size;
+        uniform float amount;
+        uniform float colored;
+        float N0(float2 ij) { return val24(lat0.eval(ij - o0 + 0.5)); }
+        float vn0(float2 v) {
+            float2 f = floor(v), t = v - f;
+            t = t * t * (3 - 2 * t);
+            float a = N0(f), b = N0(f + float2(1, 0)), c = N0(f + float2(0, 1)), d = N0(f + float2(1, 1));
+            return a + (b - a) * t.x + (c - a + (d - c - b + a) * t.x) * t.y;
+        }
+        float N1(float2 ij) { return val24(lat1.eval(ij - o1 + 0.5)); }
+        float vn1(float2 v) {
+            float2 f = floor(v), t = v - f;
+            t = t * t * (3 - 2 * t);
+            float a = N1(f), b = N1(f + float2(1, 0)), c = N1(f + float2(0, 1)), d = N1(f + float2(1, 1));
+            return a + (b - a) * t.x + (c - a + (d - c - b + a) * t.x) * t.y;
+        }
+        float N2(float2 ij) { return val24(lat2.eval(ij - o2 + 0.5)); }
+        float vn2(float2 v) {
+            float2 f = floor(v), t = v - f;
+            t = t * t * (3 - 2 * t);
+            float a = N2(f), b = N2(f + float2(1, 0)), c = N2(f + float2(0, 1)), d = N2(f + float2(1, 1));
+            return a + (b - a) * t.x + (c - a + (d - c - b + a) * t.x) * t.y;
+        }
+
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float4 c = floor(float4(image.eval(p)) * 255 + 0.5);
+            float al = c.a;
+            if (al == 0) return half4(0);
+            float2 v = q / size;
+            float l = (c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722) / max(1, al);
+            float k = amount * (0.35 + 2.6 * l * (1 - l)) * al;
+            float3 o;
+            // 色の粒: 青・緑・赤の順に 0・1・2 番の格子 (CPU の画素の並び B・G・R と同じ)
+            if (colored > 0) o = float3(c.r + (vn2(v + off2) * 2 - 1) * k, c.g + (vn1(v + off1) * 2 - 1) * k, c.b + (vn0(v) * 2 - 1) * k);
+            else o = c.rgb + (vn0(v) + vn1(v + off1) - 1) * k;
+            return half4(half3(floor(clamp(o, 0, al)) / 255), half(al / 255));
+        }
+        """);
+
+    /// <summary>ValueNoise(x / size + ox, y / size + oy, seed) を w × h の絵で使う範囲の格子の乱数の画像と、その左上の格子の番号。</summary>
+    private static (SKImage? Image, float X0, float Y0) LatticeImage(int w, int h, float size, float ox, float oy, uint seed)
+    {
+        int x0 = (int)MathF.Floor(ox), y0 = (int)MathF.Floor(oy);
+        int nx = (int)MathF.Floor((w - 1) / size + ox) - x0 + 3, ny = (int)MathF.Floor((h - 1) / size + oy) - y0 + 3;
+        return (ValueImage(nx, ny, (i, j) => PixelFx.Hash((uint)(x0 + i), (uint)(y0 + j), seed) / (float)uint.MaxValue), x0, y0);
+    }
+
+    /// <summary>フィルム粒子 (EffectsFilters.Grain と同じ)。GPU 描画でない・使えないときは null。</summary>
+    internal static Sprite? GrainOnGpu(Sprite s, EffectArgs a, float amount, float size, bool color, uint seed)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || GrainShader.Effect == null) return null;
+        int w = s.Width, h = s.Height;
+        // 3 つの ValueNoise (乱数の種と座標のずれ)。白黒の粒は 2 つだけ使う
+        var specs = color
+            ? new (uint Seed, float X, float Y)[] { (seed, 0, 0), (seed + 101, 17.1f, 0), (seed + 202, 2 * 17.1f, 0) }
+            : new (uint Seed, float X, float Y)[] { (seed, 0, 0), (seed ^ 0x55u, 31.7f, 11.3f), (0, 0, 0) };
+        var lats = new (SKImage? Image, float X0, float Y0)[3];
+        var shaders = new SKShader?[3];
+        try
+        {
+            for (int k = 0; k < 3; k++)
+            {
+                lats[k] = !color && k == 2 ? (ValueImage(1, 1, (_, _) => 0), 0, 0) : LatticeImage(w, h, size, specs[k].X, specs[k].Y, specs[k].Seed);
+                if (lats[k].Image is not { } img) return null;
+                shaders[k] = img.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+            }
+            return ApplyGpuShader(s, a, GrainShader, u =>
+            {
+                u["o0"] = new[] { lats[0].X0, lats[0].Y0 }; u["o1"] = new[] { lats[1].X0, lats[1].Y0 }; u["o2"] = new[] { lats[2].X0, lats[2].Y0 };
+                u["off1"] = new[] { specs[1].X, specs[1].Y }; u["off2"] = new[] { specs[2].X, specs[2].Y };
+                u["size"] = size; u["amount"] = amount; u["colored"] = color ? 1f : 0f;
+            }, (kids, _, _) => { kids["lat0"] = shaders[0]; kids["lat1"] = shaders[1]; kids["lat2"] = shaders[2]; });
+        }
+        finally
+        {
+            foreach (var sh in shaders) sh?.Dispose();
+            foreach (var l in lats) l.Image?.Dispose();
+        }
+    }
+    // ---------------- レンズブラー ----------------
+
+    private static readonly Sksl LensBlurShader = new(SampleSksl + Val24Sksl + """
+        uniform shader offs;     // 1 行目: x のずれ、2 行目: y のずれ (固定小数点 1 = 65536、+ 2^23)
+        uniform shader weights;  // 明るさ (0〜255) → 重み
+        uniform float n;
+        uniform float2 size;
+        // SampleFixed の補間 (位置の整数部 b と、8 ビットの重み t)
+        float4 sampleW(float2 b, float2 t) {
+            float4 p00 = fetch(b), p10 = fetch(b + float2(1, 0));
+            float4 top = t.x == 0 ? p00 : lerp8(p00, p10, t.x);
+            if (t.y == 0) return top;
+            float4 p01 = fetch(b + float2(0, 1)), p11 = fetch(b + float2(1, 1));
+            return lerp8(top, t.x == 0 ? p01 : lerp8(p01, p11, t.x), t.y);
+        }
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float4 sum = float4(0);
+            float sw = 0;
+            for (int i = 0; i < 128; i++) {
+                if (float(i) >= n) break;
+                float2 v = float2(idx24(offs.eval(float2(float(i) + 0.5, 0.5))), idx24(offs.eval(float2(float(i) + 0.5, 1.5)))) - 8388608;
+                // 算術シフトと同じ (負の数は切り下げ)。65536・256 で割るのは 2 の累乗なので誤差がない
+                float2 oi = floor(v / 65536);
+                float2 b = q + oi;
+                float2 t = floor((v - oi * 65536) / 256);
+                float4 c = b.x >= 0 && b.y >= 0 && b.x < size.x - 1 && b.y < size.y - 1 ? sampleW(b, t) : sample8r(q + v / 65536);
+                float wt = idx24(weights.eval(float2(floor((c.r * 54 + c.g * 183 + c.b * 19) / 256) + 0.5, 0.5)));
+                sum += c * wt;
+                sw += wt;
+            }
+            float hw = floor(sw / 2);
+            // (合計 + sw / 2) / sw の切り捨て。+0.5 で、割り算の誤差で境目ちょうどの値が 1 つ下にならないようにする
+            float4 m = floor((sum + hw + 0.5) / sw);
+            float al = min(255, m.a);
+            return half4(half3(min(float3(al), m.rgb) / 255), half(al / 255));
+        }
+        """);
+
+    /// <summary>
+    /// レンズブラー (PixelFx.LensBlur と同じ) を、余白 (pad) を付けた s にかけた絵。半径は 12 以下のときだけ (サンプルが 128 個まで)。
+    /// GPU 描画でない・使えないときは null。
+    /// </summary>
+    internal static Sprite? LensBlurOnGpu(Sprite s, EffectArgs a, int pad, float radius, float boost, bool clamp)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || LensBlurShader.Effect == null) return null;
+        if (radius < 0.5f) return s;
+        int n = Math.Clamp((int)MathF.Round(radius * radius * 1.2f), 8, 128);
+        var ox = new long[n]; var oy = new long[n];
+        float golden = MathF.PI * (3 - MathF.Sqrt(5));
+        for (int i = 0; i < n; i++)
+        {
+            float r = radius * MathF.Sqrt((i + 0.5f) / n), t = i * golden;
+            ox[i] = (long)(Math.Clamp(r * MathF.Cos(t), -1e7f, 1e7f) * 65536f); oy[i] = (long)(Math.Clamp(r * MathF.Sin(t), -1e7f, 1e7f) * 65536f);
+            if (Math.Abs(ox[i]) >= 1 << 23 || Math.Abs(oy[i]) >= 1 << 23) return null;
+        }
+        using var offs = ValueImage(n, 2, (x, y) => ((y == 0 ? ox[x] : oy[x]) + (1 << 23)) / 16777216f);
+        using var weights = ValueImage(256, 1, (i, _) => { float l = i / 255f; return (int)(64 * (1 + boost * 8 * l * l * l * l)) / 16777216f; });
+        if (offs == null || weights == null) return null;
+        using var offShader = offs.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var weightShader = weights.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        return MultiPassOnGpu(s, a, pad, pad, LensBlurShader, Tile(clamp), Tile(clamp), 1, (u, _, w, h) =>
+        {
+            u["n"] = (float)n; u["size"] = new float[] { w, h };
+        }, kids => { kids["offs"] = offShader; kids["weights"] = weightShader; });
+    }
+
+    /// <summary>
+    /// 縮小してからかけるレンズブラー (EffectsExtra.LensBlur の大きな半径) を GPU で。縮小 (PixelOps.Halve と同じく Skia の Low で半分ずつ) も GPU で行う。
+    /// 結果は余白 (pad) を付けて縮小した絵 (呼び出し側で k 倍に広げる)。GPU 描画でない・使えないときは null。
+    /// </summary>
+    internal static Sprite? SmallLensBlurOnGpu(Sprite s, EffectArgs a, int pad, int k, float radius, float boost, bool clamp)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || LensBlurShader.Effect == null) return null;
+        int pw = s.Width + pad * 2, ph = s.Height + pad * 2;
+        SKImage? small = null;
+        using var paint = new SKPaint { FilterQuality = SKFilterQuality.Low };
+        for (int step = 1; step < k; step *= 2)
+        {
+            int sw = step == 1 ? (pw + 1) / 2 : (small!.Width + 1) / 2, sh = step == 1 ? (ph + 1) / 2 : (small!.Height + 1) / 2;
+            using var surface = a.Context.CreateSurface(sw, sh);
+            if (surface == null) { small?.Dispose(); return null; }
+            surface.Canvas.Clear(SKColors.Transparent);
+            surface.Canvas.Scale(0.5f);
+            if (step == 1) surface.Canvas.DrawImage(s.Image, pad, pad, paint);
+            else surface.Canvas.DrawImage(small, 0, 0, paint);
+            small?.Dispose();
+            small = surface.Snapshot();
+        }
+        if (small == null) return null;
+        var owned = a.Context.Own(small);
+        return LensBlurOnGpu(new Sprite(owned, 0, 0), a, 0, radius / k, boost, clamp);
+    }
 }

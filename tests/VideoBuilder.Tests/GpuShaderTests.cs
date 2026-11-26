@@ -174,6 +174,11 @@ public unsafe class GpuShaderTests
         { "filter.sketch", "strength,color", new double[] { 150, 1 } },
         { "filter.paint", "type,radius", new double[] { 0, 6 } },
         { "filter.paint", "type,radius", new double[] { 1, 15 } },
+        { "filter.grain", "amount,size", new double[] { 80, 1.5 } },
+        { "filter.grain", "amount,size,color", new double[] { 80, 0.7, 1 } },
+        { "filter.lensblur", "radius,boost", new double[] { 6, 60 } },
+        { "filter.lensblur", "radius,boost,fixed", new double[] { 10, 0, 1 } },
+        { "filter.lensblur", "radius,boost", new double[] { 30, 50 } },
     };
 
     [Theory]
