@@ -195,6 +195,12 @@ public unsafe class GpuShaderTests
         { "filter.ascii", "size", new double[] { 10 } },
         { "filter.ascii", "size,color,chars", new double[] { 8, 1, 1 } },
         { "filter.anim", "type,depth,width", new double[] { 28, 50, 12 } },          // カーソル点滅
+        { "filter.mosaic", "size", new double[] { 50 } },                           // 大きなマス (横・縦に分けて合計)
+        { "filter.mosaic", "size", new double[] { 300 } },
+        { "filter.pixelart", "size,levels,dither", new double[] { 40, 4, 1 } },
+        { "filter.pixelart", "size,levels", new double[] { 70, 6 } },
+        { "filter.paint", "type,radius", new double[] { 0, 25 } },                   // 大きな筆
+        { "filter.paint", "type,radius", new double[] { 1, 30 } },
     };
 
     [Theory]
