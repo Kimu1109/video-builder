@@ -900,13 +900,10 @@ public static partial class Effects
     internal static Sprite? MosaicOnGpu(Sprite s, EffectArgs a, int size) =>
         size <= 1 && a.Context.Gpu != null && !GpuShadersDisabled ? s : CellsOnGpu(s, a, size, MosaicCellShader, _ => { }, null, BigMosaicShader);
 
-    /// <summary>大きなマスとして扱えるいちばん大きなマス (1 回の描画で 1 列に読む数。SkSL のループは 1025 回まで通る)。</summary>
-    private const int MaxBigCell = 1024;
-
     /// <summary>
     /// マス (size 四方) ごとの色を GPU で求めて (sksl が 1 画素 = 1 マスの小さな画像を描く。子 "image" が元の絵、uniform の cell・size も渡す)、
     /// 補間なしで広げた絵。マスが MaxMosaicCell より大きいときは、マスの合計を横・縦の順に求めてから big で色にする (BigCellSums)。
-    /// GPU 描画でない・マスが MaxBigCell より大きいときは null。
+    /// マスの大きさに上限はない。GPU 描画でないときは null。
     /// </summary>
     private static Sprite? CellsOnGpu(Sprite s, EffectArgs a, int size, Sksl sksl, Action<SKRuntimeEffectUniforms> uniforms,
         Action<SKRuntimeEffectChildren>? children = null, Sksl? big = null)
@@ -914,7 +911,7 @@ public static partial class Effects
         if (a.Context.Gpu == null || GpuShadersDisabled) return null;
         size = Math.Max(1, size);
         bool useBig = size > MaxMosaicCell;
-        if (useBig && (big == null || size > MaxBigCell)) return null;
+        if (useBig && big == null) return null;
         if ((useBig ? big! : sksl).Effect is not { } effect) return null;
         int sw = (s.Width + size - 1) / size, sh = (s.Height + size - 1) / size;
         SKImage? smallImg;
@@ -948,84 +945,134 @@ public static partial class Effects
         });
     }
 
-    // 1 列の合計: 出力の 1 画素が、入力の並び (axis の向き) の cell 個ずつの合計。ループの中身が大きいと展開しきれないので、
-    // 絵を読むもの (mask の色、0〜255) と、前の回の値 (idx24) を読むもの (part 1 = 4096 で割った商、2 = 余り) に分ける
+    // 1 列の合計。入力の並び (axis の向き) を cell 個ずつの区画に分け、区画を 1024 個ずつの塊に分けて (区画ごとに chunks 個)、
+    // 出力の 1 画素が 1 つの塊の合計 (SkSL のループは 1025 回まで通る)。出力の j 番目は、区画 j / chunks の j % chunks 番目の塊
     private const string SegmentSumSksl = """
-        uniform shader src;
         uniform float cell;
+        uniform float chunks;
         uniform float n;        // 入力の並びの長さ
         // axis: (1, 0) なら横、(0, 1) なら縦 (連結するので、最後の行に // の注釈を書かない)
         uniform float2 axis;
+        float2 range(float2 c) {
+            float j = dot(c, axis), cc = floor((j + 0.5) / chunks), k = j - cc * chunks;
+            float o = cc * cell + k * 1024;
+            return float2(o, min(n, min(cc * cell + cell, o + 1024)));
+        }
         """;
 
+    // 絵を読むもの (mask の色、0〜255)
     private static readonly Sksl SegmentSumImageShader = new(Enc24Sksl + SegmentSumSksl + """
-        uniform float4 mask;    // 読む色 (R・G・B・A のどれか 1 つが 1)
+        uniform shader src;
+        uniform float4 mask;
         half4 main(float2 p) {
-            float2 c = floor(p);
-            float o = dot(c, axis) * cell, e = min(n, o + cell), other = dot(c, 1 - axis);
-            float sum = 0;
+            float2 c = floor(p), r = range(c);
+            float other = dot(c, 1 - axis), sum = 0;
             for (int i = 0; i < 1025; i++) {
-                float t = o + float(i);
-                if (t >= e) break;
+                float t = r.x + float(i);
+                if (t >= r.y) break;
                 sum += dot(floor(float4(src.eval(axis * t + (1 - axis) * other + 0.5)) * 255 + 0.5), mask);
             }
             return enc24(sum / 16777216);
         }
         """);
 
-    private static readonly Sksl SegmentSumPartShader = new(Val24Sksl + Enc24Sksl + SegmentSumSksl + """
-        uniform float part;
+    // 前の回の値 (idx24) を読むもの。合計が 24 ビットを超えうるので、上位 (4096 単位) と下位 (4096 未満) に分けて足す
+    // (下位は毎回 4096 未満に戻すので、1024 個足しても収まる)。ループの中身を小さくするため、足すものごとに分ける
+    private static Sksl SegmentSumOf(string value) => new(Val24Sksl + Enc24Sksl + SegmentSumSksl + $$"""
+
+        uniform shader hiSrc;
+        uniform shader loSrc;
         half4 main(float2 p) {
-            float2 c = floor(p);
-            float o = dot(c, axis) * cell, e = min(n, o + cell), other = dot(c, 1 - axis);
-            float sum = 0;
+            float2 c = floor(p), r = range(c);
+            float other = dot(c, 1 - axis), sum = 0;
             for (int i = 0; i < 1025; i++) {
-                float t = o + float(i);
-                if (t >= e) break;
-                float v = idx24(src.eval(axis * t + (1 - axis) * other + 0.5));
-                float hv = floor(v / 4096);
-                sum += part == 1 ? hv : v - hv * 4096;
+                float t = r.x + float(i);
+                if (t >= r.y) break;
+                float2 q = axis * t + (1 - axis) * other + 0.5;
+                {{value}}
             }
             return enc24(sum / 16777216);
         }
         """);
 
+    // 下位をそのまま合計
+    private static readonly Sksl SegmentSumPlainShader = SegmentSumOf("sum += idx24(loSrc.eval(q));");
+    // 上位 + 下位の 4096 単位の部分
+    private static readonly Sksl SegmentSumHiShader = SegmentSumOf("sum += idx24(hiSrc.eval(q)) + floor(idx24(loSrc.eval(q)) / 4096);");
+    // 下位の 4096 未満の部分
+    private static readonly Sksl SegmentSumLoShader = SegmentSumOf("float lo = idx24(loSrc.eval(q)); sum += lo - floor(lo / 4096) * 4096;");
+
     /// <summary>
-    /// マス (size 四方) ごとの R・G・B・A の合計を、上位 (4096 で割った商の合計) と下位 (余りの合計) に分けた 8 枚の画像 (1 画素 = 1 マス) のシェーダー。
-    /// 合計は 24 ビットを超えうる (1024 × 1024 × 255) ので、上位と下位に分けて正確に持つ。横の合計 (1 行ぶん、24 ビットに収まる) → 縦の合計の 2 段。
+    /// マス (size 四方) ごとの R・G・B・A の合計を、上位 (4096 単位) と下位 (4096 未満) に分けた 8 枚の画像 (1 画素 = 1 マス) のシェーダー。
+    /// 横の合計 (1 行ぶん。絵の幅は 16384 までなので 24 ビットに収まる) → 縦の合計 (上位と下位に分ける) の順。
+    /// 1 回の描画で読むのは 1024 個までなので、それより大きいマスは 1024 個ずつの塊の合計を作ってから、塊を合計する。
     /// </summary>
     private static SKShader[]? BigCellSums(Sprite s, EffectArgs a, int size, SKShader image, List<IDisposable> owned)
     {
-        if (SegmentSumImageShader.Effect is not { } imageFx || SegmentSumPartShader.Effect is not { } partFx) return null;
+        if (SegmentSumImageShader.Effect is not { } imageFx || SegmentSumPlainShader.Effect is not { } plainFx
+            || SegmentSumHiShader.Effect is not { } hiFx || SegmentSumLoShader.Effect is not { } loFx) return null;
         int w = s.Width, h = s.Height, sw = (w + size - 1) / size, sh = (h + size - 1) / size;
-        SKShader? Run(int ow, int oh, SKShader src, bool first, int ch, int n, bool vertical, int part)
+        using var zero = ValueImage(1, 1, (_, _) => 0);
+        if (zero == null) return null;
+        var zeroShader = zero.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        owned.Add(zeroShader);
+        SKShader? Run(int ow, int oh, SKRuntimeEffect fx, Action<SKRuntimeEffectUniforms> uniforms, Action<SKRuntimeEffectChildren> children)
         {
-            var img = RunOnGpu(a, ow, oh, first ? imageFx : partFx, u =>
-            {
-                if (first) u["mask"] = new float[] { ch == 0 ? 1 : 0, ch == 1 ? 1 : 0, ch == 2 ? 1 : 0, ch == 3 ? 1 : 0 };
-                else u["part"] = (float)part;
-                u["cell"] = (float)size; u["n"] = (float)n;
-                u["axis"] = vertical ? new float[] { 0, 1 } : new float[] { 1, 0 };
-            }, k => k["src"] = src);
+            var img = RunOnGpu(a, ow, oh, fx, uniforms, children);
             if (img == null) return null;
             owned.Add(img);
             var sh2 = img.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
             owned.Add(sh2);
             return sh2;
         }
+        void Seg(SKRuntimeEffectUniforms u, int cell, int chunks, int n, bool vertical)
+        {
+            u["cell"] = (float)cell; u["chunks"] = (float)chunks; u["n"] = (float)n;
+            u["axis"] = vertical ? new float[] { 0, 1 } : new float[] { 1, 0 };
+        }
+        int Chunks(int cell, int n) => (Math.Min(cell, n) + 1023) / 1024;
         var result = new SKShader[8];
         for (int c = 0; c < 4; c++)
         {
-            // 横: 行ごとにマスの幅の合計 (最大 1024 × 255。24 ビットに収まる)
-            if (Run(sw, h, image, true, c, w, false, 0) is not { } rows) return null;
-            // 縦: 上位と下位を別々に合計する
-            if (Run(sw, sh, rows, false, c, h, true, 1) is not { } hi || Run(sw, sh, rows, false, c, h, true, 2) is not { } lo) return null;
+            // 横: 行ごとに、マスの幅の合計 (塊が 2 つ以上なら、塊の合計を作ってから合計する)
+            int ch = c, k = Chunks(size, w);
+            var rows = Run(sw * k, h, imageFx, u =>
+            {
+                Seg(u, size, k, w, false);
+                u["mask"] = new float[] { ch == 0 ? 1 : 0, ch == 1 ? 1 : 0, ch == 2 ? 1 : 0, ch == 3 ? 1 : 0 };
+            }, kids => kids["src"] = image);
+            for (int len = k; rows != null && len > 1; )
+            {
+                int kk = Chunks(len, len), inLen = len, src = sw * len;
+                var input = rows;
+                rows = Run(sw * kk, h, plainFx, u => Seg(u, inLen, kk, src, false),
+                    kids => { kids["hiSrc"] = zeroShader; kids["loSrc"] = input; });
+                len = kk;
+            }
+            if (rows == null) return null;
+            // 縦: 上位と下位を別々に合計する (1 回目は、横の合計を上位 0・下位 その値 として分ける)
+            SKShader hi = zeroShader, lo = rows;
+            int vcell = size, vk = Chunks(size, h), vn = h;
+            while (true)
+            {
+                SKShader hiIn = hi, loIn = lo;
+                int cell = vcell, chunks = vk, n = vn;
+                var nhi = Run(sw, sh * chunks, hiFx, u => Seg(u, cell, chunks, n, true), kids => { kids["hiSrc"] = hiIn; kids["loSrc"] = loIn; });
+                var nlo = Run(sw, sh * chunks, loFx, u => Seg(u, cell, chunks, n, true), kids => { kids["hiSrc"] = hiIn; kids["loSrc"] = loIn; });
+                if (nhi == null || nlo == null) return null;
+                hi = nhi; lo = nlo;
+                if (chunks == 1) break;
+                vcell = chunks; vn = sh * chunks; vk = Chunks(chunks, chunks);
+            }
             result[c] = hi; result[c + 4] = lo;
         }
         return result;
     }
 
-    /// <summary>大きなマスの SkSL の共通部分: 合計 (上位 hi・下位 lo) の子と、合計 ÷ 数の正確な切り捨て。</summary>
+    /// <summary>
+    /// 大きなマスの SkSL の共通部分: 合計 (上位 hi・下位 lo) の子と、マスの画素の数・合計 ÷ 数の正確な切り捨て。
+    /// 数 (最大 16384²) も 24 ビットを超えうるので、上位 nh (4096 単位)・下位 nl に分けて持つ。
+    /// </summary>
     private const string BigCellSksl = """
         uniform shader hi0; uniform shader hi1; uniform shader hi2; uniform shader hi3;
         uniform shader lo0; uniform shader lo1; uniform shader lo2; uniform shader lo3;
@@ -1033,14 +1080,25 @@ public static partial class Effects
         uniform float2 size;
         float4 his(float2 p) { return float4(idx24(hi0.eval(p)), idx24(hi1.eval(p)), idx24(hi2.eval(p)), idx24(hi3.eval(p))); }
         float4 los(float2 p) { return float4(idx24(lo0.eval(p)), idx24(lo1.eval(p)), idx24(lo2.eval(p)), idx24(lo3.eval(p))); }
-        // floor((hi × 4096 + lo) / n)。商は 0〜255 ほど。浮動小数点の見積もりを、正確な整数の差で直す
-        // (差 = (hi - q nh) 4096 + (lo - q nl)。どの項も 2^24 未満の整数なので誤差がない)
-        float divHL(float hi, float lo, float n) {
-            float q = floor((hi * 4096 + lo) / n);
-            float nh = floor(n / 4096), nl = n - nh * 4096;
+        // マス p の画素の数 a × b (a, b ≤ 16384) を、上位 (4096 単位) と下位に分ける (どの途中の値も 2^24 未満の整数)
+        float2 cellCount(float2 p) {
+            float2 o = floor(p) * cell, e = min(size, o + cell);
+            float a = e.x - o.x, b = e.y - o.y;
+            float ah = floor(a / 64), al = a - ah * 64;
+            float u = ah * b, t = al * b;               // a b = u × 64 + t
+            float uh = floor(u / 64);
+            float r = (u - uh * 64) * 64 + t;           // a b = uh × 4096 + r
+            float rh = floor(r / 4096);
+            return float2(uh + rh, r - rh * 4096);
+        }
+        // floor((hi × 4096 + lo) / (nh × 4096 + nl))。商は 0〜255 ほど。浮動小数点の見積もりを、正確な整数の差で直す
+        // (差は 0 の近くでだけ正確であればよい。(hi - q nh) 4096 + (lo - q nl) の各項は 2^24 未満の整数)
+        float divHL(float hi, float lo, float2 n) {
+            float q = floor((hi * 4096 + lo) / (n.x * 4096 + n.y));
             for (int i = 0; i < 3; i++) {
-                float d = (hi - q * nh) * 4096 + (lo - q * nl);
-                if (d < 0) q -= 1; else if (d >= n) q += 1;
+                float d = (hi - q * n.x) * 4096 + (lo - q * n.y);
+                float e = (hi - (q + 1) * n.x) * 4096 + (lo - (q + 1) * n.y);
+                if (d < 0) q -= 1; else if (e >= 0) q += 1;
             }
             return q;
         }
@@ -1048,9 +1106,10 @@ public static partial class Effects
 
     private static readonly Sksl BigMosaicShader = new(Val24Sksl + BigCellSksl + """
         half4 main(float2 p) {
-            float2 o = floor(p) * cell, e = min(size, o + cell);
-            float n = (e.x - o.x) * (e.y - o.y);
-            float4 h = his(p), l = los(p) + floor(n / 2);   // (合計 + n/2) / n の切り捨て (PixelOps.Mosaic と同じ四捨五入)
+            float2 n = cellCount(p);
+            // (合計 + n/2) / n の切り捨て (PixelOps.Mosaic と同じ四捨五入)。n/2 も上位・下位に分けて足す
+            float hh = floor(n.x / 2), hl = (n.x - hh * 2) * 2048 + floor(n.y / 2);
+            float4 h = his(p) + hh, l = los(p) + hl;
             return half4(float4(divHL(h.r, l.r, n), divHL(h.g, l.g, n), divHL(h.b, l.b, n), divHL(h.a, l.a, n)) / 255);
         }
         """);
@@ -1504,10 +1563,8 @@ public static partial class Effects
         float roundHalfEven(float x) { float f = floor(x), d = x - f; return d > 0.5 ? f + 1 : d < 0.5 ? f : mod(f, 2) == 0 ? f : f + 1; }
         float quant(float v, float th) { return clamp(roundHalfEven(v * (levels - 1) + th), 0, levels - 1) / (levels - 1); }
         half4 main(float2 p) {
-            float2 o = floor(p) * cell, e = min(size, o + cell);
-            float n = (e.x - o.x) * (e.y - o.y);
             float4 h = his(p), l = los(p);
-            float al = divHL(h.a, l.a, n) >= 128 ? 255 : 0;
+            float al = divHL(h.a, l.a, cellCount(p)) >= 128 ? 255 : 0;
             // CPU と同じく、合計を浮動小数点にしてから割る
             float4 sum = h * 4096 + l;
             float3 c = sum.a > 0 ? sum.rgb / sum.a : float3(0);

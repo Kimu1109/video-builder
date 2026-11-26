@@ -205,15 +205,63 @@ public unsafe class GpuShaderTests
 
     [Theory]
     [MemberData(nameof(Cases))]
-    public void Sksl_effects_on_gpu_match_the_readback_path(string id, string keys, double[] values)
+    public void Sksl_effects_on_gpu_match_the_readback_path(string id, string keys, double[] values) => Check(id, keys, values, 320, 180);
+
+    /// <summary>
+    /// とても大きなマスのモザイク (トランジションのピクセル化はマスの大きさに上限がない)。1 回の描画で読める 1024 個を超えるので
+    /// 塊に分けて合計し、合計も 24 ビットを超える。GPU の結果が PixelOps.Mosaic と同じ (読み戻さない) ことを確かめる。
+    /// </summary>
+    [Theory]
+    [InlineData(1500, 2200, 1300)]   // 横は塊 2 つ、縦は 1 つのマス
+    [InlineData(1100, 1300, 2300)]   // 縦も塊に分ける
+    [InlineData(5000, 2300, 2100)]   // 絵より大きなマス (1 つのマス)
+    [InlineData(700, 2300, 1500)]
+    public void Huge_mosaic_cells_on_gpu_match_the_cpu(int size, int w, int h)
     {
         using var gpu = Gpu();
         if (gpu == null) return;
-        var (p, e) = Scene(320, 180, id, keys, values);
+        gpu.MakeCurrent();
+        using var bmp = new SKBitmap(new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Premul));
+        var px = (uint*)bmp.GetPixels();
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                // 乗算済みとして正しい、場所で変わる色 (ほとんど不透明)
+                uint al = (uint)(x * 7 + y * 3) % 64 == 0 ? (uint)(x + y) % 256 : 255u;
+                uint r = (uint)(x * 255 / w) * al / 255, g = (uint)(y * 255 / h) * al / 255, b = (uint)((x ^ y) & 0xFF) * al / 255;
+                px[(long)y * w + x] = al << 24 | r << 16 | g << 8 | b;
+            }
+        // CPU の結果
+        using var expected = bmp.Copy();
+        PixelOps.Mosaic(expected.GetPixels(), w, h, expected.RowBytes, size);
+        // GPU の結果
+        using var raster = SKImage.FromBitmap(bmp);
+        using var texture = raster.ToTextureImage(gpu.Context);
+        var ctx = new RenderContext { Project = new Project(), Frame = 0, Gpu = gpu.Context };
+        try
+        {
+            long before = Effects.GpuReadbacks;
+            var result = Effects.MosaicOnGpu(new Sprite(texture, 0, 0), new EffectArgs { Context = ctx }, size);
+            Assert.True(result is { }, "GPU で処理できない");
+            Assert.Equal(0, Effects.GpuReadbacks - before);
+            using var actual = new SKBitmap(new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Premul));
+            Assert.True(result!.Value.Image.ReadPixels(actual.Info, actual.GetPixels(), actual.RowBytes, 0, 0));
+            var (mean, max) = Compare(expected, actual);
+            Console.WriteLine($"BENCH huge mosaic size={size} {w}x{h} mean={mean:0.000} max={max}");
+            Assert.True(max == 0, $"CPU と違う mean={mean} max={max}");
+        }
+        finally { ctx.DisposeTemporaries(); }
+    }
+
+    private static void Check(string id, string keys, double[] values, int width, int height)
+    {
+        using var gpu = Gpu();
+        if (gpu == null) return;
+        var (p, e) = Scene(width, height, id, keys, values);
         SKBitmap Render()
         {
             using var engine = new RenderEngine(gpu);
-            var bmp = new SKBitmap(new SKImageInfo(320, 180, SKColorType.Bgra8888, SKAlphaType.Premul));
+            var bmp = new SKBitmap(new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Premul));
             engine.RenderToBitmap(p, p.Root, Frame(id, keys), bmp);
             return bmp;
         }
