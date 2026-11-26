@@ -216,7 +216,10 @@ public class UiTests
         s.CurrentFrame = 70;      // 2 つ目の区間
         Pump();
 
-        var boxes = w.GetVisualDescendants().OfType<NumberBox>().ToList();
+        // 今表示している中身から探す。前のテストで表示した種類の中身も、隠れたまま残っている
+        // (Avalonia 12 は見えていない入力欄にはフォーカスを移さないので、そちらを選ぶと入力できない)
+        var body = w.GetVisualDescendants().OfType<ObjectSettingsView>().Select(v => v.CurrentBody).Single(b => b != null && b.IsEffectivelyVisible)!;
+        var boxes = body.GetVisualDescendants().OfType<NumberBox>().ToList();
         Assert.True(boxes.Count >= 12, $"NumberBox が {boxes.Count} 個しかない");
         // 標準描画の X の左側の入力欄を探す: 図形のトラックバー (隠れているものも含む) の行 × 2 個のあと
         int shapeTracks = EffectRegistry.Get(EffectRegistry.Shape).Params.Count(p => p.Kind == ParamKind.Track);

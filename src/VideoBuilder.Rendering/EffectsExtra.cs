@@ -59,7 +59,18 @@ public static partial class Effects
         /// <summary>何もしないなら null を返す。</summary>
         protected abstract Action<IntPtr, int, int, int>? Op(EffectArgs a);
         public void Process(PixelBuffer b, EffectArgs a) => Op(a)?.Invoke(b.Pointer, b.Width, b.Height, b.RowBytes);
-        public Sprite Apply(Sprite s, EffectArgs a) => Op(a) is { } op ? WithPixels(s, a, op, alsoOnGpu: true) ?? s : s;
+
+        /// <summary>
+        /// GPU 描画のとき、SkSL で GPU のまま処理した絵を返す (読み戻さない。設計書 22.54)。
+        /// GPU で処理しない効果・使えないときは null (読み戻して Op で処理する)。何もしない設定なら s を返すこと。
+        /// </summary>
+        protected virtual Sprite? OnGpu(Sprite s, EffectArgs a) => null;
+
+        public Sprite Apply(Sprite s, EffectArgs a)
+        {
+            if (a.Context.Gpu != null && !GpuShadersDisabled && OnGpu(s, a) is { } onGpu) return onGpu;
+            return Op(a) is { } op ? WithPixels(s, a, op, alsoOnGpu: true) ?? s : s;
+        }
     }
 
     // ================= 色・キー =================
@@ -91,6 +102,20 @@ public static partial class Effects
             if (MathF.Abs(shift % 360) < 1e-3f && sat == 1 && val == 1) return null;
             return (px, w, h, rb) => PixelFx.HueConvert(px, w, h, rb, fromHue, range, edge, shift, sat, val);
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            a.Color("from").ToHsv(out float fromHue, out _, out _);
+            a.Color("to").ToHsv(out float toHue, out _, out _);
+            float shift = toHue - fromHue + a.Track("hue");
+            float sat = a.Track("saturation") / 100f, val = a.Track("value") / 100f;
+            if (MathF.Abs(shift % 360) < 1e-3f && sat == 1 && val == 1) return s;
+            return ApplyGpuShader(s, a, HueConvertShader, u =>
+            {
+                u["keyHue"] = fromHue; u["range"] = a.Track("range"); u["edge"] = MathF.Max(0.001f, a.Track("edge"));
+                u["shift"] = shift; u["satScale"] = sat; u["valScale"] = val;
+            });
+        }
     }
 
     /// <summary>カラーキー: 指定の色に近い所 (明るさの差と色の差がそれぞれ範囲内) を透明にする。</summary>
@@ -102,6 +127,16 @@ public static partial class Effects
             var c = a.Color("color");
             float luma = a.Track("luma"), chroma = a.Track("chroma"), edge = Math.Max(0.001f, a.Track("edge") / 100f);
             return (px, w, h, rb) => PixelFx.ColorKey(px, w, h, rb, c.Red, c.Green, c.Blue, luma, chroma, edge);
+        }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            var c = a.Color("color");
+            return ApplyGpuShader(s, a, ColorKeyShader, u =>
+            {
+                u["key"] = new float[] { c.Red, c.Green, c.Blue };
+                u["lumaRange"] = a.Track("luma"); u["chromaRange"] = a.Track("chroma"); u["edge"] = Math.Max(0.001f, a.Track("edge") / 100f);
+            });
         }
     }
 
@@ -115,6 +150,12 @@ public static partial class Effects
             bool bright = a.Effect.GetInt("type") == 1;
             return (px, w, h, rb) => PixelFx.LumaKey(px, w, h, rb, level, soft, bright);
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a) =>
+            ApplyGpuShader(s, a, LumaKeyShader, u =>
+            {
+                u["level"] = a.Track("level"); u["soft"] = MathF.Max(0.5f, a.Track("soft")); u["bright"] = a.Effect.GetInt("type") == 1 ? 1f : 0f;
+            });
     }
 
     // ================= 光 =================
@@ -132,7 +173,7 @@ public static partial class Effects
             return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
             {
                 c.DrawImage(s.Image, x, y);
-                c.DrawImage(blurred.Image, x - (blurred.Cx - s.Cx), y - (blurred.Cy - s.Cy), paint);
+                PixelBlend.DrawImage(c, blurred.Image, x - (blurred.Cx - s.Cx), y - (blurred.Cy - s.Cy), paint);
             });
         }
     }
@@ -147,15 +188,15 @@ public static partial class Effects
             float threshold = Math.Clamp(a.Track("threshold"), 0, 100) / 100f * 255f;
             if (strength <= 0 || length <= 0) return s;
             float ox = a.Track("x"), oy = a.Track("y");
-            var bright = threshold > 0 ? WithPixels(s, a, (px, w, h, rb) => PixelFx.BrightPass(px, w, h, rb, threshold), alsoOnGpu: true) ?? s : s;
+            var bright = BrightPass(s, a, threshold);
             int passes = a.IsDraft ? 8 : 10;
             // 光の筋は絵の外まで伸びるので、伸びるぶんの余白を付ける (いちばん遠い所が √(1 + 長さ) 倍まで伸びる)
             float far = MathF.Sqrt(s.Width * s.Width + s.Height * s.Height) / 2 + MathF.Sqrt(ox * ox + oy * oy);
             int pad = a.IsFrameBuffer ? 0 : (int)Math.Min(MathF.Ceiling(far * (MathF.Sqrt(1 + length) - 1)), 4096);
             bool clampEdge = a.IsFrameBuffer;
             var rays = AtHalfForPreview(bright, a, true, (half, k) =>
-                           Resample(half, a, (int)(pad * k), (int)(pad * k), (src, tmp, w, h, rb) => PixelFx.RadialBlur(src, tmp, w, h, rb, half.Cx + (int)(pad * k) + ox * k, half.Cy + (int)(pad * k) + oy * k, length, clampEdge, passes)))
-                       ?? Resample(bright, a, pad, pad, (src, tmp, w, h, rb) => PixelFx.RadialBlur(src, tmp, w, h, rb, bright.Cx + pad + ox, bright.Cy + pad + oy, length, clampEdge, passes));
+                           RadialBlurSprite(half, a, (int)(pad * k), (int)(pad * k), half.Cx + (int)(pad * k) + ox * k, half.Cy + (int)(pad * k) + oy * k, length, clampEdge, passes))
+                       ?? RadialBlurSprite(bright, a, pad, pad, bright.Cx + pad + ox, bright.Cy + pad + oy, length, clampEdge, passes);
             if (rays is not { } r) return s;
             int times = Math.Max(1, (int)MathF.Ceiling(strength * 2));
             using var paint = new SKPaint { BlendMode = SKBlendMode.Plus, Color = SKColors.White.WithAlpha((byte)Math.Clamp(MathF.Round(strength * 2 / times * 255), 0, 255)) };
@@ -164,7 +205,7 @@ public static partial class Effects
             return Redraw(s, a, rp, rp, rp, rp, (c, x, y) =>
             {
                 if (!only) c.DrawImage(s.Image, x, y);
-                for (int i = 0; i < times; i++) c.DrawImage(r.Image, x - (r.Cx - s.Cx), y - (r.Cy - s.Cy), paint);
+                for (int i = 0; i < times; i++) PixelBlend.DrawImage(c, r.Image, x - (r.Cx - s.Cx), y - (r.Cy - s.Cy), paint);
             });
         }
     }
@@ -182,6 +223,22 @@ public static partial class Effects
             var c = a.Color("color");
             return (px, w, h, rb) => PixelFx.RimLight(px, w, h, rb, width / 2, lx, ly, width * dir, c.Red, c.Green, c.Blue, strength);
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float strength = a.Track("strength") / 100f, width = a.Track("width"), dir = Math.Clamp(a.Track("direction") / 100f, 0, 1);
+            if (strength <= 0 || width <= 0) return s;
+            float rad = a.Track("angle") * MathF.PI / 180f;
+            float lx = MathF.Sin(rad), ly = -MathF.Cos(rad);
+            var c = a.Color("color");
+            float shift = width * dir;
+            return WithBlurredAlphaOnGpu(s, a, RimLightShader, MathF.Max(0.3f, width / 2), SKShaderTileMode.Decal, u =>
+            {
+                u["shiftPx"] = new[] { MathF.Round(lx * shift), MathF.Round(ly * shift) };
+                u["k"] = (float)(int)(Math.Clamp(strength, 0, 8) * 512);
+                u["color"] = new float[] { c.Red, c.Green, c.Blue };
+            });
+        }
     }
 
     /// <summary>凸エッジ: 縁を盛り上がったように見せる (光の当たる側を明るく、反対側を暗く)。</summary>
@@ -195,6 +252,19 @@ public static partial class Effects
             float rad = a.Track("angle") * MathF.PI / 180f;
             float lx = MathF.Sin(rad), ly = -MathF.Cos(rad);
             return (px, w, h, rb) => PixelFx.Bevel(px, w, h, rb, width / 2, height, lx, ly);
+        }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float width = a.Track("width"), height = a.Track("height") / 100f;
+            if (width <= 0 || height <= 0) return s;
+            float rad = a.Track("angle") * MathF.PI / 180f;
+            float sigma = MathF.Max(0.3f, width / 2);
+            return WithBlurredAlphaOnGpu(s, a, BevelShader, sigma, SKShaderTileMode.Clamp, u =>
+            {
+                u["light"] = new[] { MathF.Sin(rad), -MathF.Cos(rad) };
+                u["k"] = height * MathF.Max(1, width / 2) / 255f;
+            });
         }
     }
 
@@ -211,11 +281,7 @@ public static partial class Effects
             uint premul = (uint)(c.Blue * al / 255) | (uint)(c.Green * al / 255) << 8 | (uint)(c.Red * al / 255) << 16 | al << 24;
             // 絵の端に接する縁も線になるよう、周りに 1 ピクセルの透明な余白を付ける
             int pad = a.IsFrameBuffer ? 0 : 1;
-            return Resample(s, a, pad, pad, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.EdgeDetect(src, tmp, w, h, rb, gain, threshold, alphaEdge, premul, overlay);
-                return tmp;
-            }) ?? s;
+            return EdgeDetectSprite(s, a, pad, gain, threshold, alphaEdge, premul, overlay) ?? s;
         }
     }
 
@@ -233,11 +299,7 @@ public static partial class Effects
             float cx = s.Cx + a.Track("x"), cy = s.Cy + a.Track("y");
             float phase = (float)(2 * Math.PI * speed * a.Time % (2 * Math.PI));
             bool clamp = a.IsFrameBuffer;
-            return Resample(s, a, 0, 0, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.Ripple(src, tmp, w, h, rb, cx, cy, amp, wave, phase, decay, clamp);
-                return tmp;
-            }) ?? s;
+            return RippleSprite(s, a, 0, 0, cx, cy, amp, wave, phase, decay, clamp) ?? s;
         }
     }
 
@@ -249,11 +311,7 @@ public static partial class Effects
         {
             float zoom = Math.Max(0.01f, a.Track("zoom") / 100f), hole = a.Track("hole"), rot = a.Track("rotation"), swirl = a.Track("swirl") / 100f;
             float radius = Math.Min(s.Width, s.Height) / 2f * zoom;
-            return Resample(s, a, 0, 0, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.Polar(src, tmp, w, h, rb, radius, hole, rot, swirl);
-                return tmp;
-            }) ?? s;
+            return PolarSprite(s, a, radius, hole, rot, swirl) ?? s;
         }
     }
 
@@ -277,6 +335,8 @@ public static partial class Effects
                 int w0 = s.Width, h0 = s.Height;
                 using var mapPaint = new SKPaint { FilterQuality = SKFilterQuality.Medium };
                 using var stretched = PixelOps.DrawParallel(w0, h0, c => c.DrawImage(map, SKRect.Create(w0, h0), mapPaint));
+                // GPU 描画では SkSL で (引き伸ばしたマップは GPU へ送るだけ。絵は読み戻さない)
+                if (DisplaceByMapOnGpu(s, a, stretched, p1, p2, clamp) is { } onGpu) return onGpu;
                 using var mp = stretched.PeekPixels();
                 if (mp == null) return s;
                 return Resample(s, a, 0, 0, (src, tmp, w, h, rb) =>
@@ -289,11 +349,7 @@ public static partial class Effects
             float rx = size / 2 * (aspect < 0 ? 1 + aspect : 1), ry = size / 2 * (aspect > 0 ? 1 - aspect : 1);
             float cx = s.Cx + a.Track("x"), cy = s.Cy + a.Track("y"), feather = a.Track("feather") / 100f;
             if (mode == 0 ? p1 == 0 && p2 == 0 : p1 == 0) return s;
-            return Resample(s, a, 0, 0, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.Displace(src, tmp, w, h, rb, mode, shape == 1, cx, cy, rx, ry, feather, p1, p2, clamp);
-                return tmp;
-            }) ?? s;
+            return DisplaceSprite(s, a, 0, 0, mode, shape == 1, cx, cy, rx, ry, feather, p1, p2, clamp) ?? s;
         }
     }
 
@@ -325,15 +381,16 @@ public static partial class Effects
                     case 2: area = SKRect.Create(x + w + gap, y, w, h); near = new(area.Left, 0); far = new(area.Left + len, 0); break;
                     default: area = SKRect.Create(x - gap - w, y, w, h); near = new(area.Right, 0); far = new(area.Right - len, 0); break;
                 }
-                c.SaveLayer(area, null);
-                c.Save();
-                if (vertical) { c.Translate(0, area.Top + area.Bottom); c.Scale(1, -1); c.DrawImage(s.Image, x, area.Top); }
-                else { c.Translate(area.Left + area.Right, 0); c.Scale(-1, 1); c.DrawImage(s.Image, area.Left, y); }
-                c.Restore();
+                // 反射した絵のレイヤー (CPU 描画では自前で合成する。PixelBlend)
+                using var layer = PixelBlend.BeginLayer(c, area, SKBlendMode.SrcOver);
+                var lc = layer.Canvas;
+                lc.Save();
+                if (vertical) { lc.Translate(0, area.Top + area.Bottom); lc.Scale(1, -1); lc.DrawImage(s.Image, x, area.Top); }
+                else { lc.Translate(area.Left + area.Right, 0); lc.Scale(-1, 1); lc.DrawImage(s.Image, area.Left, y); }
+                lc.Restore();
                 using var shader = SKShader.CreateLinearGradient(near, far, new[] { edge, SKColors.Transparent }, SKShaderTileMode.Clamp);
                 using var mask = new SKPaint { Shader = shader, BlendMode = SKBlendMode.DstIn };
-                c.DrawRect(area, mask);
-                c.Restore();
+                PixelBlend.Draw(lc, area, mask, (cv, p) => cv.DrawRect(area, p));
             });
         }
     }
@@ -347,11 +404,7 @@ public static partial class Effects
             int n = Math.Clamp((int)MathF.Round(a.Track("count")), 1, 360);
             float cx = s.Cx + a.Track("x"), cy = s.Cy + a.Track("y"), rot = a.Track("rotation");
             bool clamp = a.IsFrameBuffer || a.Check("clamp");
-            return Resample(s, a, 0, 0, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.Kaleidoscope(src, tmp, w, h, rb, cx, cy, n * 2, rot, clamp);
-                return tmp;
-            }) ?? s;
+            return KaleidoSprite(s, a, 0, 0, cx, cy, n * 2, rot, clamp) ?? s;
         }
     }
 
@@ -371,6 +424,8 @@ public static partial class Effects
             // 行ベクトルの行列なので、列を取り出して 3x3 (行優先) にする
             var r = new[] { m.M11, m.M21, m.M31, m.M12, m.M22, m.M32, m.M13, m.M23, m.M33 };
             float shade = Math.Clamp(a.Track("shade") / 100f, 0, 1);
+            // GPU 描画では SkSL で (読み戻さない。設計書 22.54)
+            if (SphereOnGpu(s, a, d, r, shade) is { } onGpu) return onGpu;
             if (CopyPixels(s) is not { } copy) return s;
             try
             {
@@ -452,8 +507,13 @@ public static partial class Effects
             int k = 1;
             while (k < 8 && radius / k > 12) k *= 2;
             if (k == 1)
-                return Resample(s, a, pad, pad, (src, tmp, w, h, rb) => { PixelFx.LensBlur(src, tmp, w, h, rb, radius, boost, clamp); return tmp; }) ?? s;
+                return LensBlurOnGpu(s, a, pad, radius, boost, clamp) ?? Resample(s, a, pad, pad, (src, tmp, w, h, rb) => { PixelFx.LensBlur(src, tmp, w, h, rb, radius, boost, clamp); return tmp; }) ?? s;
             // 縮小 (余白も付ける) → ぼかす → 元の大きさに戻す
+            if (SmallLensBlurOnGpu(s, a, pad, k, radius, boost, clamp) is { } onGpu)
+            {
+                using var gpuUp = new SKPaint { FilterQuality = SKFilterQuality.Low, BlendMode = SKBlendMode.Src };
+                return Redraw(s, a, pad, pad, pad, pad, (c, _, _) => c.DrawImage(onGpu.Image, SKRect.Create(onGpu.Width, onGpu.Height), SKRect.Create(0, 0, onGpu.Width * k, onGpu.Height * k), gpuUp));
+            }
             SKImage? raster = null;
             using var pm = s.Image.PeekPixels();
             if (pm == null && CopyPixels(s) is { } cp) raster = PixelPool.ToImage(cp.Buffer, Info(s.Width, s.Height), cp.RowBytes);
@@ -499,7 +559,7 @@ public static partial class Effects
             if (length < 1) return s;
             int padX = (int)MathF.Ceiling(MathF.Abs(lx)) + 1, padY = (int)MathF.Ceiling(MathF.Abs(ly)) + 1;
             int passes = a.IsDraft ? 8 : 10;
-            var r = Resample(s, a, padX, padY, (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, lx, ly, length, false, passes));
+            var r = DirectionalBlurSprite(s, a, padX, padY, lx, ly, length, false, passes);
             if (r is not { } blurred) return s;
             // ぼかしは今の位置を中心に前後へ広がるので、半分だけ後ろへずらして、通ってきた側に尾を引かせる
             return blurred with { Cx = blurred.Cx + lx / 2, Cy = blurred.Cy + ly / 2 };
@@ -515,6 +575,13 @@ public static partial class Effects
             float r = a.Track("radius");
             if (r <= 0) return null;
             return (px, w, h, rb) => PixelFx.EdgeFeather(px, w, h, rb, r / 2);
+        }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float r = a.Track("radius");
+            if (r <= 0 || r / 2 < 0.2f) return s;
+            return WithBlurredAlphaOnGpu(s, a, EdgeFeatherShader, r / 2, SKShaderTileMode.Decal, _ => { });
         }
     }
 
@@ -623,8 +690,10 @@ public static partial class Effects
             float cx = s.Cx + a.Track("x"), cy = s.Cy + a.Track("y");
             return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
             {
-                c.SaveLayer();
-                c.DrawImage(s.Image, x, y);
+                // 元の絵の形で切り抜くためのレイヤー (CPU 描画では自前で合成する。PixelBlend)
+                using var layer = PixelBlend.BeginLayer(c, SKRect.Create(x, y, s.Width, s.Height), SKBlendMode.SrcOver);
+                var lc = layer.Canvas;
+                lc.DrawImage(s.Image, x, y);
                 using var paint = new SKPaint
                 {
                     BlendMode = FileBlendModes[mode], FilterQuality = SKFilterQuality.Medium,
@@ -637,13 +706,12 @@ public static partial class Effects
                     var local = SKMatrix.CreateScale(zoom, zoom).PostConcat(SKMatrix.CreateTranslation(dest.Left, dest.Top));
                     using var shader = SKShader.CreateImage(img, SKShaderTileMode.Repeat, SKShaderTileMode.Repeat, local);
                     paint.Shader = shader;
-                    c.DrawRect(SKRect.Create(x, y, s.Width, s.Height), paint);
+                    PixelBlend.Draw(lc, SKRect.Create(x, y, s.Width, s.Height), paint, (cv, p) => cv.DrawRect(SKRect.Create(x, y, s.Width, s.Height), p));
                 }
-                else c.DrawImage(img, dest, paint);
+                else PixelBlend.Draw(lc, dest, paint, (cv, p) => cv.DrawImage(img, dest, p));
                 // 元の絵の形で切り抜く
                 using var clip = new SKPaint { BlendMode = SKBlendMode.DstIn };
-                c.DrawImage(s.Image, x, y, clip);
-                c.Restore();
+                PixelBlend.DrawImage(lc, s.Image, x, y, clip);
             });
         }
     }
@@ -655,7 +723,7 @@ public static partial class Effects
         public Sprite Apply(Sprite s, EffectArgs a)
         {
             int mode = a.Effect.GetInt("mode");
-            return Resample(s, a, 0, 0, (src, tmp, w, h, rb) => { PixelFx.Deinterlace(src, tmp, w, h, rb, mode); return tmp; }) ?? s;
+            return DeinterlaceSprite(s, a, mode) ?? s;
         }
     }
 

@@ -51,7 +51,7 @@ public sealed class TimelineCanvas : Control
         DragDrop.SetAllowDrop(this, true);
         AddHandler(DragDrop.DragOverEvent, (_, e) =>
         {
-            bool files = e.Data.Contains(DataFormats.Files);
+            bool files = e.DataTransfer.Contains(DataFormat.File);
             e.DragEffects = files ? DragDropEffects.Copy : DragDropEffects.None;
             ShowDropTarget(files ? e.GetPosition(this) : null);
             e.Handled = true;
@@ -813,7 +813,7 @@ public sealed class TimelineCanvas : Control
 
     private void OnDrop(object? sender, DragEventArgs e)
     {
-        var files = e.Data.GetFiles();
+        var files = e.DataTransfer.TryGetFiles();
         ShowDropTarget(null);
         if (files == null) return;
         DropFiles(files.Select(f => f.TryGetLocalPath()).Where(p => p != null).Select(p => p!).ToList(), e.GetPosition(this));

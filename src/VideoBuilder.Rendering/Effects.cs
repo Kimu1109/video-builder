@@ -145,9 +145,23 @@ public static partial class Effects
         return new Sprite(img, s.Cx, s.Cy);
     }
 
+    /// <summary>
+    /// 効果が GPU の絵を CPU に読み戻した回数 (計測・テスト用)。読み戻しは GPU が描き終えるのを待つので遅い。
+    /// SkSL で GPU のまま処理する効果 (設計書 22.54) では増えない。
+    /// </summary>
+    public static long GpuReadbacks => Interlocked.Read(ref _gpuReadbacks);
+    private static long _gpuReadbacks;
+
+    /// <summary>GPU の絵 (テクスチャ) を読み戻すなら数える。</summary>
+    internal static void CountReadback(SKImage image)
+    {
+        if (image.IsTextureBacked) Interlocked.Increment(ref _gpuReadbacks);
+    }
+
     /// <summary>画像の中身を、使い回しのバッファ (BGRA) に写す。失敗したら null。</summary>
     internal static (IntPtr Buffer, int RowBytes)? CopyPixels(Sprite s)
     {
+        CountReadback(s.Image);
         var info = Info(s.Width, s.Height);
         int rowBytes = info.Width * 4;
         long bytes = (long)rowBytes * info.Height;
@@ -378,7 +392,7 @@ public static partial class Effects
     /// Skia の画像フィルタ (色の付いた絵全体を太らせてぼかす) と同じ結果を、アルファの 1 チャンネルだけで計算する。
     /// ピクセルを読めない絵なら null (呼び出し側は Skia で描く)。
     /// </summary>
-    public static unsafe SKImage? BorderOnCpu(SKImage image, int size, float sigma, int pad, SKColor color)
+    public static unsafe SKImage? BorderOnCpu(SKImage image, int size, float sigma, int pad, SKColor color, bool only = false)
     {
         int w = image.Width, h = image.Height, ow = w + pad * 2, oh = h + pad * 2;
         if (ow > 16384 || oh > 16384) return null;
@@ -435,6 +449,9 @@ public static partial class Effects
                         int sx = x - pad;
                         uint sp = srow != null && sx >= 0 && sx < w ? srow[sx] : 0;
                         int sa = (int)(sp >> 24);
+                        // 縁だけ (only) のときは、元の絵は重ねずに、元の絵のある所の縁を抜く (DstOut と同じ: 縁 × (1 - sa))。
+                        // sa は元の絵のアルファのまま使い、重ねる元の絵 (sp) だけを 0 にする
+                        if (only) sp = 0;
                         // よくある場合を先に: 元の絵が不透明 (縁取りは見えない)・縁取りも元の絵もない
                         if (sa == 255) { d[x] = sp; continue; }
                         if (mv == 0) { d[x] = sp; continue; }
@@ -443,7 +460,7 @@ public static partial class Effects
                         int bb = Div255(Div255(pb * mv) * inv) + (int)(sp & 0xFF);
                         int bg = Div255(Div255(pg * mv) * inv) + (int)(sp >> 8 & 0xFF);
                         int br = Div255(Div255(pr * mv) * inv) + (int)(sp >> 16 & 0xFF);
-                        int ba = Div255(Div255(ca * mv) * inv) + sa;
+                        int ba = Div255(Div255(ca * mv) * inv) + (only ? 0 : sa);
                         d[x] = (uint)(bb | bg << 8 | br << 16 | ba << 24);
                     }
                 }
@@ -471,7 +488,8 @@ public static partial class Effects
             if (size <= 0) return s;
             int pad = a.IsFrameBuffer ? 0 : size + (int)MathF.Ceiling(blur * 1.5f);
             bool only = a.Check("only");
-            if (!only && a.Context.Gpu == null && BorderOnCpu(s.Image, size, blur / 2, pad, a.Color("color")) is { } own)
+            // CPU 描画は自前で描く (SkiaSharp 3 の CPU 描画では、Skia の太らせるフィルタが 2.88 の 50 倍ほど遅い)
+            if (a.Context.Gpu == null && BorderOnCpu(s.Image, size, blur / 2, pad, a.Color("color"), only) is { } own)
                 return new Sprite(a.Context.Own(own), s.Cx + pad, s.Cy + pad);
             using var dilate = SKImageFilter.CreateDilate(size, size);
             using var cf = SKColorFilter.CreateBlendMode(a.Color("color"), SKBlendMode.SrcIn);
@@ -483,7 +501,7 @@ public static partial class Effects
             return Redraw(s, a, pad, pad, pad, pad, (c, x, y) =>
             {
                 c.DrawImage(s.Image, x, y, paint);
-                c.DrawImage(s.Image, x, y, cut);
+                PixelBlend.DrawImage(c, s.Image, x, y, cut);
             });
         }
     }
@@ -543,7 +561,8 @@ public static partial class Effects
             int size = Math.Max(1, (int)a.Track("size"));
             if (size <= 1) return s;
             // ピクセルを直接平均する。CPU 描画では縮小と拡大を 2 回描くより速く、マスの色も正確になる。
-            // GPU 描画でも同じ絵になるよう、読み戻してこの処理を使う
+            // GPU 描画では SkSL で同じ計算をする (読み戻さない。設計書 22.54)。マスが大きすぎるときは読み戻してこの処理を使う
+            if (MosaicOnGpu(s, a, size) is { } onGpu) return onGpu;
             if (WithPixels(s, a, (px, w, h, rb) => PixelOps.Mosaic(px, w, h, rb, size), alsoOnGpu: true) is { } fast) return fast;
             int sw = Math.Max(1, (int)MathF.Ceiling(s.Width / (float)size)), sh = Math.Max(1, (int)MathF.Ceiling(s.Height / (float)size));
             using var small = a.Context.CreateSurface(sw, sh);
@@ -571,8 +590,7 @@ public static partial class Effects
             else PixelOps.ChromaKey(b.Pointer, b.Width, b.Height, b.RowBytes, kh, ks, hueRange, satRange, edge);
         }
 
-        // SkSL シェーダ (SKRuntimeEffect) での実装は、SkiaSharp 2.88 では描画時にネイティブ側で
-        // クラッシュするため使わない。GPU 描画中でも、この効果だけは画像を読み戻して CPU で処理する。
+        // GPU 描画では SkSL のシェーダーで処理する (SkiaSharp 3。設計書 22.54)。CPU 描画・SkSL を使えないときは C# の処理
         public unsafe Sprite Apply(Sprite s, EffectArgs a)
         {
             var key = a.Color("color");
@@ -580,6 +598,7 @@ public static partial class Effects
             float hueRange = a.Track("hue") / 256f * 180f;     // 度
             float satRange = a.Track("saturation") / 256f * 100f;
             float edge = Math.Max(0.001f, a.Track("edge") / 100f);
+            if (ChromaKeyOnGpu(s, a, kh, ks, hueRange, satRange, edge) is { } onGpu) return onGpu;
 
             if (CopyPixels(s) is not { } copy) return s;
             if (a.Context.Draft) PixelOps.ChromaKeyFast(copy.Buffer, s.Width, s.Height, copy.RowBytes, kh, ks, hueRange, satRange, edge);
@@ -864,7 +883,7 @@ public static partial class Effects
                     if (len < 1.5f) return s;
                     int padX = (int)MathF.Ceiling(MathF.Abs(mx) / MathF.Max(1, MathF.Sqrt(mx * mx + my * my)) * len / 2) + 1;
                     int padY = (int)MathF.Ceiling(MathF.Abs(my) / MathF.Max(1, MathF.Sqrt(mx * mx + my * my)) * len / 2) + 1;
-                    return Resample(s, a, padX, padY, (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, mx, my, len, false, a.IsDraft ? 8 : 10)) ?? s;
+                    return DirectionalBlurSprite(s, a, padX, padY, mx, my, len, false, a.IsDraft ? 8 : 10) ?? s;
                 }
                 default:  // ひし形ワイプ: 中心からひし形を広げる
                 {

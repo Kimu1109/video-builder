@@ -47,7 +47,7 @@ public static class FileDropZone
     }
 
     private static IEnumerable<string> FilesOf(DragEventArgs e) =>
-        e.Data.GetFiles()?.Select(f => f.TryGetLocalPath()).Where(p => p != null).Select(p => p!) ?? Enumerable.Empty<string>();
+        e.DataTransfer.TryGetFiles()?.Select(f => f.TryGetLocalPath()).Where(p => p != null).Select(p => p!) ?? Enumerable.Empty<string>();
 
     /// <summary>ドラッグ中の枠の表示を、control だけに付ける (null なら消す)。</summary>
     public static void Highlight(Control? control)

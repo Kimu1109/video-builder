@@ -41,6 +41,12 @@ public sealed class ObjectSettingsView : UserControl
     private sealed record Panel(StackPanel Body, List<Action> Refreshers, List<Action> FrameWatchers) { public long LastUsed; }
     private readonly Dictionary<string, Panel> _panels = new();
     private Panel? _current;
+
+    /// <summary>
+    /// 今表示している設定の中身 (選んだオブジェクトのもの)。テスト用。
+    /// 前に表示した種類のオブジェクトの中身も、隠したまま残して使い回すので、入力欄はここから探すこと。
+    /// </summary>
+    internal Control? CurrentBody => _current?.Body;
     private long _useCounter;
     private const int MaxPanels = 12;
     private string _signature = "";

@@ -38,7 +38,7 @@ public sealed class StoryboardStrip : Control
         DragDrop.SetAllowDrop(this, true);
         AddHandler(DragDrop.DragOverEvent, (_, e) =>
         {
-            bool files = e.Data.Contains(DataFormats.Files);
+            bool files = e.DataTransfer.Contains(DataFormat.File);
             e.DragEffects = files ? DragDropEffects.Copy : DragDropEffects.None;
             ShowDropTarget(files ? e.GetPosition(this) : null);
             e.Handled = true;
@@ -47,7 +47,7 @@ public sealed class StoryboardStrip : Control
         _session.ProjectChanged += SimpleMedia.ForgetExists;
         AddHandler(DragDrop.DropEvent, (_, e) =>
         {
-            var files = e.Data.GetFiles()?.Select(f => f.TryGetLocalPath()).Where(p => p != null).Select(p => p!).ToList();
+            var files = e.DataTransfer.TryGetFiles()?.Select(f => f.TryGetLocalPath()).Where(p => p != null).Select(p => p!).ToList();
             var pos = e.GetPosition(this);
             var at = InsertIndexAt(pos.X);
             ShowDropTarget(null);

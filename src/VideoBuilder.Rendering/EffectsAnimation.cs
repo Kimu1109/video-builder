@@ -157,15 +157,15 @@ public static partial class Effects
         return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
         {
             c.DrawImage(s.Image, x, y);
-            using var layerPaint = new SKPaint { BlendMode = SKBlendMode.Multiply };
-            c.SaveLayer(layerPaint);
+            // 乗算のレイヤー (CPU 描画では自前で合成する。PixelBlend)
+            using var layer = PixelBlend.BeginLayer(c, SKRect.Create(x, y, s.Width, s.Height), SKBlendMode.Multiply);
+            var lc = layer.Canvas;
             var local = SKMatrix.CreateRotationDegrees(-25).PostConcat(SKMatrix.CreateTranslation(x + shift * period, y));
             using (var shader = SKShader.CreateLinearGradient(new SKPoint(0, 0), new SKPoint(period, 0), colors, null, SKShaderTileMode.Repeat, local))
             using (var paint = new SKPaint { Shader = shader })
-                c.DrawRect(SKRect.Create(x, y, s.Width, s.Height), paint);
+                lc.DrawRect(SKRect.Create(x, y, s.Width, s.Height), paint);
             using (var keep = new SKPaint { BlendMode = SKBlendMode.DstIn })
-                c.DrawImage(s.Image, x, y, keep);
-            c.Restore();
+                PixelBlend.DrawImage(lc, s.Image, x, y, keep);
         });
     }
 
@@ -178,6 +178,8 @@ public static partial class Effects
         if (MathF.Abs(amp) < 0.3f) return s;
         int pad = (int)MathF.Ceiling(MathF.Abs(amp)) + 1;
         float k = 2 * MathF.PI / wl, shift = 2 * MathF.PI * cycles;
+        // GPU 描画では SkSL で (読み戻さない。設計書 22.54)
+        if (FlagOnGpu(s, a, pad, amp, k, shift) is { } onGpu) return onGpu;
         return Resample(s, a, 0, pad, (src, dst, w, h, rb) =>
         {
             uint* sp = (uint*)src, dp = (uint*)dst;
@@ -250,6 +252,11 @@ public static partial class Effects
         double c = cycles - Math.Floor(cycles);
         float visible = c < 0.5 ? 1 : 1 - Math.Clamp(a.Track("depth") / 100f, 0, 1);
         if (visible <= 0) return s;
+        float textH = a.Object?.Main is { } tm && tm.DefinitionId == EffectRegistry.Text && a.Bounds != null ? (float)tm.Eval("size", a.Bounds, a.Frame) / s.Scale : 0;
+        var barColor = a.Color("color");
+        barColor = barColor.WithAlpha((byte)(barColor.Alpha * visible));
+        // GPU 描画では、最後の行と右端を GPU で求めて棒も SkSL で描く (読み戻さない。設計書 22.54)
+        if (CursorOnGpu(s, a, textH, a.Track("width"), barColor) is { } onGpu) return onGpu;
         // いちばん下の、何か描かれている行のまとまり (最後の行) と、その右端を探す
         int bottom = -1, top = -1, right = -1;
         if (CopyPixels(s) is { } copy)

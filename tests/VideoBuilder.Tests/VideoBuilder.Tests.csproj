@@ -1,11 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <IsPackable>false</IsPackable>
+    <!-- xunit v3 のテストは実行ファイルとして作る -->
+    <OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
     <Using Include="Xunit" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
-    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <ProjectReference Include="../../src/VideoBuilder.Core/VideoBuilder.Core.csproj" />
     <ProjectReference Include="../../src/VideoBuilder.Editing/VideoBuilder.Editing.csproj" />

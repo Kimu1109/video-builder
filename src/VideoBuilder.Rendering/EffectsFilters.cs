@@ -155,6 +155,16 @@ public static partial class Effects
             if (lut == null || k <= 0) return null;
             return (px, w, h, rb) => MapColors(px, w, h, rb, k, (ref float r, ref float g, ref float b) => SampleCube(lut, ref r, ref g, ref b));
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            var lut = LoadCube(a.Effect.GetString("file"));
+            float k = Math.Clamp(a.Track("strength") / 100f, 0, 1);
+            if (lut == null || k <= 0) return s;
+            if (CubeImage(lut) is not { } cube) return null;
+            using var cubeShader = cube.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+            return MapColorsOnGpu(s, a, CubeShader, k, u => u["n"] = (float)lut.Size, kids => kids["cube"] = cubeShader);
+        }
     }
 
     /// <summary>5 点 (入力 0・64・128・192・255) を通るなめらかな曲線の変換表 (単調な 3 次補間)。</summary>
@@ -205,6 +215,22 @@ public static partial class Effects
                 if (channel == 1) r = Map(r); else if (channel == 2) g = Map(g); else b = Map(b);
             });
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float[] outs = { a.Track("p0"), a.Track("p1"), a.Track("p2"), a.Track("p3"), a.Track("p4") };
+            if (outs[0] == 0 && outs[1] == 64 && outs[2] == 128 && outs[3] == 192 && outs[4] == 255) return s;
+            var lut = CurveLut(outs);
+            int channel = a.Effect.GetInt("channel");
+            // 全部の色: 表のカラーフィルタ (レベル補正と同じ。GPU のまま)
+            if (channel == 0) return ApplyLut(s, a, lut);
+            var px = new byte[256 * 4];
+            for (int i = 0; i < 256; i++) { px[i * 4] = lut[i]; px[i * 4 + 3] = 255; }
+            using var table = SKImage.FromPixelCopy(new SKImageInfo(256, 1, SKColorType.Rgba8888, SKAlphaType.Unpremul), px);
+            if (table == null) return null;
+            using var tableShader = table.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+            return MapColorsOnGpu(s, a, CurveChannelShader, 1, u => u["channel"] = (float)channel, kids => kids["table"] = tableShader);
+        }
     }
 
     /// <summary>色温度・色かぶり: 青 ↔ 黄、緑 ↔ 赤紫の向きに色を寄せる (色の変換なので、ほかの色の変換とまとめて処理される)。</summary>
@@ -238,6 +264,13 @@ public static partial class Effects
                 b += sh * ws * (1 - b) - hi * wh * b;
             });
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float sh = Math.Clamp(a.Track("shadows") / 100f, -1, 1), hi = Math.Clamp(a.Track("highlights") / 100f, -1, 1);
+            if (sh == 0 && hi == 0) return s;
+            return MapColorsOnGpu(s, a, ShadowHighlightShader, 1, u => { u["sh"] = sh; u["hi"] = hi; });
+        }
     }
 
     /// <summary>グラデーションマップ: 明るさに合わせて、暗い所・中間・明るい所の色に置き換える (2 色ならデュオトーン、3 色ならトライトーン)。</summary>
@@ -259,6 +292,18 @@ public static partial class Effects
                 r = (c0.Red + (c1.Red - c0.Red) * t) / 255f;
                 g = (c0.Green + (c1.Green - c0.Green) * t) / 255f;
                 b = (c0.Blue + (c1.Blue - c0.Blue) * t) / 255f;
+            });
+        }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float k = Math.Clamp(a.Track("strength") / 100f, 0, 1);
+            if (k <= 0) return s;
+            var dark = a.Color("dark"); var mid = a.Color("mid"); var light = a.Color("light");
+            return MapColorsOnGpu(s, a, GradientMapShader, k, u =>
+            {
+                u["dark"] = new float[] { dark.Red, dark.Green, dark.Blue }; u["mid"] = new float[] { mid.Red, mid.Green, mid.Blue };
+                u["light"] = new float[] { light.Red, light.Green, light.Blue }; u["useMid"] = a.Check("useMid") ? 1f : 0f;
             });
         }
     }
@@ -319,6 +364,15 @@ public static partial class Effects
             };
             return (px, w, h, rb) => MapColors(px, w, h, rb, k, f);
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float k = Math.Clamp(a.Track("strength") / 100f, 0, 1);
+            if (k <= 0) return s;
+            int preset = a.Effect.GetInt("preset");
+            // 0〜8 以外 (負の数も) は月明かり (CPU の switch の既定と同じ)
+            return MapColorsOnGpu(s, a, LookShader, k, u => u["preset"] = preset is >= 0 and <= 8 ? preset : 9f);
+        }
     }
 
     // ================= 質感 =================
@@ -356,6 +410,14 @@ public static partial class Effects
                 }
             });
         }
+
+        protected override Sprite? OnGpu(Sprite s, EffectArgs a)
+        {
+            float amount = a.Track("amount") / 100f * 0.35f, size = Math.Max(0.5f, a.Track("size"));
+            if (amount <= 0) return s;
+            uint seed = (uint)(int)a.Track("seed") * 7919u + (a.Check("animate") ? (uint)a.Frame * 2654435761u : 0);
+            return GrainOnGpu(s, a, amount, size, a.Check("color"), seed);
+        }
     }
 
     /// <summary>VHS: 色のにじみとずれ、横の揺れ、ノイズの帯、下端の乱れ。</summary>
@@ -369,23 +431,30 @@ public static partial class Effects
             float noise = a.Track("noise") / 100f, wobble = a.Track("wobble") / 100f;
             uint seed = (uint)(int)a.Track("seed") * 977u + (uint)a.Frame * 2654435761u;
             float t = (float)a.Time;
+            int W = s.Width, H = s.Height;
+            float shift = Math.Max(1, W * 0.004f) * k, scroll = (t * 0.15f) % 1, sat = 1 - 0.25f * k;
+            float RowOff(int y)
+            {
+                float vy = y / (float)H;
+                // 横の揺れ: ゆっくりした揺れ + ときどき強く
+                float off = wobble * k * W * 0.004f * MathF.Sin(vy * 40 + t * 7) + wobble * k * W * 0.01f * (ValueNoise(vy * 30, t * 3, seed >> 8) - 0.5f);
+                // 下端の乱れ (テープの継ぎ目)
+                if (vy > 0.94f) off += k * W * 0.03f * (Rand01((uint)y, seed, 3) - 0.5f) * (vy - 0.94f) / 0.06f * 3;
+                return off;
+            }
+            // 流れるノイズの帯
+            bool InBand(int y) => MathF.Abs(((y / (float)H - scroll) % 1 + 1) % 1 - 0.5f) < 0.015f * noise * 3;
+            if (VhsOnGpu(s, a, RowOff, InBand, shift, sat, noise, k, seed) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
                 int stride = rb / 4;
-                float shift = Math.Max(1, w * 0.004f) * k, scroll = (t * 0.15f) % 1;
                 PixelOps.ForBands(w, h, (y0, y1) =>
                 {
                     for (int y = y0; y < y1; y++)
                     {
-                        float vy = y / (float)h;
-                        // 横の揺れ: ゆっくりした揺れ + ときどき強く
-                        float off = wobble * k * w * 0.004f * MathF.Sin(vy * 40 + t * 7) + wobble * k * w * 0.01f * (ValueNoise(vy * 30, t * 3, seed >> 8) - 0.5f);
-                        // 下端の乱れ (テープの継ぎ目)
-                        if (vy > 0.94f) off += k * w * 0.03f * (Rand01((uint)y, seed, 3) - 0.5f) * (vy - 0.94f) / 0.06f * 3;
-                        // 流れるノイズの帯
-                        float band = MathF.Abs(((vy - scroll) % 1 + 1) % 1 - 0.5f);
-                        bool inBand = band < 0.015f * noise * 3;
+                        float off = RowOff(y);
+                        bool inBand = InBand(y);
                         uint* row = dp + (long)y * stride;
                         for (int x = 0; x < w; x++)
                         {
@@ -397,7 +466,7 @@ public static partial class Effects
                             uint al = c >> 24;
                             float r = (((r1 >> 16) & 0xFF) + ((r2 >> 16) & 0xFF)) / 2f, g = (c >> 8) & 0xFF, b = ((b1 & 0xFF) + (b2 & 0xFF)) / 2f;
                             // 彩度を少し下げる
-                            float l = 0.3f * r + 0.59f * g + 0.11f * b, sat = 1 - 0.25f * k;
+                            float l = 0.3f * r + 0.59f * g + 0.11f * b;
                             r = l + (r - l) * sat; g = l + (g - l) * sat; b = l + (b - l) * sat;
                             float n = 0;
                             if (noise > 0)
@@ -426,6 +495,7 @@ public static partial class Effects
             float scan = a.Track("scanline") / 100f, mask = a.Track("mask") / 100f, curve = a.Track("curvature") / 100f, vig = a.Track("vignette") / 100f;
             if (scan <= 0 && mask <= 0 && curve <= 0 && vig <= 0) return s;
             float pitch = Math.Max(2, 3 / s.Scale);
+            if (CrtOnGpu(s, a, scan, mask, curve, vig, pitch) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
@@ -474,6 +544,10 @@ public static partial class Effects
             if (k <= 0 || Rand01(slot, seed, 81) >= freq) return s;
             uint fs = (uint)a.Frame * 2654435761u + seed;
             float block = Math.Max(2, a.Track("block") / s.Scale);
+            float W = s.Width;
+            float BlockOff(int bx, int by) => Rand01((uint)(by * 977 + bx), fs, 82) < 0.25f * k ? (Rand01((uint)(by * 977 + bx), fs, 83) - 0.5f) * k * W * 0.2f : 0;
+            float RowOff(int by) => Rand01((uint)by, fs, 84) < 0.2f * k ? (Rand01((uint)by, fs, 85) - 0.5f) * k * W * 0.08f : 0;
+            if (GlitchOnGpu(s, a, block, k * W * 0.012f, BlockOff, RowOff, (bx, by) => Rand01((uint)(by * 977 + bx), fs, 82) > 1 - 0.04f * k) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
@@ -514,6 +588,7 @@ public static partial class Effects
         {
             float size = Math.Max(2, a.Track("size") / s.Scale), angle = a.Track("angle") * MathF.PI / 180;
             int mode = a.Effect.GetInt("mode");
+            if (HalftoneOnGpu(s, a, size, angle, mode) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
@@ -581,6 +656,7 @@ public static partial class Effects
         {
             int radius = Math.Max(1, (int)MathF.Round(a.Track("radius") / s.Scale));
             bool water = a.Effect.GetInt("type") == 1;
+            if (PaintOnGpu(s, a, radius, water, 0xA7) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
@@ -649,6 +725,7 @@ public static partial class Effects
             bool color = a.Check("color");
             var paper = a.Color("paper");
             int radius = Math.Max(1, (int)MathF.Round(4 / s.Scale));
+            if (SketchOnGpu(s, a, strength, color, paper, radius) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
@@ -723,6 +800,7 @@ public static partial class Effects
             int size = Math.Max(1, (int)MathF.Round(a.Track("size") / s.Scale));
             int levels = Math.Clamp((int)a.Track("levels"), 2, 32);
             bool dither = a.Check("dither");
+            if (PixelArtOnGpu(s, a, size, levels, dither, Bayer4) is { } onGpu) return onGpu;
             return WithPixels(s, a, (px, w, h, rb) =>
             {
                 int cols = (w + size - 1) / size, rows = (h + size - 1) / size;
@@ -770,6 +848,13 @@ public static partial class Effects
             bool color = a.Check("color");
             var bg = a.Color("background");
             string ramp = Ramps[Math.Clamp(a.Effect.GetInt("chars"), 0, Ramps.Length - 1)];
+            // GPU 描画では、マスの色と文字を SkSL で求めて GPU のまま文字を描く (読み戻さない。設計書 22.54)
+            if (a.Context.Gpu != null)
+            {
+                int gc = Math.Max(1, (int)(s.Width / (size * 0.6f))), gr = Math.Max(1, (int)(s.Height / size));
+                var gface = SKFontManager.Default.MatchFamily("DejaVu Sans Mono") ?? SKTypeface.FromFamilyName("monospace") ?? SKTypeface.Default;
+                if (AsciiOnGpu(s, a, gc, gr, ramp, color, bg, gface) is { } onGpu) return onGpu;
+            }
             if (CopyPixels(s) is not { } copy) return s;
             int cols, rows;
             (char Ch, SKColor Color)[] cells;
@@ -805,11 +890,13 @@ public static partial class Effects
                 using var bgPaint = new SKPaint { Color = bg };
                 using var font = new SKFont(face, cellH * 1.05f);
                 using var paint = new SKPaint { IsAntialias = true };
-                // 背景は絵の見えている所だけ
-                c.SaveLayer(null);
-                c.DrawRect(SKRect.Create(x, y, s.Width, s.Height), bgPaint);
-                using (var keep = new SKPaint { BlendMode = SKBlendMode.DstIn }) c.DrawImage(s.Image, x, y, keep);
-                c.Restore();
+                // 背景は絵の見えている所だけ (CPU 描画では自前で合成する。PixelBlend)
+                using (var layer = PixelBlend.BeginLayer(c, SKRect.Create(x, y, s.Width, s.Height), SKBlendMode.SrcOver))
+                {
+                    layer.Canvas.DrawRect(SKRect.Create(x, y, s.Width, s.Height), bgPaint);
+                    using var keep = new SKPaint { BlendMode = SKBlendMode.DstIn };
+                    PixelBlend.DrawImage(layer.Canvas, s.Image, x, y, keep);
+                }
                 for (int cy = 0; cy < rows; cy++)
                     for (int cx = 0; cx < cols; cx++)
                     {
@@ -847,6 +934,8 @@ public static partial class Effects
                 {
                     using var sh = SKShader.CreateRadialGradient(new SKPoint(px, py), Math.Max(1, r), new[] { col.WithAlpha(A(alpha)), col.WithAlpha(0) }, SKShaderTileMode.Clamp);
                     paint.Shader = sh;
+                    // スクリーンで重ねる。PixelBlend (作業用の画像に描いてから合成) は使わない:
+                    // グラデーションの円を 1 つずつ作業用の画像に描くと、Skia で直接描くより遅くなる (設計書 22.53)
                     c.DrawCircle(px, py, r, paint);
                     paint.Shader = null;
                 }
@@ -895,9 +984,10 @@ public static partial class Effects
             return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
             {
                 c.DrawImage(s.Image, x, y);
-                using var layerPaint = new SKPaint { BlendMode = SKBlendMode.Screen };
-                c.SaveLayer(layerPaint);
-                c.Translate(x, y);
+                // スクリーンのレイヤー (CPU 描画では自前で合成する。PixelBlend)
+                using var layer = PixelBlend.BeginLayer(c, SKRect.Create(x, y, s.Width, s.Height), SKBlendMode.Screen);
+                var lc = layer.Canvas;
+                lc.Translate(x, y);
                 float big = Math.Max(s.Width, s.Height);
                 SKColor[] cols = { new(255, 120, 40), new(255, 60, 90), new(255, 200, 90) };
                 for (int i = 0; i < 3; i++)
@@ -909,10 +999,9 @@ public static partial class Effects
                     using var sh = SKShader.CreateRadialGradient(new SKPoint(px * s.Width, py * s.Height), big * (0.35f + 0.25f * pulse),
                         new[] { cols[i].WithAlpha(A(0.75f * k * pulse)), cols[i].WithAlpha(0) }, SKShaderTileMode.Clamp);
                     using var p = new SKPaint { Shader = sh };
-                    c.DrawRect(SKRect.Create(0, 0, s.Width, s.Height), p);
+                    lc.DrawRect(SKRect.Create(0, 0, s.Width, s.Height), p);
                 }
-                using (var keep = new SKPaint { BlendMode = SKBlendMode.DstIn }) c.DrawImage(s.Image, 0, 0, keep);
-                c.Restore();
+                using (var keep = new SKPaint { BlendMode = SKBlendMode.DstIn }) PixelBlend.DrawImage(lc, s.Image, 0, 0, keep);
             });
         }
     }
@@ -959,7 +1048,8 @@ public static partial class Effects
             float angle = a.Track("angle") * MathF.PI / 180;
             if (MathF.Abs(angle) < 1e-3f) return s;
             float R = Math.Max(1, a.Track("radius") / s.Scale);
-            return RadialWarp(s, a, s.Cx + a.Track("x") / s.Scale, s.Cy + a.Track("y") / s.Scale, R, d => d, d => angle * (1 - d) * (1 - d));
+            float cx = s.Cx + a.Track("x") / s.Scale, cy = s.Cy + a.Track("y") / s.Scale;
+            return RadialWarpOnGpu(s, a, cx, cy, R, 0, angle) ?? RadialWarp(s, a, cx, cy, R, d => d, d => angle * (1 - d) * (1 - d));
         }
     }
 
@@ -973,7 +1063,8 @@ public static partial class Effects
             if (MathF.Abs(amount) < 1e-3f) return s;
             float R = Math.Max(1, a.Track("radius") / s.Scale);
             float power = amount > 0 ? 1 + amount * 1.5f : 1 / (1 - amount * 1.5f);
-            return RadialWarp(s, a, s.Cx + a.Track("x") / s.Scale, s.Cy + a.Track("y") / s.Scale, R, d => MathF.Pow(d, power));
+            float cx = s.Cx + a.Track("x") / s.Scale, cy = s.Cy + a.Track("y") / s.Scale;
+            return RadialWarpOnGpu(s, a, cx, cy, R, 1, power) ?? RadialWarp(s, a, cx, cy, R, d => MathF.Pow(d, power));
         }
     }
 
@@ -987,7 +1078,7 @@ public static partial class Effects
             if (MathF.Abs(k) < 1e-3f) return s;
             float R = MathF.Sqrt(s.Width * s.Width + s.Height * s.Height) / 2 + 1;
             // r_src = r × (1 − k + k r²): 魚眼 (k > 0) は中心を拡大し、端はそのまま
-            return RadialWarp(s, a, s.Width / 2f, s.Height / 2f, R, d => d * (1 - k + k * d * d));
+            return RadialWarpOnGpu(s, a, s.Width / 2f, s.Height / 2f, R, 2, k) ?? RadialWarp(s, a, s.Width / 2f, s.Height / 2f, R, d => d * (1 - k + k * d * d));
         }
     }
 
@@ -1000,6 +1091,8 @@ public static partial class Effects
             int nx = Math.Max(1, (int)a.Track("countX")), ny = Math.Max(1, (int)a.Track("countY"));
             if (nx == 1 && ny == 1) return s;
             bool mirror = a.Check("mirror");
+            // GPU 描画では SkSL で (読み戻さない。設計書 22.54)
+            if (MirrorTileOnGpu(s, a, nx, ny, mirror) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;

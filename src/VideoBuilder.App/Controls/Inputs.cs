@@ -78,14 +78,14 @@ public sealed class NumberBox : TextBox
         return true;
     }
 
-    protected override void OnGotFocus(GotFocusEventArgs e)
+    protected override void OnGotFocus(FocusChangedEventArgs e)
     {
         base.OnGotFocus(e);
         _editing = true;
         SelectAll();
     }
 
-    protected override void OnLostFocus(RoutedEventArgs e)
+    protected override void OnLostFocus(FocusChangedEventArgs e)
     {
         base.OnLostFocus(e);
         Commit();
@@ -96,7 +96,7 @@ public sealed class NumberBox : TextBox
     protected override void OnKeyDown(KeyEventArgs e)
     {
         if (e.Key is Key.Enter or Key.Return) { Commit(); Text = Format(_value); SelectAll(); e.Handled = true; return; }
-        if (e.Key == Key.Escape) { Text = Format(_value); TopLevel.GetTopLevel(this)?.FocusManager?.ClearFocus(); e.Handled = true; return; }
+        if (e.Key == Key.Escape) { Text = Format(_value); TopLevel.GetTopLevel(this)?.FocusManager?.Focus(null); /* フォーカスを外す (Avalonia 12 で ClearFocus がなくなった) */ e.Handled = true; return; }
         if (e.Key is Key.Up or Key.Down)
         {
             Commit();

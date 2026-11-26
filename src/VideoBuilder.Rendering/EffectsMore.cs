@@ -34,6 +34,7 @@ public static partial class Effects
         var src = PixelPool.Rent(bytes);
         var tmp = PixelPool.Rent(bytes);
         if (padX > 0 || padY > 0) NativeMemory.Clear((void*)src, (nuint)bytes);
+        CountReadback(s.Image);
         if (!s.Image.ReadPixels(Info(s.Width, s.Height), src + padY * rowBytes + padX * 4, rowBytes, 0, 0))
         {
             PixelPool.Return(src, bytes); PixelPool.Return(tmp, bytes);
@@ -90,7 +91,7 @@ public static partial class Effects
             bool only = a.Check("only");
             if (strength <= 0) return only ? Redraw(s, a, 0, 0, 0, 0, (_, _, _) => { }) : s;
 
-            var bright = threshold > 0 ? WithPixels(s, a, (px, w, h, rb) => PixelFx.BrightPass(px, w, h, rb, threshold), alsoOnGpu: true) ?? s : s;
+            var bright = BrightPass(s, a, threshold);
             // 形: 0 = 通常 (まわりに広がる)、1 = 十字、2 = 横、3 = 縦 (光の筋を方向ブラーで作る)
             int shape = a.Effect.GetInt("shape");
             var glows = new List<Sprite>();
@@ -103,11 +104,20 @@ public static partial class Effects
                     bool vertical = angle != 0;
                     int pp = a.IsFrameBuffer ? 0 : (int)MathF.Ceiling(len / 2) + 1;
                     // 同じぼかしを 2 回かけて、筋の先を細く消えるようにする (箱形のままだと端がはっきり切れる)
-                    var streak = Resample(bright, a, vertical ? 0 : pp, vertical ? pp : 0, (src, tmp, w, h, rb) =>
+                    Sprite? streak;
+                    if (a.Context.Gpu != null && DirectionalBlurSprite(bright, a, vertical ? 0 : pp, vertical ? pp : 0, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer) is { } once)
                     {
-                        var r1 = PixelFx.DirectionalBlur(src, tmp, w, h, rb, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
-                        return PixelFx.DirectionalBlur(r1, r1 == src ? tmp : src, w, h, rb, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
-                    });
+                        // GPU 描画: SkSL のまま 2 回目もかける (余白は 1 回目で付いている。読み戻さない)
+                        streak = DirectionalBlurSprite(once, a, 0, 0, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
+                    }
+                    else
+                    {
+                        streak = Resample(bright, a, vertical ? 0 : pp, vertical ? pp : 0, (src, tmp, w, h, rb) =>
+                        {
+                            var r1 = PixelFx.DirectionalBlur(src, tmp, w, h, rb, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
+                            return PixelFx.DirectionalBlur(r1, r1 == src ? tmp : src, w, h, rb, vertical ? 0 : 1, vertical ? 1 : 0, len / 2, a.IsFrameBuffer);
+                        });
+                    }
                     if (streak is { } st) glows.Add(st);
                 }
                 // 筋は細く伸ばすぶん暗くなるので、明るさを足す
@@ -144,7 +154,7 @@ public static partial class Effects
                 {
                     if (!only) cv.DrawImage(s.Image, x, y);
                     foreach (var g in glows)
-                        for (int i = 0; i < times; i++) cv.DrawImage(g.Image, x - (g.Cx - s.Cx), y - (g.Cy - s.Cy), paint);
+                        for (int i = 0; i < times; i++) PixelBlend.DrawImage(cv, g.Image, x - (g.Cx - s.Cx), y - (g.Cy - s.Cy), paint);
                 });
             }
         }
@@ -165,8 +175,8 @@ public static partial class Effects
             int padY = clamp ? 0 : (int)MathF.Ceiling(MathF.Abs(dy) * length / 2) + 1;
             int passes = a.IsDraft ? 8 : 10;
             return AtHalfForPreview(s, a, length >= 24, (half, k) =>
-                       Resample(half, a, (int)MathF.Ceiling(padX * k), (int)MathF.Ceiling(padY * k), (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, dx, dy, length * k, clamp, passes)))
-                ?? Resample(s, a, padX, padY, (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, dx, dy, length, clamp, passes)) ?? s;
+                       DirectionalBlurSprite(half, a, (int)MathF.Ceiling(padX * k), (int)MathF.Ceiling(padY * k), dx, dy, length * k, clamp, passes))
+                ?? DirectionalBlurSprite(s, a, padX, padY, dx, dy, length, clamp, passes) ?? s;
         }
     }
 
@@ -184,8 +194,8 @@ public static partial class Effects
             // いちばん遠い所が動く距離 (ピクセル) が大きければ、プレビューは半分の大きさで計算する
             bool large = MathF.Sqrt(s.Width * s.Width + s.Height * s.Height) / 2 * MathF.Log(1 + range) >= 24;
             return AtHalfForPreview(s, a, large, (half, k) =>
-                       Resample(half, a, 0, 0, (src, tmp, w, h, rb) => PixelFx.RadialBlur(src, tmp, w, h, rb, half.Cx + ox * k, half.Cy + oy * k, range, clamp, passes)))
-                ?? Resample(s, a, 0, 0, (src, tmp, w, h, rb) => PixelFx.RadialBlur(src, tmp, w, h, rb, s.Cx + ox, s.Cy + oy, range, clamp, passes)) ?? s;
+                       RadialBlurSprite(half, a, 0, 0, half.Cx + ox * k, half.Cy + oy * k, range, clamp, passes))
+                ?? RadialBlurSprite(s, a, 0, 0, s.Cx + ox, s.Cy + oy, range, clamp, passes) ?? s;
         }
     }
 
@@ -197,6 +207,8 @@ public static partial class Effects
         {
             float amount = a.Track("amount") / 100f, radius = a.Track("radius");
             if (amount <= 0 || radius <= 0) return s;
+            // GPU 描画では SkSL のシェーダーで (読み戻さない。設計書 22.54)
+            if (SharpenOnGpu(s, a, amount, radius) is { } onGpu) return onGpu;
             using var blurred = BlurOnCpu(s.Image, radius / 2, 0, true);
             if (blurred == null) return s;
             using var bp = blurred.PeekPixels();
@@ -217,11 +229,7 @@ public static partial class Effects
             float rad = a.Track("angle") * MathF.PI / 180f;
             float dx = MathF.Cos(rad) * amount, dy = MathF.Sin(rad) * amount;
             int pad = clamp ? 0 : (int)MathF.Ceiling(MathF.Abs(amount)) + 1;
-            return Resample(s, a, pad, pad, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.ChromaticAberration(src, tmp, w, h, rb, dx, dy, radial, s.Cx + pad, s.Cy + pad, amount, clamp, a.Effect.GetInt("type"));
-                return tmp;
-            }) ?? s;
+            return ChromaticSprite(s, a, pad, pad, dx, dy, radial, s.Cx + pad, s.Cy + pad, amount, clamp, a.Effect.GetInt("type")) ?? s;
         }
     }
 
@@ -236,11 +244,7 @@ public static partial class Effects
             bool vertical = a.Check("vertical"), clamp = a.IsFrameBuffer;
             float phase = (float)(2 * Math.PI * speed * a.Time % (2 * Math.PI));
             int pad = clamp ? 0 : (int)MathF.Ceiling(MathF.Abs(amp)) + 1;
-            return Resample(s, a, vertical ? 0 : pad, vertical ? pad : 0, (src, tmp, w, h, rb) =>
-            {
-                PixelFx.Raster(src, tmp, w, h, rb, amp, wave, phase, vertical, clamp);
-                return tmp;
-            }) ?? s;
+            return RasterSprite(s, a, vertical ? 0 : pad, vertical ? pad : 0, amp, wave, phase, vertical, clamp) ?? s;
         }
     }
 
@@ -267,6 +271,8 @@ public static partial class Effects
         {
             var (amount, cell, color, seed) = Read(a);
             if (amount <= 0) return s;
+            // GPU 描画では SkSL で (乱数は CPU で作って送る。読み戻さない)
+            if (NoiseOnGpu(s, a, amount, cell, color, seed) is { } onGpu) return onGpu;
             return WithPixels(s, a, (px, w, h, rb) => PixelFx.Noise(px, w, h, rb, amount, cell, color, seed), alsoOnGpu: true) ?? s;
         }
     }
@@ -292,7 +298,8 @@ public static partial class Effects
             {
                 c.DrawImage(s.Image, x, y);
                 c.Translate(x, y);
-                c.DrawRect(SKRect.Create(s.Width, s.Height), paint);
+                var rect = SKRect.Create(s.Width, s.Height);
+                PixelBlend.Draw(c, rect, paint, (cv, p) => cv.DrawRect(rect, p));
             });
         }
     }
@@ -321,7 +328,8 @@ public static partial class Effects
             {
                 c.DrawImage(s.Image, x, y);
                 c.Translate(x, y);
-                c.DrawRect(SKRect.Create(s.Width, s.Height), paint);
+                var rect = SKRect.Create(s.Width, s.Height);
+                PixelBlend.Draw(c, rect, paint, (cv, p) => cv.DrawRect(rect, p));
             });
         }
     }
@@ -404,7 +412,7 @@ public static partial class Effects
         float dx = horizontal ? 1 : 0, dy = horizontal ? 0 : 1;
         int pad = (int)MathF.Ceiling(length / 2) + 1;
         int passes = a.IsDraft ? 8 : 10;
-        return Resample(s, a, horizontal ? pad : 0, horizontal ? 0 : pad, (src, tmp, w, h, rb) => PixelFx.DirectionalBlur(src, tmp, w, h, rb, dx, dy, length, false, passes)) ?? s;
+        return DirectionalBlurSprite(s, a, horizontal ? pad : 0, horizontal ? 0 : pad, dx, dy, length, false, passes) ?? s;
     }
 
     /// <summary>

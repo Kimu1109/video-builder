@@ -95,11 +95,13 @@ public static partial class Effects
                 c.DrawImage(s.Image, x, y);
                 // 影の層: 一面に影の色を塗り、ずらした形 (ぼかしたもの) を抜いて、元の形の中だけを残す
                 var bounds = SKRect.Create(x, y, s.Width, s.Height);
-                c.SaveLayer(bounds, null);
-                c.DrawRect(bounds, shade);
-                c.DrawImage(s.Image, x + dx, y + dy, hole);
-                c.DrawImage(s.Image, x, y, keep);
-                c.Restore();
+                // 影のレイヤー (CPU 描画では自前で合成する。PixelBlend)
+                using var layer = PixelBlend.BeginLayer(c, bounds, SKBlendMode.SrcOver);
+                var lc = layer.Canvas;
+                lc.DrawRect(bounds, shade);
+                // 抜く形はぼかしで広がるので、範囲はレイヤー全体にする (DstOut は範囲が広くても結果は同じ)
+                PixelBlend.Draw(lc, bounds, hole, (cv, p) => cv.DrawImage(s.Image, x + dx, y + dy, p));
+                PixelBlend.DrawImage(lc, s.Image, x, y, keep);
             });
         }
     }
