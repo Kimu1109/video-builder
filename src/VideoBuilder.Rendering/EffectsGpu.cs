@@ -1993,4 +1993,160 @@ public static partial class Effects
         }, kids => kids["image"] = image);
         return img == null ? null : new Sprite(a.Context.Own(img), d / 2f, d / 2f);
     }
+    // ---------------- ASCII アート ----------------
+
+    // マスごとの色と文字を、1 画素 = 1 マスの小さな画像に描く。色 (不透明の RGB) と、文字の番号 × 256 + 不透明度 (enc24) の 2 枚
+    private const string AsciiCellSksl = """
+        uniform shader image;
+        uniform shader xs;      // マス cx の i 番目の点の x (cx × 3 + i 番目)
+        uniform shader ys;
+        uniform float len;      // 文字の数
+        // マスの中の 3×3 点の合計 (乗算済みの 0〜255)
+        float4 cellSum(float2 p) {
+            float2 c = floor(p);
+            float4 sum = float4(0);
+            for (int j = 0; j < 3; j++) {
+                float y = idx24(ys.eval(float2(c.y * 3 + float(j) + 0.5, 0.5)));
+                for (int i = 0; i < 3; i++) {
+                    float x = idx24(xs.eval(float2(c.x * 3 + float(i) + 0.5, 0.5)));
+                    sum += floor(float4(image.eval(float2(x, y) + 0.5)) * 255 + 0.5);
+                }
+            }
+            return sum;
+        }
+        // n / d の切り捨て (n・d は整数。+0.5 で、割り算の誤差で境目ちょうどの値が 1 つ下にならないようにする)
+        float idiv(float n, float d) { return floor((n + 0.5) / d); }
+        """;
+
+    private static readonly Sksl AsciiColorShader = new(Val24Sksl + AsciiCellSksl + """
+        half4 main(float2 p) {
+            float4 s = cellSum(p);
+            if (s.a <= 0) return half4(0, 0, 0, 1);
+            return half4(half3(min(float3(255), float3(idiv(s.r * 255, s.a), idiv(s.g * 255, s.a), idiv(s.b * 255, s.a))) / 255), 1);
+        }
+        """);
+
+    private static readonly Sksl AsciiInfoShader = new(Val24Sksl + Enc24Sksl + AsciiCellSksl + """
+        half4 main(float2 p) {
+            float4 s = cellSum(p);
+            if (s.a <= 0) return enc24(0);
+            float l = (0.299 * s.r + 0.587 * s.g + 0.114 * s.b) / s.a;
+            float ch = clamp(floor(l * len), 0, len - 1);
+            float al = min(255, idiv(s.a, 9));
+            return enc24((ch * 256 + al) / 16777216);
+        }
+        """);
+
+    // 文字を描くときの色: 今描いている行の、その画素の文字を描くマス (同じ組のマスのうち、いちばん近いもの) が、今描いている文字なら、そのマスの色
+    private static readonly Sksl AsciiGlyphShader = new(Val24Sksl + """
+        uniform shader colors;
+        uniform shader infos;
+        uniform shader ownerX;  // 行 0・1: 横の組 (偶数・奇数) ごとの、その列を受け持つマスの番号 + 1 (0 はなし)
+        uniform float group;    // 横の組 (cx % 2)
+        uniform float row;      // 今描いている行
+        uniform float glyph;    // 今描いている文字の番号
+        half4 main(float2 p) {
+            float ox = idx24(ownerX.eval(float2(p.x, group + 0.5)));
+            if (ox == 0) return half4(0);
+            float2 cell = float2(ox - 0.5, row + 0.5);
+            float info = idx24(infos.eval(cell));
+            float ch = floor(info / 256), al = info - ch * 256;
+            if (ch != glyph || al == 0) return half4(0);
+            float a = al / 255;
+            return half4(half3(float3(colors.eval(cell).rgb) * a), half(a));
+        }
+        """);
+
+    /// <summary>
+    /// ASCII アート (EffectsFilters.Ascii と同じ) を GPU で。マスごとの色と文字は SkSL で求め、文字は Skia で描く
+    /// (行ごと・文字ごと・横の組 (偶数・奇数の列) ごとに、その組のすべてのマスにその文字を描き、色を決めるシェーダーで違う文字のマスを消す)。
+    /// 行は上から順に描くので、上下にはみ出して重なる所 (ブロックの文字) は CPU と同じ順。左右に重なる所も、帯で描き分けて CPU と同じ順にする。
+    /// Skia は文字の縁の濃さ (文字のガンマ) を塗りの色の明るさから決めるが、色をシェーダーで決めると中間の明るさのものを使うので、
+    /// 縁や網目の文字 (░▒▓) の半端な画素が、塗りの色で描く (読み戻す) ときと少し違う。
+    /// GPU 描画でない・使えないときは null。
+    /// </summary>
+    internal static Sprite? AsciiOnGpu(Sprite s, EffectArgs a, int cols, int rows, string ramp, bool color, SKColor bg, SKTypeface face)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled) return null;
+        if (AsciiColorShader.Effect is not { } colorFx || AsciiInfoShader.Effect is not { } infoFx || AsciiGlyphShader.Effect is not { } glyphFx) return null;
+        float cw = s.Width / (float)cols, ch = s.Height / (float)rows;
+        using var xs = IndexImage(cols * 3, k => Math.Min(s.Width - 1, (int)(k / 3 * cw + (k % 3 + 0.5f) * cw / 3)));
+        using var ys = IndexImage(rows * 3, k => Math.Min(s.Height - 1, (int)(k / 3 * ch + (k % 3 + 0.5f) * ch / 3)));
+        // 列 x を受け持つマス: 画素の中心が入るマスと、その左右のうち、組の同じもの (文字はマスから半分まではみ出してよい)
+        int Owner(float center, float cell, int count, int parity)
+        {
+            int c = (int)MathF.Floor(center / cell);
+            if (((c % 2) + 2) % 2 != parity) c += center / cell - c < 0.5f ? -1 : 1;
+            return c >= 0 && c < count ? c + 1 : 0;
+        }
+        using var ownerX = ValueImage(s.Width, 2, (x, g) => Owner(x + 0.5f, cw, cols, g) / 16777216f);
+        if (xs == null || ys == null || ownerX == null) return null;
+        using var xsShader = xs.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var ysShader = ys.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        SKImage? colors, infos;
+        using (var image = s.Image.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp))
+        {
+            void Kids(SKRuntimeEffectChildren k) { k["image"] = image; k["xs"] = xsShader; k["ys"] = ysShader; }
+            colors = RunOnGpu(a, cols, rows, colorFx, u => u["len"] = (float)ramp.Length, Kids);
+            infos = RunOnGpu(a, cols, rows, infoFx, u => u["len"] = (float)ramp.Length, Kids);
+        }
+        using var colorsOwner = colors;
+        using var infosOwner = infos;
+        if (colors == null || infos == null) return null;
+        using var colorShader = colors.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var infoShader = infos.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var oxShader = ownerX.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var font = new SKFont(face, ch * 1.05f);
+        return Redraw(s, a, 0, 0, 0, 0, (c, x, y) =>
+        {
+            // 背景は絵の見えている所だけ
+            using (var bgPaint = new SKPaint { Color = bg })
+            using (var layer = PixelBlend.BeginLayer(c, SKRect.Create(x, y, s.Width, s.Height), SKBlendMode.SrcOver))
+            {
+                layer.Canvas.DrawRect(SKRect.Create(x, y, s.Width, s.Height), bgPaint);
+                using var keep = new SKPaint { BlendMode = SKBlendMode.DstIn };
+                PixelBlend.DrawImage(layer.Canvas, s.Image, x, y, keep);
+            }
+            using var paint = new SKPaint { IsAntialias = true };
+            // 左右に重なる所 (偶数の列のマスの左端と、その左の奇数の列の文字の右端が重なる帯)。CPU は左から順に描くので、
+            // そこでは奇数の列の文字の上に偶数の列の文字が来る。偶数の列を先に描くと逆になるので、その帯だけ偶数の列を最後に描き直す
+            float minLeft = 0, maxRight = cw;
+            foreach (char chr in ramp)
+            {
+                if (chr == ' ') continue;
+                font.MeasureText(chr.ToString(), out var b);
+                minLeft = MathF.Min(minLeft, b.Left); maxRight = MathF.Max(maxRight, b.Right);
+            }
+            using var strips = new SKPath();
+            for (int cx = 2; cx < cols; cx += 2)
+            {
+                float l = MathF.Floor(x + cx * cw + minLeft) - 1, r = MathF.Ceiling(x + (cx - 1) * cw + maxRight) + 1;
+                if (r > l) strips.AddRect(new SKRect(l, y - s.Height, r, y + s.Height * 2));
+            }
+            bool overlap = !strips.IsEmpty;
+            for (int cy = 0; cy < rows; cy++)
+                for (int pass = 0; pass < (overlap ? 3 : 2); pass++)
+                {
+                    int gx = pass == 1 ? 1 : 0;
+                    if (gx >= cols) continue;
+                    c.Save();
+                    if (overlap && pass != 1) c.ClipPath(strips, pass == 0 ? SKClipOperation.Difference : SKClipOperation.Intersect, false);
+                    var pos = new SKPoint[(cols - gx + 1) / 2];
+                    for (int i = 0; i < pos.Length; i++) pos[i] = new SKPoint(x + (gx + i * 2) * cw, y + (cy + 0.85f) * ch);
+                    for (int k = 0; k < ramp.Length; k++)
+                    {
+                        if (ramp[k] == ' ') continue;
+                        using var blob = SKTextBlob.CreatePositioned(new string(ramp[k], pos.Length), font, pos);
+                        if (blob == null) continue;
+                        var kids = new SKRuntimeEffectChildren(glyphFx) { ["colors"] = colorShader, ["infos"] = infoShader, ["ownerX"] = oxShader };
+                        var u = new SKRuntimeEffectUniforms(glyphFx) { ["group"] = (float)gx, ["row"] = (float)cy, ["glyph"] = (float)k };
+                        using var shader = glyphFx.ToShader(u, kids, SKMatrix.CreateTranslation(x, y));
+                        paint.Shader = shader;
+                        c.DrawText(blob, 0, 0, paint);
+                        paint.Shader = null;
+                    }
+                    c.Restore();
+                }
+        });
+    }
 }

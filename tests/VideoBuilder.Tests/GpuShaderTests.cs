@@ -192,6 +192,8 @@ public unsafe class GpuShaderTests
         { "filter.transition", "type,in,out", new double[] { 65, 0, 2 } },          // ディゾルブ (出る側)
         { "filter.sphere", "rx,ry,shade", new double[] { 20, 40, 60 } },
         { "filter.sphere", "size,rz", new double[] { 90, 30 } },
+        { "filter.ascii", "size", new double[] { 10 } },
+        { "filter.ascii", "size,color,chars", new double[] { 8, 1, 1 } },
     };
 
     [Theory]
@@ -222,6 +224,12 @@ public unsafe class GpuShaderTests
         using (readback)
         {
             var (mean, max) = Compare(readback, sksl);
+            if (Environment.GetEnvironmentVariable("VB_DUMP") is { Length: > 0 } dump)
+            {
+                foreach (var (name, bmp) in new[] { ("sksl", sksl), ("readback", readback) })
+                    using (var data = bmp.Encode(SKEncodedImageFormat.Png, 100))
+                    using (var fs = File.Create(Path.Combine(dump, $"{id}-{keys.Replace(',', '_').Replace(':', '-')}-{name}.png"))) data.SaveTo(fs);
+            }
             // 効果がかかっていることも確かめる
             using var plain = new SKBitmap(sksl.Info);
             p.Root.Objects[1].Effects.Remove(e);
@@ -230,8 +238,9 @@ public unsafe class GpuShaderTests
             Console.WriteLine($"BENCH sksl {id} mean={mean:0.000} max={max} effect-changes={changed:0.00}");
             Assert.True(changed > 0.05, $"{id}: 効果がかかっていない");
             // シャープはぼかしを GPU (Skia) で作るので、CPU の自前のぼかしとの違いの分だけ許す
-            // (ライト・ベベル・縁ぼかしも、アルファのぼかしを GPU で作る)
-            double meanLimit = id is "filter.sharpen" or "filter.light" or "filter.bevel" or "filter.edgeblur" ? 1.0 : 0.3;
+            // (ライト・ベベル・縁ぼかしも、アルファのぼかしを GPU で作る。ASCII アートは、文字の縁の濃さ (Skia が塗りの色から決める
+            // 文字のガンマ) が、色をシェーダーで決めると中間の値になる分だけ違う)
+            double meanLimit = id is "filter.sharpen" or "filter.light" or "filter.bevel" or "filter.edgeblur" or "filter.ascii" ? 1.0 : 0.3;
             Assert.True(mean < meanLimit, $"{id}: 以前の描き方と違う mean={mean} max={max}");
             // 以前は読み戻していた。SkSL では読み戻さない
             Assert.True(oldReadbacks >= 1, $"{id}: 以前の描き方で読み戻していない");

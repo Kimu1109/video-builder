@@ -848,6 +848,13 @@ public static partial class Effects
             bool color = a.Check("color");
             var bg = a.Color("background");
             string ramp = Ramps[Math.Clamp(a.Effect.GetInt("chars"), 0, Ramps.Length - 1)];
+            // GPU 描画では、マスの色と文字を SkSL で求めて GPU のまま文字を描く (読み戻さない。設計書 22.54)
+            if (a.Context.Gpu != null)
+            {
+                int gc = Math.Max(1, (int)(s.Width / (size * 0.6f))), gr = Math.Max(1, (int)(s.Height / size));
+                var gface = SKFontManager.Default.MatchFamily("DejaVu Sans Mono") ?? SKTypeface.FromFamilyName("monospace") ?? SKTypeface.Default;
+                if (AsciiOnGpu(s, a, gc, gr, ramp, color, bg, gface) is { } onGpu) return onGpu;
+            }
             if (CopyPixels(s) is not { } copy) return s;
             int cols, rows;
             (char Ch, SKColor Color)[] cells;
