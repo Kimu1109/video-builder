@@ -898,17 +898,26 @@ public static partial class Effects
     /// モザイクを GPU で (マスごとの平均を小さな画像に描いてから、補間なしで広げる)。
     /// GPU 描画でない・マスが大きすぎるときは null (読み戻して CPU で処理する)。
     /// </summary>
-    internal static Sprite? MosaicOnGpu(Sprite s, EffectArgs a, int size)
+    internal static Sprite? MosaicOnGpu(Sprite s, EffectArgs a, int size) =>
+        size <= 1 && a.Context.Gpu != null && !GpuShadersDisabled ? s : CellsOnGpu(s, a, size, MosaicCellShader, _ => { });
+
+    /// <summary>
+    /// マス (size 四方) ごとの色を GPU で求めて (sksl が 1 画素 = 1 マスの小さな画像を描く。子 "image" が元の絵、uniform の cell・size も渡す)、
+    /// 補間なしで広げた絵。GPU 描画でない・マスが MaxMosaicCell より大きいときは null。
+    /// </summary>
+    private static Sprite? CellsOnGpu(Sprite s, EffectArgs a, int size, Sksl sksl, Action<SKRuntimeEffectUniforms> uniforms, Action<SKRuntimeEffectChildren>? children = null)
     {
-        if (a.Context.Gpu == null || GpuShadersDisabled || size > MaxMosaicCell || MosaicCellShader.Effect is not { } effect) return null;
-        if (size <= 1) return s;
+        if (a.Context.Gpu == null || GpuShadersDisabled || size > MaxMosaicCell || sksl.Effect is not { } effect) return null;
+        size = Math.Max(1, size);
         int sw = (s.Width + size - 1) / size, sh = (s.Height + size - 1) / size;
         using var small = a.Context.CreateSurface(sw, sh);
         if (small == null) return null;
         using (var image = s.Image.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp))
         {
             var kids = new SKRuntimeEffectChildren(effect) { ["image"] = image };
+            children?.Invoke(kids);
             var u = new SKRuntimeEffectUniforms(effect) { ["cell"] = (float)size, ["size"] = new float[] { s.Width, s.Height } };
+            uniforms(u);
             using var shader = effect.ToShader(u, kids);
             using var paint = new SKPaint { Shader = shader, BlendMode = SKBlendMode.Src };
             small.Canvas.DrawRect(SKRect.Create(sw, sh), paint);
@@ -1328,5 +1337,245 @@ public static partial class Effects
             u["size"] = size; u["mode"] = (float)mode;
             u["cs"] = angles.Select(MathF.Cos).ToArray(); u["sn"] = angles.Select(MathF.Sin).ToArray();
         });
+    }
+    // ---------------- ドット絵化 ----------------
+
+    private static readonly Sksl PixelArtShader = new(Val24Sksl + """
+        uniform shader image;
+        uniform shader bayer;   // 4 × 4 のディザの表 (値 / 16)
+        uniform float cell;
+        uniform float2 size;
+        uniform float levels;
+        uniform float dither;
+        // MathF.Round と同じ (ちょうど半分なら偶数へ)
+        float roundHalfEven(float x) { float f = floor(x), d = x - f; return d > 0.5 ? f + 1 : d < 0.5 ? f : mod(f, 2) == 0 ? f : f + 1; }
+        float quant(float v, float th) { return clamp(roundHalfEven(v * (levels - 1) + th), 0, levels - 1) / (levels - 1); }
+        half4 main(float2 p) {
+            float2 o = floor(p) * cell;
+            float2 e = min(size, o + cell);
+            float4 sum = float4(0);
+            for (int j = 0; j < 32; j++) {
+                float y = o.y + float(j);
+                if (y >= e.y) break;
+                for (int i = 0; i < 32; i++) {
+                    float x = o.x + float(i);
+                    if (x >= e.x) break;
+                    sum += floor(float4(image.eval(float2(x, y) + 0.5)) * 255 + 0.5);
+                }
+            }
+            float n = (e.x - o.x) * (e.y - o.y);
+            // アルファの平均 (切り捨て)。半透明の縁は、不透明か透明かに分ける
+            float al = floor((sum.a + 0.5) / n) >= 128 ? 255 : 0;
+            float3 c = sum.a > 0 ? sum.rgb / sum.a : float3(0);
+            float th = dither > 0 ? val24(bayer.eval(mod(floor(p), 4) + 0.5)) - 0.5 : 0;
+            float3 qc = float3(quant(c.r, th), quant(c.g, th), quant(c.b, th));
+            return half4(half3(floor(qc * al) / 255), half(al / 255));
+        }
+        """);
+
+    private static SKImage? _bayer;
+
+    /// <summary>ドット絵化 (EffectsFilters.PixelArt と同じ)。GPU 描画でない・ドットが大きすぎるときは null。</summary>
+    internal static Sprite? PixelArtOnGpu(Sprite s, EffectArgs a, int size, int levels, bool dither, float[] bayer4)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled) return null;
+        var bayer = _bayer ??= ValueImage(4, 4, (x, y) => bayer4[y * 4 + x] / 16f);
+        if (bayer == null) return null;
+        using var bayerShader = bayer.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        return CellsOnGpu(s, a, size, PixelArtShader, u => { u["levels"] = (float)levels; u["dither"] = dither ? 1f : 0f; }, kids => kids["bayer"] = bayerShader);
+    }
+
+    // ---------------- 24 ビットの値を描画先に持つ処理 ----------------
+
+    /// <summary>
+    /// 0〜1 の値を、描画先 (8 ビットの RGBA) の RGB に 24 ビットで持たせる SkSL (val24 で読む)。アルファは 1 なので乗算済みでも崩れない。
+    /// Skia の GPU 描画 (GLES) では浮動小数点 32 ビットの描画先を作れず、16 ビットでは精度が足りないため。
+    /// </summary>
+    private const string Enc24Sksl = """
+        half4 enc24(float v) {
+            float q = min(16777215, floor(clamp(v, 0, 1) * 16777216));
+            float r = floor(q / 65536), g = floor((q - r * 65536) / 256), b = q - r * 65536 - g * 256;
+            return half4(half3(float3(r, g, b) / 255), 1);
+        }
+        """;
+
+    /// <summary>effect を w × h の GPU の描画先に描いた画像。作れなければ null。</summary>
+    private static SKImage? RunOnGpu(EffectArgs a, int w, int h, SKRuntimeEffect effect, Action<SKRuntimeEffectUniforms> uniforms, Action<SKRuntimeEffectChildren> children)
+    {
+        using var surface = a.Context.CreateSurface(w, h);
+        if (surface == null) return null;
+        var kids = new SKRuntimeEffectChildren(effect);
+        children(kids);
+        var u = new SKRuntimeEffectUniforms(effect);
+        uniforms(u);
+        using var shader = effect.ToShader(u, kids);
+        using var paint = new SKPaint { Shader = shader, BlendMode = SKBlendMode.Src };
+        surface.Canvas.DrawRect(SKRect.Create(w, h), paint);
+        return surface.Snapshot();
+    }
+
+    // ---------------- スケッチ ----------------
+
+    private static readonly Sksl SketchLumShader = new(Enc24Sksl + """
+        uniform shader image;
+        half4 main(float2 p) {
+            float4 c = floor(float4(image.eval(p)) * 255 + 0.5);
+            float lum = c.a == 0 ? 1 : (0.299 * c.r + 0.587 * c.g + 0.114 * c.b) / c.a;
+            return enc24(1 - lum);
+        }
+        """);
+
+    /// <summary>EffectsFilters.BoxBlur と同じ箱型のぼかし (端は端の値を繰り返す)。半径は 32 まで。</summary>
+    private static readonly Sksl BoxBlur24Shader = new(Val24Sksl + Enc24Sksl + """
+        uniform shader src;
+        uniform float r;
+        uniform float2 dir;
+        uniform float k;
+        half4 main(float2 p) {
+            float sum = 0;
+            for (int i = 0; i < 65; i++) {
+                float d = float(i) - r;
+                if (d > r) break;
+                sum += val24(src.eval(p + dir * d));
+            }
+            return enc24(sum * k);
+        }
+        """);
+
+    private static readonly Sksl SketchShader = new(Val24Sksl + """
+        uniform shader image;
+        uniform shader inv;
+        uniform float strength;
+        uniform float colored;
+        uniform float3 paper;
+        half4 main(float2 p) {
+            float4 c = floor(float4(image.eval(p)) * 255 + 0.5);
+            float al = c.a;
+            if (al == 0) return half4(0);
+            float lum = (0.299 * c.r + 0.587 * c.g + 0.114 * c.b) / al;
+            float v = min(1, lum / max(0.02, 1 - val24(inv.eval(p))));
+            v = pow(v, 1 + strength * 2);
+            float3 o = v * paper / 255;
+            if (colored > 0) o *= 0.55 + 0.45 * c.rgb / al;
+            return half4(half3(floor(clamp(o, 0, 1) * al) / 255), half(al / 255));
+        }
+        """);
+
+    /// <summary>スケッチ (EffectsFilters.Sketch と同じ)。GPU 描画でない・使えないときは null。</summary>
+    internal static Sprite? SketchOnGpu(Sprite s, EffectArgs a, float strength, bool color, SKColor paper, int radius)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || radius > 32) return null;
+        if (SketchLumShader.Effect is not { } lumFx || BoxBlur24Shader.Effect is not { } blurFx || SketchShader.Effect == null) return null;
+        int w = s.Width, h = s.Height;
+        SKImage? cur;
+        SKShader? invShader = null;
+        using (var image = s.Image.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp))
+            cur = RunOnGpu(a, w, h, lumFx, _ => { }, kids => kids["image"] = image);
+        try
+        {
+            for (int pass = 0; pass < 6 && cur != null; pass++)
+            {
+                using var src = cur.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+                bool horizontal = pass % 2 == 0;
+                var next = RunOnGpu(a, w, h, blurFx, u =>
+                {
+                    u["r"] = (float)radius; u["dir"] = horizontal ? new float[] { 1, 0 } : new float[] { 0, 1 }; u["k"] = 1f / (2 * radius + 1);
+                }, kids => kids["src"] = src);
+                cur.Dispose();
+                cur = next;
+            }
+            if (cur == null) return null;
+            return ApplyGpuShader(s, a, SketchShader, u =>
+            {
+                u["strength"] = strength; u["colored"] = color ? 1f : 0f; u["paper"] = new float[] { paper.Red, paper.Green, paper.Blue };
+            }, (kids, x, y) =>
+            {
+                // inv は絵と同じ大きさ。描き直す先の (x, y) に合わせる
+                invShader?.Dispose();
+                kids["inv"] = invShader = cur.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, SKMatrix.CreateTranslation(x, y));
+            });
+        }
+        finally { cur?.Dispose(); invShader?.Dispose(); }
+    }
+
+    // ---------------- 油絵・水彩 ----------------
+
+    /// <summary>GPU で扱う筆の大きさの上限 (SkSL のループの大きさの都合。ずれ 16 × 16 は通り、21 × 21 は通らない)。</summary>
+    private const int MaxPaintRadius = 15;
+
+    private static readonly Sksl PaintShader = new(SampleSksl + Val24Sksl + """
+        uniform shader lattice;   // ValueNoise の格子の乱数
+        uniform float r;
+        uniform float2 size;
+        uniform float water;
+        float lum(float3 c) { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
+        float N(float i, float j) { return val24(lattice.eval(float2(i, j) + 0.5)); }
+        // 絵の外は数えない (区画は絵の中だけ)
+        float4 val(float2 q, float lc) {
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) return float4(0);
+            float3 c = fetch(q).rgb;
+            float dl = lum(c) - lc;
+            return float4(c, dl * dl);
+        }
+        float vnoise(float2 v) {
+            float2 f = floor(v), t = v - f;
+            t = t * t * (3 - 2 * t);
+            float a = N(f.x, f.y), b = N(f.x + 1, f.y), c = N(f.x, f.y + 1), d = N(f.x + 1, f.y + 1);
+            return a + (b - a) * t.x + (c - a + (d - c - b + a) * t.x) * t.y;
+        }
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float4 orig = fetch(q);
+            float al = orig.a;
+            if (al == 0) return half4(0);
+            // 4 つの区画 (左上・右上・左下・右下) の R・G・B と、明るさの 2 乗の合計。
+            // 2 乗は真ん中の明るさを引いてから (大きな数どうしの引き算で精度を落とさないように。ばらつきは同じ)
+            float lc = lum(orig.rgb);
+            float4 s0 = float4(0), s1 = float4(0), s2 = float4(0), s3 = float4(0);
+            // 中心からのずれ (dx, dy) ごとに 4 つの区画を 1 画素ずつ足す (窓全体を 1 つのループで回すより、展開したときに小さい)。
+            // dx = 0 や dy = 0 の画素は、区画どうしの境目なので両方に入る (CPU と同じ)
+            for (int j = 0; j < 16; j++) {
+                float dy = float(j);
+                if (dy > r) break;
+                for (int i = 0; i < 16; i++) {
+                    float dx = float(i);
+                    if (dx > r) break;
+                    s0 += val(q + float2(-dx, -dy), lc); s1 += val(q + float2(dx, -dy), lc);
+                    s2 += val(q + float2(-dx, dy), lc); s3 += val(q + float2(dx, dy), lc);
+                }
+            }
+            float wl = q.x - max(0, q.x - r) + 1, wr = min(size.x - 1, q.x + r) - q.x + 1;
+            float ht = q.y - max(0, q.y - r) + 1, hb = min(size.y - 1, q.y + r) - q.y + 1;
+            float best = 1e30;
+            float3 bc = float3(0);
+            for (int k = 0; k < 4; k++) {
+                float4 sk = k == 0 ? s0 : k == 1 ? s1 : k == 2 ? s2 : s3;
+                float n = (mod(float(k), 2) == 0 ? wl : wr) * (k < 2 ? ht : hb);
+                float3 m = sk.rgb / n;
+                float dm = lum(m) - lc;
+                float variance = sk.a / n - dm * dm;
+                if (variance < best) { best = variance; bc = m; }
+            }
+            if (water > 0) {
+                float edge = min(1, sqrt(max(0, best)) / 40);
+                float paper = 0.94 + 0.06 * vnoise(q * 0.08);
+                bc = (bc + (al - bc) * 0.25 - edge * 35) * paper;
+            }
+            return half4(half3(floor(clamp(bc, 0, al)) / 255), half(al / 255));
+        }
+        """);
+
+    /// <summary>油絵・水彩 (EffectsFilters.Paint と同じ)。GPU 描画でない・筆が大きすぎるときは null。</summary>
+    internal static Sprite? PaintOnGpu(Sprite s, EffectArgs a, int radius, bool water, uint noiseSeed)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || radius > MaxPaintRadius) return null;
+        int nx = (int)(s.Width * 0.08f) + 3, ny = (int)(s.Height * 0.08f) + 3;
+        using var lattice = water ? ValueImage(nx, ny, (x, y) => PixelFx.Hash((uint)x, (uint)y, noiseSeed) / (float)uint.MaxValue) : ValueImage(1, 1, (_, _) => 0);
+        if (lattice == null) return null;
+        using var latticeShader = lattice.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        return MultiPassOnGpu(s, a, 0, 0, PaintShader, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, 1, (u, _, w, h) =>
+        {
+            u["r"] = (float)radius; u["size"] = new float[] { w, h }; u["water"] = water ? 1f : 0f;
+        }, kids => kids["lattice"] = latticeShader);
     }
 }

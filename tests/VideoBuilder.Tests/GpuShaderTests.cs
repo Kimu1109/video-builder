@@ -168,6 +168,12 @@ public unsafe class GpuShaderTests
         { "filter.halftone", "size,angle,mode", new double[] { 8, 45, 0 } },
         { "filter.halftone", "size,angle,mode", new double[] { 6, 0, 1 } },
         { "filter.halftone", "size,mode", new double[] { 9, 2 } },
+        { "filter.pixelart", "size,levels", new double[] { 6, 4 } },
+        { "filter.pixelart", "size,levels,dither", new double[] { 5, 3, 1 } },
+        { "filter.sketch", "strength", new double[] { 100 } },
+        { "filter.sketch", "strength,color", new double[] { 150, 1 } },
+        { "filter.paint", "type,radius", new double[] { 0, 6 } },
+        { "filter.paint", "type,radius", new double[] { 1, 15 } },
     };
 
     [Theory]

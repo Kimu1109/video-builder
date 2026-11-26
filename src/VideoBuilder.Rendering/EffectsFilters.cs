@@ -648,6 +648,7 @@ public static partial class Effects
         {
             int radius = Math.Max(1, (int)MathF.Round(a.Track("radius") / s.Scale));
             bool water = a.Effect.GetInt("type") == 1;
+            if (PaintOnGpu(s, a, radius, water, 0xA7) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
@@ -716,6 +717,7 @@ public static partial class Effects
             bool color = a.Check("color");
             var paper = a.Color("paper");
             int radius = Math.Max(1, (int)MathF.Round(4 / s.Scale));
+            if (SketchOnGpu(s, a, strength, color, paper, radius) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
@@ -790,6 +792,7 @@ public static partial class Effects
             int size = Math.Max(1, (int)MathF.Round(a.Track("size") / s.Scale));
             int levels = Math.Clamp((int)a.Track("levels"), 2, 32);
             bool dither = a.Check("dither");
+            if (PixelArtOnGpu(s, a, size, levels, dither, Bayer4) is { } onGpu) return onGpu;
             return WithPixels(s, a, (px, w, h, rb) =>
             {
                 int cols = (w + size - 1) / size, rows = (h + size - 1) / size;
