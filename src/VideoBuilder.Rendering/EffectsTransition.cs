@@ -472,6 +472,15 @@ public static partial class Effects
         float grain = MathF.Max(1, 2 * K), gl = G.Left, gt = G.Top;
         const float Soft = 0.06f;
         float th = eu * (1 + Soft);
+        if (a.Context.Gpu != null)
+        {
+            // GPU 描画では SkSL で (粒ごとの乱数は CPU で作って送る。読み戻さない。設計書 22.54)
+            int Gx(int x) => (int)MathF.Floor((x + 0.5f - gl) / grain);
+            int Gy(int y) => (int)MathF.Floor((y + 0.5f - gt) / grain);
+            int gx0 = Gx(0), gy0 = Gy(0), gnx = Gx(s.Width - 1) - gx0 + 1, gny = Gy(s.Height - 1) - gy0 + 1;
+            using var table = ValueImage(gnx, gny, (i, j) => PixelFx.Hash((uint)(gx0 + i), (uint)(gy0 + j), 0xD155) / (float)uint.MaxValue);
+            if (MaskScaleOnGpu(s, a, x => Gx(x) - gx0, y => Gy(y) - gy0, table, th, Soft, false, leaving) is { } onGpu) return onGpu;
+        }
         return WithPixels(s, a, (px, w, h, rb) =>
         {
             uint* basePtr = (uint*)px;
@@ -544,6 +553,20 @@ public static partial class Effects
         float soft = Math.Clamp(a.Track("feather") / 100f, 0.01f, 1);
         float th = eu * (1 + soft);
         float gl = G.Left, gt = G.Top, gw = Math.Max(1, G.Width), gh = Math.Max(1, G.Height);
+        if (a.Context.Gpu != null)
+        {
+            // GPU 描画では SkSL で (ルール画像の明るさは画像ごとに 1 度だけ送る。読み戻さない。設計書 22.54)
+            Sprite? onGpu;
+            if (rule != null)
+                onGpu = MaskScaleOnGpu(s, a, x => Math.Clamp((int)((x + 0.5f - gl) / gw * rule.Width), 0, rule.Width - 1),
+                    y => Math.Clamp((int)((y + 0.5f - gt) / gh * rule.Height), 0, rule.Height - 1), RuleImage(rule.Luma, rule.Width, rule.Height), th, soft, invert, leaving);
+            else
+            {
+                using var table = ValueImage(s.Width, 1, (x, _) => Math.Clamp((x + 0.5f - gl) / gw, 0, 1));
+                onGpu = MaskScaleOnGpu(s, a, x => x, _ => 0, table, th, soft, invert, leaving);
+            }
+            if (onGpu is { } done) return done;
+        }
         return WithPixels(s, a, (px, w, h, rb) =>
         {
             uint* basePtr = (uint*)px;
@@ -756,6 +779,17 @@ public static partial class Effects
         float gt = G.Top;
         // 画面全体を基準にするとき (全画面の絵) は、ずれて空いた所を端の色で埋める
         bool clamp = a.Check("screen");
+        float RowOff(int y)
+        {
+            // 帯の高さもばらばらにするため、2 段階の帯で決める
+            int band = (int)MathF.Floor((y - gt) / bandUnit), coarse = band >> 2;
+            float pick = Rand01((uint)band, seed, 71);
+            if (pick < 0.25f + 0.45f * g) return (Rand01((uint)band, seed, 72) * 2 - 1) * maxShift;
+            if (Rand01((uint)coarse, seed, 73) < 0.3f * g) return (Rand01((uint)coarse, seed, 74) * 2 - 1) * maxShift * 0.5f;
+            return 0;
+        }
+        // GPU 描画では SkSL で (行ごとのずれは CPU で求めて送る。読み戻さない。設計書 22.54)
+        if (GlitchBandsOnGpu(s, a, RowOff, split, clamp) is { } onGpu) return onGpu;
         return Resample(s, a, 0, 0, (src, dst, w2, h2, rb) =>
         {
             uint* sp = (uint*)src, dp = (uint*)dst;
@@ -764,12 +798,7 @@ public static partial class Effects
             {
                 for (int y = y0; y < y1; y++)
                 {
-                    // 帯の高さもばらばらにするため、2 段階の帯で決める
-                    int band = (int)MathF.Floor((y - gt) / bandUnit), coarse = band >> 2;
-                    float pick = Rand01((uint)band, seed, 71);
-                    float off = 0;
-                    if (pick < 0.25f + 0.45f * g) off = (Rand01((uint)band, seed, 72) * 2 - 1) * maxShift;
-                    else if (Rand01((uint)coarse, seed, 73) < 0.3f * g) off = (Rand01((uint)coarse, seed, 74) * 2 - 1) * maxShift * 0.5f;
+                    float off = RowOff(y);
                     uint* row = dp + (long)y * stride;
                     for (int x = 0; x < w2; x++)
                     {
@@ -871,6 +900,8 @@ public static partial class Effects
         const float Band = 0.08f;
         float th = eu * (1 + Band * 2) - Band;
         float gl = G.Left, gt = G.Top, scale = 5 / Math.Max(1, G.Width);
+        // GPU 描画では SkSL で (格子の乱数は CPU で作って送る。読み戻さない。設計書 22.54)
+        if (BurnOnGpu(s, a, gl, gt, scale, th, leaving) is { } onGpu) return onGpu;
         return WithPixels(s, a, (px, w, h, rb) =>
         {
             uint* basePtr = (uint*)px;
@@ -916,6 +947,8 @@ public static partial class Effects
         if (w < 0.02f) return s;
         float gl = G.Left, gt = G.Top, scale = 3 / Math.Max(1, G.Width), drift = u * 3;
         float level = w * 1.35f;
+        // GPU 描画では SkSL で (格子の乱数は CPU で作って送る。読み戻さない。設計書 22.54)
+        if (FilmBurnOnGpu(s, a, gl, gt, scale, drift, level) is { } onGpu) return onGpu;
         return WithPixels(s, a, (px, wd, h, rb) =>
         {
             uint* basePtr = (uint*)px;

@@ -1504,24 +1504,18 @@ public static partial class Effects
     private const int MaxPaintRadius = 15;
 
     private static readonly Sksl PaintShader = new(SampleSksl + Val24Sksl + """
-        uniform shader lattice;   // ValueNoise の格子の乱数
         uniform float r;
         uniform float2 size;
         uniform float water;
+        """ + VNoiseSksl(1) + """
+
         float lum(float3 c) { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
-        float N(float i, float j) { return val24(lattice.eval(float2(i, j) + 0.5)); }
         // 絵の外は数えない (区画は絵の中だけ)
         float4 val(float2 q, float lc) {
             if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) return float4(0);
             float3 c = fetch(q).rgb;
             float dl = lum(c) - lc;
             return float4(c, dl * dl);
-        }
-        float vnoise(float2 v) {
-            float2 f = floor(v), t = v - f;
-            t = t * t * (3 - 2 * t);
-            float a = N(f.x, f.y), b = N(f.x + 1, f.y), c = N(f.x, f.y + 1), d = N(f.x + 1, f.y + 1);
-            return a + (b - a) * t.x + (c - a + (d - c - b + a) * t.x) * t.y;
         }
         half4 main(float2 p) {
             float2 q = p - 0.5;
@@ -1558,7 +1552,7 @@ public static partial class Effects
             }
             if (water > 0) {
                 float edge = min(1, sqrt(max(0, best)) / 40);
-                float paper = 0.94 + 0.06 * vnoise(q * 0.08);
+                float paper = 0.94 + 0.06 * vn0(q * 0.08);
                 bc = (bc + (al - bc) * 0.25 - edge * 35) * paper;
             }
             return half4(half3(floor(clamp(bc, 0, al)) / 255), half(al / 255));
@@ -1569,52 +1563,26 @@ public static partial class Effects
     internal static Sprite? PaintOnGpu(Sprite s, EffectArgs a, int radius, bool water, uint noiseSeed)
     {
         if (a.Context.Gpu == null || GpuShadersDisabled || radius > MaxPaintRadius) return null;
-        int nx = (int)(s.Width * 0.08f) + 3, ny = (int)(s.Height * 0.08f) + 3;
-        using var lattice = water ? ValueImage(nx, ny, (x, y) => PixelFx.Hash((uint)x, (uint)y, noiseSeed) / (float)uint.MaxValue) : ValueImage(1, 1, (_, _) => 0);
-        if (lattice == null) return null;
-        using var latticeShader = lattice.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var lats = new Lattices();
+        lats.Add(water ? LatticeImage(0, (s.Width - 1) * 0.08f, 0, (s.Height - 1) * 0.08f, noiseSeed) : (ValueImage(1, 1, (_, _) => 0), 0, 0));
+        if (lats.Failed) return null;
         return MultiPassOnGpu(s, a, 0, 0, PaintShader, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, 1, (u, _, w, h) =>
         {
+            lats.Set(u);
             u["r"] = (float)radius; u["size"] = new float[] { w, h }; u["water"] = water ? 1f : 0f;
-        }, kids => kids["lattice"] = latticeShader);
+        }, lats.Set);
     }
+
     // ---------------- フィルム粒子 ----------------
 
     private static readonly Sksl GrainShader = new(Val24Sksl + """
         uniform shader image;
-        uniform shader lat0;
-        uniform shader lat1;
-        uniform shader lat2;
-        uniform float2 o0;      // 格子の画像の左上の格子の番号
-        uniform float2 o1;
-        uniform float2 o2;
         uniform float2 off1;    // 2 つ目・3 つ目の ValueNoise の座標のずれ
         uniform float2 off2;
         uniform float size;
         uniform float amount;
         uniform float colored;
-        float N0(float2 ij) { return val24(lat0.eval(ij - o0 + 0.5)); }
-        float vn0(float2 v) {
-            float2 f = floor(v), t = v - f;
-            t = t * t * (3 - 2 * t);
-            float a = N0(f), b = N0(f + float2(1, 0)), c = N0(f + float2(0, 1)), d = N0(f + float2(1, 1));
-            return a + (b - a) * t.x + (c - a + (d - c - b + a) * t.x) * t.y;
-        }
-        float N1(float2 ij) { return val24(lat1.eval(ij - o1 + 0.5)); }
-        float vn1(float2 v) {
-            float2 f = floor(v), t = v - f;
-            t = t * t * (3 - 2 * t);
-            float a = N1(f), b = N1(f + float2(1, 0)), c = N1(f + float2(0, 1)), d = N1(f + float2(1, 1));
-            return a + (b - a) * t.x + (c - a + (d - c - b + a) * t.x) * t.y;
-        }
-        float N2(float2 ij) { return val24(lat2.eval(ij - o2 + 0.5)); }
-        float vn2(float2 v) {
-            float2 f = floor(v), t = v - f;
-            t = t * t * (3 - 2 * t);
-            float a = N2(f), b = N2(f + float2(1, 0)), c = N2(f + float2(0, 1)), d = N2(f + float2(1, 1));
-            return a + (b - a) * t.x + (c - a + (d - c - b + a) * t.x) * t.y;
-        }
-
+        """ + VNoiseSksl(3) + """
         half4 main(float2 p) {
             float2 q = p - 0.5;
             float4 c = floor(float4(image.eval(p)) * 255 + 0.5);
@@ -1632,11 +1600,51 @@ public static partial class Effects
         """);
 
     /// <summary>ValueNoise(x / size + ox, y / size + oy, seed) を w × h の絵で使う範囲の格子の乱数の画像と、その左上の格子の番号。</summary>
-    private static (SKImage? Image, float X0, float Y0) LatticeImage(int w, int h, float size, float ox, float oy, uint seed)
+    private static (SKImage? Image, float X0, float Y0) LatticeImage(int w, int h, float size, float ox, float oy, uint seed) =>
+        LatticeImage(ox, (w - 1) / size + ox, oy, (h - 1) / size + oy, seed);
+
+    /// <summary>ValueNoise(x, y, seed) を x ∈ [xmin, xmax]・y ∈ [ymin, ymax] で使うときの格子の乱数の画像と、その左上の格子の番号。</summary>
+    private static (SKImage? Image, float X0, float Y0) LatticeImage(float xmin, float xmax, float ymin, float ymax, uint seed)
     {
-        int x0 = (int)MathF.Floor(ox), y0 = (int)MathF.Floor(oy);
-        int nx = (int)MathF.Floor((w - 1) / size + ox) - x0 + 3, ny = (int)MathF.Floor((h - 1) / size + oy) - y0 + 3;
+        int x0 = (int)MathF.Floor(xmin) - 1, y0 = (int)MathF.Floor(ymin) - 1;
+        int nx = Math.Clamp((int)MathF.Floor(xmax) - x0 + 3, 1, 8192), ny = Math.Clamp((int)MathF.Floor(ymax) - y0 + 3, 1, 8192);
         return (ValueImage(nx, ny, (i, j) => PixelFx.Hash((uint)(x0 + i), (uint)(y0 + j), seed) / (float)uint.MaxValue), x0, y0);
+    }
+
+    /// <summary>
+    /// ValueNoise (EffectsTransition) と同じなめらかな乱数 vn0〜vn{count-1} の SkSL。子 lat{k} が格子の乱数 (LatticeImage)、uniform o{k} がその左上の格子の番号。
+    /// </summary>
+    private static string VNoiseSksl(int count) => string.Concat(Enumerable.Range(0, count).Select(k => $$"""
+
+        uniform shader lat{{k}};
+        uniform float2 o{{k}};
+        float N{{k}}(float2 ij) { return val24(lat{{k}}.eval(ij - o{{k}} + 0.5)); }
+        float vn{{k}}(float2 v) {
+            float2 f = floor(v), t = v - f;
+            t = t * t * (3 - 2 * t);
+            float a = N{{k}}(f), b = N{{k}}(f + float2(1, 0)), c = N{{k}}(f + float2(0, 1)), d = N{{k}}(f + float2(1, 1));
+            return a + (b - a) * t.x + (c - a + (d - c - b + a) * t.x) * t.y;
+        }
+        """));
+
+    /// <summary>LatticeImage の画像を、VNoiseSksl の lat{k}・o{k} に渡すためのもの (使い終わったら Dispose)。</summary>
+    private sealed class Lattices : IDisposable
+    {
+        private readonly List<(SKImage? Image, float X0, float Y0)> _items = new();
+        private readonly List<SKShader> _shaders = new();
+        public bool Failed { get; private set; }
+        public void Add((SKImage? Image, float X0, float Y0) l)
+        {
+            _items.Add(l);
+            if (l.Image == null) Failed = true; else _shaders.Add(l.Image.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp));
+        }
+        public void Set(SKRuntimeEffectUniforms u) { for (int k = 0; k < _items.Count; k++) u["o" + k] = new[] { _items[k].X0, _items[k].Y0 }; }
+        public void Set(SKRuntimeEffectChildren kids) { for (int k = 0; k < _shaders.Count; k++) kids["lat" + k] = _shaders[k]; }
+        public void Dispose()
+        {
+            foreach (var sh in _shaders) sh.Dispose();
+            foreach (var l in _items) l.Image?.Dispose();
+        }
     }
 
     /// <summary>フィルム粒子 (EffectsFilters.Grain と同じ)。GPU 描画でない・使えないときは null。</summary>
@@ -1648,29 +1656,18 @@ public static partial class Effects
         var specs = color
             ? new (uint Seed, float X, float Y)[] { (seed, 0, 0), (seed + 101, 17.1f, 0), (seed + 202, 2 * 17.1f, 0) }
             : new (uint Seed, float X, float Y)[] { (seed, 0, 0), (seed ^ 0x55u, 31.7f, 11.3f), (0, 0, 0) };
-        var lats = new (SKImage? Image, float X0, float Y0)[3];
-        var shaders = new SKShader?[3];
-        try
+        using var lats = new Lattices();
+        for (int k = 0; k < 3; k++)
+            lats.Add(!color && k == 2 ? (ValueImage(1, 1, (_, _) => 0), 0, 0) : LatticeImage(w, h, size, specs[k].X, specs[k].Y, specs[k].Seed));
+        if (lats.Failed) return null;
+        return ApplyGpuShader(s, a, GrainShader, u =>
         {
-            for (int k = 0; k < 3; k++)
-            {
-                lats[k] = !color && k == 2 ? (ValueImage(1, 1, (_, _) => 0), 0, 0) : LatticeImage(w, h, size, specs[k].X, specs[k].Y, specs[k].Seed);
-                if (lats[k].Image is not { } img) return null;
-                shaders[k] = img.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
-            }
-            return ApplyGpuShader(s, a, GrainShader, u =>
-            {
-                u["o0"] = new[] { lats[0].X0, lats[0].Y0 }; u["o1"] = new[] { lats[1].X0, lats[1].Y0 }; u["o2"] = new[] { lats[2].X0, lats[2].Y0 };
-                u["off1"] = new[] { specs[1].X, specs[1].Y }; u["off2"] = new[] { specs[2].X, specs[2].Y };
-                u["size"] = size; u["amount"] = amount; u["colored"] = color ? 1f : 0f;
-            }, (kids, _, _) => { kids["lat0"] = shaders[0]; kids["lat1"] = shaders[1]; kids["lat2"] = shaders[2]; });
-        }
-        finally
-        {
-            foreach (var sh in shaders) sh?.Dispose();
-            foreach (var l in lats) l.Image?.Dispose();
-        }
+            lats.Set(u);
+            u["off1"] = new[] { specs[1].X, specs[1].Y }; u["off2"] = new[] { specs[2].X, specs[2].Y };
+            u["size"] = size; u["amount"] = amount; u["colored"] = color ? 1f : 0f;
+        }, (kids, _, _) => lats.Set(kids));
     }
+
     // ---------------- レンズブラー ----------------
 
     private static readonly Sksl LensBlurShader = new(SampleSksl + Val24Sksl + """
@@ -1763,5 +1760,187 @@ public static partial class Effects
         if (small == null) return null;
         var owned = a.Context.Own(small);
         return LensBlurOnGpu(new Sprite(owned, 0, 0), a, 0, radius / k, boost, clamp);
+    }
+    // ---------------- トランジション: 画素ごとに不透明度を決めるもの ----------------
+
+    /// <summary>EffectsTransition.ScalePixel と同じ (乗算済みの画素に k を掛ける。重みは 8 ビットで切り捨て)。</summary>
+    private const string ScalePixelSksl = """
+        half4 scalePixel(float4 c, float k) {
+            if (k >= 1) return half4(c / 255);
+            if (k <= 0) return half4(0);
+            return half4(floor(c * floor(k * 256) / 256) / 255);
+        }
+        """;
+
+    private static readonly Sksl MaskScaleShader = new(Val24Sksl + ScalePixelSksl + """
+        uniform shader image;
+        uniform shader cols;    // 列ごとの表の横の番号
+        uniform shader rows;    // 行ごとの表の縦の番号
+        uniform shader table;   // 0〜1 の値 (この値の小さい所から切り替わる)
+        uniform float th;
+        uniform float soft;
+        uniform float invert;
+        uniform float leaving;
+        half4 main(float2 p) {
+            float4 c = floor(float4(image.eval(p)) * 255 + 0.5);
+            float2 i = float2(idx24(cols.eval(float2(p.x, 0.5))), idx24(rows.eval(float2(0.5, p.y))));
+            float n = val24(table.eval(i + 0.5));
+            if (invert > 0) n = 1 - n;
+            float k = clamp((th - n) / soft, 0, 1);
+            if (leaving > 0) k = 1 - k;
+            return scalePixel(c, k);
+        }
+        """);
+
+    /// <summary>
+    /// 画素 (x, y) の値 n = table[row(y)][col(x)] から k = clamp((th - n) / soft) を求めて画素に掛ける (ディゾルブ・ルールワイプ)。
+    /// table は 0〜1 の値の ValueImage。GPU 描画でない・使えないときは null。
+    /// </summary>
+    internal static Sprite? MaskScaleOnGpu(Sprite s, EffectArgs a, Func<int, int> col, Func<int, int> row, SKImage? table, float th, float soft, bool invert, bool leaving)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || MaskScaleShader.Effect == null || table == null) return null;
+        using var cols = IndexImage(s.Width, col);
+        using var rows = ValueImage(1, s.Height, (_, y) => row(y) / 16777216f);
+        if (cols == null || rows == null) return null;
+        using var c1 = cols.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var c2 = rows.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var c3 = table.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        return ApplyGpuShader(s, a, MaskScaleShader, u =>
+        {
+            u["th"] = th; u["soft"] = soft; u["invert"] = invert ? 1f : 0f; u["leaving"] = leaving ? 1f : 0f;
+        }, (kids, _, _) => { kids["cols"] = c1; kids["rows"] = c2; kids["table"] = c3; });
+    }
+
+    /// <summary>ルール画像の明るさ (0〜1) の ValueImage。画像ごとに 1 つ作って使い回す。</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<byte[], SKImage> RuleImages = new();
+
+    private static SKImage? RuleImage(byte[] luma, int w, int h)
+    {
+        if (RuleImages.TryGetValue(luma, out var img)) return img;
+        img = ValueImage(w, h, (x, y) => luma[y * w + x] / 255f);
+        if (img != null) RuleImages.AddOrUpdate(luma, img);
+        return img;
+    }
+
+    // ---------------- トランジション: グリッチ ----------------
+
+    private static readonly Sksl GlitchBandShader = new(SampleSksl + Val24Sksl + """
+        uniform shader rows;    // 行ごとのずれ (range で戻す)
+        uniform float range;
+        uniform float split;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float off = (val24(rows.eval(float2(0.5, p.y))) - 0.5) * range;
+            float4 r = sample8r(float2(q.x - off - split, q.y)), c = sample8r(float2(q.x - off, q.y)), b = sample8r(float2(q.x - off + split, q.y));
+            return half4(half3(float3(r.r, c.g, b.b) / 255), half(max(c.a, max(r.a, b.a)) / 255));
+        }
+        """);
+
+    /// <summary>グリッチのトランジション (EffectsTransition.Glitch と同じ)。行ごとのずれ off(y) は CPU で。GPU 描画でない・使えないときは null。</summary>
+    internal static Sprite? GlitchBandsOnGpu(Sprite s, EffectArgs a, Func<int, float> off, float split, bool clamp)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || GlitchBandShader.Effect == null) return null;
+        var offs = new float[s.Height];
+        float max = 0;
+        for (int y = 0; y < offs.Length; y++) { offs[y] = off(y); max = Math.Max(max, MathF.Abs(offs[y])); }
+        float range = max * 2 + 2;
+        using var rows = ValueImage(1, s.Height, (_, y) => offs[y] / range + 0.5f);
+        if (rows == null) return null;
+        using var rowShader = rows.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        return MultiPassOnGpu(s, a, 0, 0, GlitchBandShader, Tile(clamp), Tile(clamp), 1, (u, _, _, _) =>
+        {
+            u["range"] = range; u["split"] = split;
+        }, kids => kids["rows"] = rowShader);
+    }
+
+    // ---------------- トランジション: 焼けて消える・フィルム焼け ----------------
+
+    private static readonly Sksl BurnShader = new(Val24Sksl + ScalePixelSksl + """
+        uniform shader image;
+        uniform float2 origin;   // G の左上
+        uniform float scale;
+        uniform float th;
+        uniform float leaving;
+        """ + VNoiseSksl(3) + """
+        half4 main(float2 p) {
+            const float Band = 0.08;
+            float4 c0 = floor(float4(image.eval(p)) * 255 + 0.5);
+            float2 v = (p - origin) * scale;
+            float n = vn0(v) * 0.55 + vn1(v * 2.3) * 0.3 + vn2(v * 5.1) * 0.15;
+            // 焼け跡 (入る側が見える所) は n < th
+            float burned = clamp((th - n) / 0.01 + 0.5, 0, 1);
+            if (leaving == 0) return scalePixel(c0, burned);
+            float4 c = floor(float4(scalePixel(c0, 1 - burned)) * 255 + 0.5);
+            float d = (n - th) / Band;
+            if (d >= 0 && d < 1 && c.a != 0) {
+                // 燃えている縁: 焼け跡に近いほど明るい黄色、離れると暗い茶色
+                float heat = 1 - d;
+                float fr = 255, fg = 60 + 190 * heat * heat, fb = 20 + 150 * heat * heat * heat;
+                if (heat < 0.35) { float k2 = heat / 0.35; fr = 90 + 165 * k2; fg *= k2; fb *= k2; }
+                float mx = pow(heat, 0.6);
+                float pa = c.a / 255;
+                float3 o = floor(c.rgb * (1 - mx) + float3(fr, fg, fb) * pa * mx);
+                c.rgb = min(float3(c.a), o);
+            }
+            return half4(c / 255);
+        }
+        """);
+
+    /// <summary>焼けて消える (EffectsTransition.Burn と同じ)。GPU 描画でない・使えないときは null。</summary>
+    internal static Sprite? BurnOnGpu(Sprite s, EffectArgs a, float gl, float gt, float scale, float th, bool leaving)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || BurnShader.Effect == null) return null;
+        float x0 = (0.5f - gl) * scale, x1 = (s.Width - 0.5f - gl) * scale, y0 = (0.5f - gt) * scale, y1 = (s.Height - 0.5f - gt) * scale;
+        using var lats = new Lattices();
+        lats.Add(LatticeImage(x0, x1, y0, y1, 0xB0));
+        lats.Add(LatticeImage(x0 * 2.3f, x1 * 2.3f, y0 * 2.3f, y1 * 2.3f, 0xB1));
+        lats.Add(LatticeImage(x0 * 5.1f, x1 * 5.1f, y0 * 5.1f, y1 * 5.1f, 0xB2));
+        if (lats.Failed) return null;
+        return ApplyGpuShader(s, a, BurnShader, u =>
+        {
+            lats.Set(u);
+            u["origin"] = new[] { gl, gt }; u["scale"] = scale; u["th"] = th; u["leaving"] = leaving ? 1f : 0f;
+        }, (kids, _, _) => lats.Set(kids));
+    }
+
+    private static readonly Sksl FilmBurnShader = new(Val24Sksl + """
+        uniform shader image;
+        uniform float2 origin;
+        uniform float scale;
+        uniform float drift;
+        uniform float level;
+        """ + VNoiseSksl(2) + """
+        half4 main(float2 p) {
+            float4 c = floor(float4(image.eval(p)) * 255 + 0.5);
+            float al = c.a;
+            if (al == 0) return half4(0);
+            float2 v = (p - origin) * scale;
+            // 左から右へ流れながら、まだらに焼ける
+            float n = vn0(float2(v.x - drift, v.y)) * 0.65 + vn1(float2(v.x * 2.7 - drift * 1.5, v.y * 2.7)) * 0.35;
+            n = n * 0.8 + (1 - clamp((v.x - drift * 0.3) / 3, 0, 1)) * 0.2;
+            float b = clamp((level - n) * 2.5, 0, 1);
+            if (b <= 0) return half4(c / 255);
+            float3 f = float3(255, 40 + 215 * min(1, b * 1.3), 10 + 245 * max(0, b * 2 - 1));
+            float pa = al / 255;
+            // スクリーン合成 (明るくなるだけ)
+            float3 o = min(float3(al), floor(c.rgb + (f * pa - c.rgb * f / 255) * min(1, b * 1.5)));
+            return half4(half3(o / 255), half(al / 255));
+        }
+        """);
+
+    /// <summary>フィルム焼け (EffectsTransition.FilmBurn と同じ)。GPU 描画でない・使えないときは null。</summary>
+    internal static Sprite? FilmBurnOnGpu(Sprite s, EffectArgs a, float gl, float gt, float scale, float drift, float level)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || FilmBurnShader.Effect == null) return null;
+        float x0 = (0.5f - gl) * scale, x1 = (s.Width - 0.5f - gl) * scale, y0 = (0.5f - gt) * scale, y1 = (s.Height - 0.5f - gt) * scale;
+        using var lats = new Lattices();
+        lats.Add(LatticeImage(x0 - drift, x1 - drift, y0, y1, 0xF1));
+        lats.Add(LatticeImage(x0 * 2.7f - drift * 1.5f, x1 * 2.7f - drift * 1.5f, y0 * 2.7f, y1 * 2.7f, 0xF2));
+        if (lats.Failed) return null;
+        return ApplyGpuShader(s, a, FilmBurnShader, u =>
+        {
+            lats.Set(u);
+            u["origin"] = new[] { gl, gt }; u["scale"] = scale; u["drift"] = drift; u["level"] = level;
+        }, (kids, _, _) => lats.Set(kids));
     }
 }

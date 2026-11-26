@@ -45,6 +45,7 @@ public unsafe class GpuShaderTests
         for (int i = 0; i < names.Length; i++)
         {
             // "名前:値" は文字の値 (色など)。values の同じ位置は使わない
+            if (names[i].Split(':') is ["frame", _]) continue;   // 描くフレーム (Frame)
             if (names[i].Split(':') is [var key, var text]) e.Values[key] = text;
             else Set(e, names[i], values[i]);
         }
@@ -100,7 +101,9 @@ public unsafe class GpuShaderTests
     /// 描くフレーム。トランジションはイン (0.5 秒 = 15 フレーム) の途中で、後半 (入れ替わってから効果が引いていく所) のフレーム。
     /// 色収差・ピクセル化・波紋・渦巻きなどは後半だけ描く。
     /// </summary>
-    private static int Frame(string id) => id == "filter.transition" ? 11 : 10;
+    /// <summary>描くフレーム。トランジションは後半だけ描くものがあるので 11 (keys の "frame:番号" で変えられる)。</summary>
+    private static int Frame(string id, string keys) =>
+        keys.Split(',').Select(k => k.Split(':')).FirstOrDefault(k => k is ["frame", _]) is [_, var f] ? int.Parse(f) : id == "filter.transition" ? 11 : 10;
 
     public static TheoryData<string, string, double[]> Cases => new()
     {
@@ -179,6 +182,14 @@ public unsafe class GpuShaderTests
         { "filter.lensblur", "radius,boost", new double[] { 6, 60 } },
         { "filter.lensblur", "radius,boost,fixed", new double[] { 10, 0, 1 } },
         { "filter.lensblur", "radius,boost", new double[] { 30, 50 } },
+        { "filter.transition", "type", new double[] { 65 } },                       // ディゾルブ
+        { "filter.transition", "type", new double[] { 66 } },                       // ルールワイプ (画像なし)
+        { "filter.transition", "type,ruleInvert,feather", new double[] { 66, 1, 40 } },
+        { "filter.transition", "type", new double[] { 76 } },                       // グリッチ
+        { "filter.transition", "type,in", new double[] { 82, 1 } },                 // 焼けて消える
+        { "filter.transition", "type,in,out,frame:50", new double[] { 82, 0, 1, 0 } }, // 焼けて消える (出る側。縁が燃える)
+        { "filter.transition", "type", new double[] { 83 } },                       // フィルム焼け
+        { "filter.transition", "type,in,out", new double[] { 65, 0, 2 } },          // ディゾルブ (出る側)
     };
 
     [Theory]
@@ -192,7 +203,7 @@ public unsafe class GpuShaderTests
         {
             using var engine = new RenderEngine(gpu);
             var bmp = new SKBitmap(new SKImageInfo(320, 180, SKColorType.Bgra8888, SKAlphaType.Premul));
-            engine.RenderToBitmap(p, p.Root, Frame(id), bmp);
+            engine.RenderToBitmap(p, p.Root, Frame(id, keys), bmp);
             return bmp;
         }
         // 読み戻した回数は、ほかのテストと共有の数なので、同時に動くテストの分が混ざらないよう差だけを見る
@@ -212,7 +223,7 @@ public unsafe class GpuShaderTests
             // 効果がかかっていることも確かめる
             using var plain = new SKBitmap(sksl.Info);
             p.Root.Objects[1].Effects.Remove(e);
-            using (var engine = new RenderEngine(gpu)) engine.RenderToBitmap(p, p.Root, Frame(id), plain);
+            using (var engine = new RenderEngine(gpu)) engine.RenderToBitmap(p, p.Root, Frame(id, keys), plain);
             var (changed, _) = Compare(plain, sksl);
             Console.WriteLine($"BENCH sksl {id} mean={mean:0.000} max={max} effect-changes={changed:0.00}");
             Assert.True(changed > 0.05, $"{id}: 効果がかかっていない");
