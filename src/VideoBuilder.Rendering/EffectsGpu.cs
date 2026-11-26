@@ -1750,80 +1750,11 @@ public static partial class Effects
 
     // ---------------- 油絵・水彩 ----------------
 
-    /// <summary>1 回の描画で扱う筆の大きさの上限 (SkSL のループの大きさの都合。ずれ 16 × 16 は通り、21 × 21 は通らない)。それより大きい筆は BigPaintOnGpu。</summary>
-    private const int MaxPaintRadius = 15;
-
-    private static readonly Sksl PaintShader = new(SampleSksl + Val24Sksl + """
-        uniform float r;
-        uniform float2 size;
-        uniform float water;
-        """ + VNoiseSksl(1) + """
-
-        float lum(float3 c) { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
-        // 絵の外は数えない (区画は絵の中だけ)
-        float4 val(float2 q, float lc) {
-            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) return float4(0);
-            float3 c = fetch(q).rgb;
-            float dl = lum(c) - lc;
-            return float4(c, dl * dl);
-        }
-        half4 main(float2 p) {
-            float2 q = p - 0.5;
-            float4 orig = fetch(q);
-            float al = orig.a;
-            if (al == 0) return half4(0);
-            // 4 つの区画 (左上・右上・左下・右下) の R・G・B と、明るさの 2 乗の合計。
-            // 2 乗は真ん中の明るさを引いてから (大きな数どうしの引き算で精度を落とさないように。ばらつきは同じ)
-            float lc = lum(orig.rgb);
-            float4 s0 = float4(0), s1 = float4(0), s2 = float4(0), s3 = float4(0);
-            // 中心からのずれ (dx, dy) ごとに 4 つの区画を 1 画素ずつ足す (窓全体を 1 つのループで回すより、展開したときに小さい)。
-            // dx = 0 や dy = 0 の画素は、区画どうしの境目なので両方に入る (CPU と同じ)
-            for (int j = 0; j < 16; j++) {
-                float dy = float(j);
-                if (dy > r) break;
-                for (int i = 0; i < 16; i++) {
-                    float dx = float(i);
-                    if (dx > r) break;
-                    s0 += val(q + float2(-dx, -dy), lc); s1 += val(q + float2(dx, -dy), lc);
-                    s2 += val(q + float2(-dx, dy), lc); s3 += val(q + float2(dx, dy), lc);
-                }
-            }
-            float wl = q.x - max(0, q.x - r) + 1, wr = min(size.x - 1, q.x + r) - q.x + 1;
-            float ht = q.y - max(0, q.y - r) + 1, hb = min(size.y - 1, q.y + r) - q.y + 1;
-            float best = 1e30;
-            float3 bc = float3(0);
-            for (int k = 0; k < 4; k++) {
-                float4 sk = k == 0 ? s0 : k == 1 ? s1 : k == 2 ? s2 : s3;
-                float n = (mod(float(k), 2) == 0 ? wl : wr) * (k < 2 ? ht : hb);
-                float3 m = sk.rgb / n;
-                float dm = lum(m) - lc;
-                float variance = sk.a / n - dm * dm;
-                // 一色の区画はばらつき 0 (CPU と同じく、0 どうしなら先の区画)。GPU によっては計算の順序の違いで ±ごくわずかずれるので、そろえる
-                if (abs(variance) < 1.0 / 128) variance = 0;
-                if (variance < best) { best = variance; bc = m; }
-            }
-            if (water > 0) {
-                float edge = min(1, sqrt(max(0, best)) / 40);
-                float paper = 0.94 + 0.06 * vn0(q * 0.08);
-                bc = (bc + (al - bc) * 0.25 - edge * 35) * paper;
-            }
-            return half4(half3(floor(clamp(bc, 0, al)) / 255), half(al / 255));
-        }
-        """);
-
-    /// <summary>油絵・水彩 (EffectsFilters.Paint と同じ)。GPU 描画でない・筆が大きすぎるときは null。</summary>
+    /// <summary>油絵・水彩 (EffectsFilters.Paint と同じ)。区画の合計は総和の表で求める (SatPaintOnGpu)。GPU 描画でない・使えないときは null。</summary>
     internal static Sprite? PaintOnGpu(Sprite s, EffectArgs a, int radius, bool water, uint noiseSeed)
     {
         if (a.Context.Gpu == null || GpuShadersDisabled) return null;
-        if (radius > MaxPaintRadius) return BigPaintOnGpu(s, a, radius, water, noiseSeed);
-        using var lats = new Lattices();
-        lats.Add(water ? LatticeImage(0, (s.Width - 1) * 0.08f, 0, (s.Height - 1) * 0.08f, noiseSeed) : (ValueImage(1, 1, (_, _) => 0), 0, 0));
-        if (lats.Failed) return null;
-        return MultiPassOnGpu(s, a, 0, 0, PaintShader, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, 1, (u, _, w, h) =>
-        {
-            lats.Set(u);
-            u["r"] = (float)radius; u["size"] = new float[] { w, h }; u["water"] = water ? 1f : 0f;
-        }, lats.Set);
+        return SatPaintOnGpu(s, a, radius, water, noiseSeed);
     }
 
     // ---------------- フィルム粒子 ----------------
@@ -2548,7 +2479,7 @@ public static partial class Effects
         }
         finally { foreach (var d in owned) d.Dispose(); }
     }
-    // ---------------- 油絵・水彩 (大きな筆) ----------------
+    // ---------------- 油絵・水彩 (総和の表) ----------------
     //
     // 区画 (左上・右上・左下・右下) の合計を、総和の表 (左上からの累積和) 4 か所の足し引きで求める (筆の大きさに上限がない)。
     // 足す量は R・G・B と、(明るさ - 128)² × 64 を四捨五入した整数 Q (20 ビット) の 256 進の 3 桁 (どれも 0〜255)。
@@ -2731,10 +2662,11 @@ public static partial class Effects
         """);
 
     /// <summary>
-    /// 大きな筆の油絵・水彩 (筆の大きさに上限はない)。区画の合計を総和の表で求める。ばらつきの 2 乗の和は 1/64 の単位にまるめるので、
+    /// 油絵・水彩 (筆の大きさに上限はない)。区画の合計を総和の表で求める。
+    /// (以前は小さな筆を 1 回の描画で窓を足していたが、Windows の GPU で CPU と違う区画を選ぶ画素が多かったので、どの大きさでもこれを使う)ばらつきの 2 乗の和は 1/64 の単位にまるめるので、
     /// ばらつきがほぼ同じ区画どうしは CPU と違う区画を選ぶことがある。
     /// </summary>
-    private static Sprite? BigPaintOnGpu(Sprite s, EffectArgs a, int radius, bool water, uint noiseSeed)
+    private static Sprite? SatPaintOnGpu(Sprite s, EffectArgs a, int radius, bool water, uint noiseSeed)
     {
         if (PaintRowBlockShader.Effect is not { } blockFx || PaintPrefixPlainShader.Effect is not { } plainFx || PaintPrefixHiShader.Effect is not { } hiFx
             || PaintPrefixLoShader.Effect is not { } loFx || PaintRowPrefixShader.Effect is not { } rowFx || PaintColumnShader.Effect is not { } colFx
