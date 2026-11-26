@@ -79,6 +79,12 @@ public unsafe class GpuShaderTests
         return ((double)total / n, max);
     }
 
+    /// <summary>
+    /// 描くフレーム。トランジションはイン (0.5 秒 = 15 フレーム) の途中で、後半 (入れ替わってから効果が引いていく所) のフレーム。
+    /// 色収差・ピクセル化・波紋・渦巻きなどは後半だけ描く。
+    /// </summary>
+    private static int Frame(string id) => id == "filter.transition" ? 11 : 10;
+
     public static TheoryData<string, string, double[]> Cases => new()
     {
         { "filter.chromakey", "hue,saturation,edge", new double[] { 30, 120, 20 } },
@@ -122,6 +128,15 @@ public unsafe class GpuShaderTests
         { "filter.noise", "amount,size,color", new double[] { 40, 1, 1 } },
         { "filter.mosaic", "size", new double[] { 8 } },
         { "filter.mosaic", "size", new double[] { 13 } },     // 割り切れない大きさ (端のマスは欠ける)
+        { "filter.anim", "type,strength,speed", new double[] { 24, 12, 1 } },      // 旗のようになびく
+        { "filter.transition", "type", new double[] { 81 } },                       // 渦巻き
+        { "filter.transition", "type", new double[] { 77 } },                       // 色収差
+        { "filter.transition", "type", new double[] { 79 } },                       // ピクセル化 (モザイク)
+        { "filter.transition", "type", new double[] { 80 } },                       // 波紋
+        { "filter.deinterlace", "mode", new double[] { 0 } },
+        { "filter.deinterlace", "mode", new double[] { 1 } },
+        { "filter.deinterlace", "mode", new double[] { 2 } },
+        { "filter.deinterlace", "mode", new double[] { 3 } },
     };
 
     [Theory]
@@ -135,7 +150,7 @@ public unsafe class GpuShaderTests
         {
             using var engine = new RenderEngine(gpu);
             var bmp = new SKBitmap(new SKImageInfo(320, 180, SKColorType.Bgra8888, SKAlphaType.Premul));
-            engine.RenderToBitmap(p, p.Root, 10, bmp);
+            engine.RenderToBitmap(p, p.Root, Frame(id), bmp);
             return bmp;
         }
         // 読み戻した回数は、ほかのテストと共有の数なので、同時に動くテストの分が混ざらないよう差だけを見る
@@ -155,7 +170,7 @@ public unsafe class GpuShaderTests
             // 効果がかかっていることも確かめる
             using var plain = new SKBitmap(sksl.Info);
             p.Root.Objects[1].Effects.Remove(e);
-            using (var engine = new RenderEngine(gpu)) engine.RenderToBitmap(p, p.Root, 10, plain);
+            using (var engine = new RenderEngine(gpu)) engine.RenderToBitmap(p, p.Root, Frame(id), plain);
             var (changed, _) = Compare(plain, sksl);
             Console.WriteLine($"BENCH sksl {id} mean={mean:0.000} max={max} effect-changes={changed:0.00}");
             Assert.True(changed > 0.05, $"{id}: 効果がかかっていない");

@@ -714,7 +714,7 @@ public static partial class Effects
         public Sprite Apply(Sprite s, EffectArgs a)
         {
             int mode = a.Effect.GetInt("mode");
-            return Resample(s, a, 0, 0, (src, tmp, w, h, rb) => { PixelFx.Deinterlace(src, tmp, w, h, rb, mode); return tmp; }) ?? s;
+            return DeinterlaceSprite(s, a, mode) ?? s;
         }
     }
 

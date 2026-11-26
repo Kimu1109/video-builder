@@ -178,6 +178,8 @@ public static partial class Effects
         if (MathF.Abs(amp) < 0.3f) return s;
         int pad = (int)MathF.Ceiling(MathF.Abs(amp)) + 1;
         float k = 2 * MathF.PI / wl, shift = 2 * MathF.PI * cycles;
+        // GPU 描画では SkSL で (読み戻さない。設計書 22.54)
+        if (FlagOnGpu(s, a, pad, amp, k, shift) is { } onGpu) return onGpu;
         return Resample(s, a, 0, pad, (src, dst, w, h, rb) =>
         {
             uint* sp = (uint*)src, dp = (uint*)dst;

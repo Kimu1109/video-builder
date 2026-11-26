@@ -921,4 +921,82 @@ public static partial class Effects
             c.Restore();
         });
     }
+
+    // ---------------- 旗・渦巻き・インターレース解除 ----------------
+
+    private static readonly Sksl FlagShader = new(SampleSksl + """
+        uniform float amp;
+        uniform float k;
+        uniform float shift;
+        uniform float width;
+        uniform float lightAmp;   // min(1, |amp| / 20)
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float reach = q.x / max(1, width - 1);
+            float arg = k * q.x - shift;
+            float4 c = sample8r(float2(q.x, q.y - amp * reach * sin(arg)));
+            // 波の斜面の向きで明るさを変える (ScalePixelColor・LightenPixel と同じ丸め)
+            float light = 1 + 0.22 * reach * cos(arg) * lightAmp;
+            if (light < 1) { float t = floor(clamp(light, 0, 1) * 256); c.rgb = floor(c.rgb * t / 256); }
+            else if (light > 1) { float kk = light - 1; c.rgb = floor(min(float3(c.a), c.rgb + (c.a - min(float3(c.a), c.rgb)) * kk)); }
+            return out8(c);
+        }
+        """);
+
+    /// <summary>旗のようになびく (EffectsAnimation.Flag と同じ)。上下に pad の余白を付ける。</summary>
+    internal static Sprite? FlagOnGpu(Sprite s, EffectArgs a, int pad, float amp, float k, float shift) =>
+        MultiPassOnGpu(s, a, 0, pad, FlagShader, SKShaderTileMode.Decal, SKShaderTileMode.Decal, 1, (u, _, w, _) =>
+        {
+            u["amp"] = amp; u["k"] = k; u["shift"] = shift; u["width"] = (float)w; u["lightAmp"] = MathF.Min(1, MathF.Abs(amp) / 20);
+        });
+
+    private static readonly Sksl SwirlShader = new(SampleSksl + """
+        uniform float2 center;
+        uniform float radius;
+        uniform float maxAngle;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float2 o = q - center;
+            float r = length(o);
+            if (r >= radius) return out8(fetch(q));
+            float t = 1 - r / radius, an = maxAngle * t * t;
+            float cs = cos(an), sn = sin(an);
+            return out8(sample8r(center + float2(o.x * cs - o.y * sn, o.x * sn + o.y * cs)));
+        }
+        """);
+
+    /// <summary>トランジションの渦巻き (EffectsTransition.Swirl と同じ。絵の外は端のピクセル)。</summary>
+    internal static Sprite? SwirlOnGpu(Sprite s, EffectArgs a, float cx, float cy, float radius, float maxAngle) =>
+        MultiPassOnGpu(s, a, 0, 0, SwirlShader, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, 1, (u, _, _, _) =>
+        {
+            u["center"] = new[] { cx, cy }; u["radius"] = radius; u["maxAngle"] = maxAngle;
+        });
+
+    private static readonly Sksl DeinterlaceShader = new(SampleSksl + """
+        uniform float mode;
+        uniform float height;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float4 cur = fetch(q);
+            float4 above = fetch(float2(q.x, max(0, q.y - 1))), below = fetch(float2(q.x, min(height - 1, q.y + 1)));
+            float odd = mod(q.y, 2);
+            float up = mod(q.x, 2) == 0 ? 1 : 0;
+            if (mode <= 1) {
+                if (odd == (mode == 0 ? 1 : 0) || height == 1) return out8(cur);
+                // 補う行が絵の外なら、もう片方の行をそのまま使う
+                float4 a2 = q.y - 1 >= 0 ? above : below, b2 = q.y + 1 < height ? below : above;
+                return average(a2, b2, up);
+            }
+            if (mode == 2) return out8(odd == 0 ? cur : above);
+            return average(floor((above + below + 1) / 2), cur, 0);
+        }
+        """);
+
+    /// <summary>インターレース解除 (PixelFx.Deinterlace と同じ)。</summary>
+    internal static Sprite? DeinterlaceSprite(Sprite s, EffectArgs a, int mode) =>
+        MultiPassOnGpu(s, a, 0, 0, DeinterlaceShader, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, 1, (u, _, _, h) =>
+        {
+            u["mode"] = (float)mode; u["height"] = (float)h;
+        })
+        ?? Resample(s, a, 0, 0, (src, tmp, w, h, rb) => { PixelFx.Deinterlace(src, tmp, w, h, rb, mode); return tmp; });
 }

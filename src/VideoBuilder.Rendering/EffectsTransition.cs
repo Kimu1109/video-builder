@@ -828,6 +828,8 @@ public static partial class Effects
         float maxAngle = 4 * MathF.PI * w * w;
         if (maxAngle < 0.01f) return s;
         float cx = G.MidX, cy = G.MidY, R = MathF.Max(1, MathF.Sqrt(G.Width * G.Width + G.Height * G.Height) / 2);
+        // GPU 描画では SkSL で (読み戻さない。設計書 22.54)
+        if (SwirlOnGpu(s, a, cx, cy, R, maxAngle) is { } onGpu) return onGpu;
         return Resample(s, a, 0, 0, (src, dst, w2, h2, rb) =>
         {
             uint* sp = (uint*)src, dp = (uint*)dst;
