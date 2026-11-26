@@ -1075,4 +1075,95 @@ public static partial class Effects
         return MultiPassOnGpu(s, a, 0, 0, DisplaceMapShader, Tile(clamp), Tile(clamp), 1, (u, _, _, _) => u["amount"] = new[] { mx, my },
             kids => kids["map"] = mapShader);
     }
+    // ---------------- CPU で作った値を送る画像 ----------------
+
+    /// <summary>
+    /// ValueImage の値を読む SkSL。値は 0〜1 未満を 24 ビットにしたもの (赤が上位)。
+    /// SkSL には整数のビット演算がなく PixelFx.Hash を GPU で同じに計算できないので、乱数などは CPU で作って画像で送る。
+    /// </summary>
+    private const string Val24Sksl = """
+        float val24(half4 c) { float3 b = floor(float3(c.rgb) * 255 + 0.5); return (b.r * 65536 + b.g * 256 + b.b) / 16777216; }
+        """;
+
+    /// <summary>value(x, y) (0〜1) を 24 ビットにして持つ、幅 w・高さ h の画像 (不透明。GPU へ送るのは待たない)。</summary>
+    private static SKImage? ValueImage(int w, int h, Func<int, int, float> value)
+    {
+        w = Math.Max(1, w); h = Math.Max(1, h);
+        var px = new byte[w * h * 4];
+        PixelOps.ForBands(w, h, (y0, y1) =>
+        {
+            for (int y = y0; y < y1; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    float v = value(x, y);
+                    uint q = v >= 1 ? 16777215u : v <= 0 ? 0u : Math.Min(16777215u, (uint)(v * 16777216f));
+                    int i = (y * w + x) * 4;
+                    px[i] = (byte)(q >> 16); px[i + 1] = (byte)(q >> 8); px[i + 2] = (byte)q; px[i + 3] = 255;
+                }
+        });
+        return SKImage.FromPixelCopy(new SKImageInfo(w, h, SKColorType.Rgba8888, SKAlphaType.Opaque), px);
+    }
+
+    // ---------------- VHS ----------------
+
+    private static readonly Sksl VhsShader = new(SampleSksl + Val24Sksl + """
+        uniform shader rows;    // x = 0: 行のずれ (range で戻す), x = 1: ノイズの帯の中なら 0.5 以上
+        uniform shader rnd;     // 画素ごとの乱数 (Rand01 の salt 5)
+        uniform shader band;    // 帯の乱数 (横 3 画素ごと。salt 6)
+        uniform float range;
+        uniform float shift;
+        uniform float sat;
+        uniform float noise;
+        uniform float k;
+        half4 main(float2 p) {
+            float2 q = p - 0.5;
+            float off = (val24(rows.eval(float2(0.5, p.y))) - 0.5) * range;
+            float inBand = val24(rows.eval(float2(1.5, p.y)));
+            float sx = q.x - off;
+            float4 c = sample8r(float2(sx, q.y));
+            float4 r1 = sample8r(float2(sx - shift, q.y)), r2 = sample8r(float2(sx - shift * 2.5, q.y));
+            float4 b1 = sample8r(float2(sx + shift, q.y)), b2 = sample8r(float2(sx + shift * 2.5, q.y));
+            float al = c.a;
+            float r = (r1.r + r2.r) / 2, g = c.g, b = (b1.b + b2.b) / 2;
+            float l = 0.3 * r + 0.59 * g + 0.11 * b;
+            r = l + (r - l) * sat; g = l + (g - l) * sat; b = l + (b - l) * sat;
+            float n = 0;
+            if (noise > 0) {
+                float rv = val24(rnd.eval(p));
+                n = (rv - 0.5) * 40 * noise * k;
+                if (inBand >= 0.5) n += 120 * noise * val24(band.eval(float2(floor(p.x / 3) + 0.5, p.y)));
+                else if (rv > 1 - 0.0015 * noise) n += 200;
+            }
+            float3 o = floor(clamp(float3(r, g, b) + n, 0, al));
+            return half4(half3(o / 255), half(al / 255));
+        }
+        """);
+
+    /// <summary>
+    /// VHS (EffectsFilters.Vhs と同じ)。行のずれ off(y)・帯 inBand(y) と乱数は CPU で作って画像で送り、読む・混ぜるのは GPU で。
+    /// GPU 描画でない・使えないときは null。
+    /// </summary>
+    internal static Sprite? VhsOnGpu(Sprite s, EffectArgs a, Func<int, float> off, Func<int, bool> inBand, float shift, float sat, float noise, float k, uint seed)
+    {
+        if (a.Context.Gpu == null || GpuShadersDisabled || VhsShader.Effect == null) return null;
+        int w = s.Width, h = s.Height;
+        var offs = new float[h];
+        var bands = new bool[h];
+        float max = 0;
+        for (int y = 0; y < h; y++) { offs[y] = off(y); bands[y] = inBand(y); max = Math.Max(max, MathF.Abs(offs[y])); }
+        float range = max * 2 + 2;
+        using var rows = ValueImage(2, h, (x, y) => x == 0 ? offs[y] / range + 0.5f : bands[y] ? 0.75f : 0);
+        using var rnd = noise > 0 ? ValueImage(w, h, (x, y) => Rand01((uint)(y * 8191 + x), seed, 5)) : ValueImage(1, 1, (_, _) => 0);
+        using var band = noise > 0 && bands.Any(b => b)
+            ? ValueImage((w + 2) / 3, h, (x, y) => bands[y] ? Rand01((uint)(y * 131 + x), seed, 6) : 0)
+            : ValueImage(1, 1, (_, _) => 0);
+        if (rows == null || rnd == null || band == null) return null;
+        using var rowsShader = rows.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var rndShader = rnd.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        using var bandShader = band.ToShader(SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+        return MultiPassOnGpu(s, a, 0, 0, VhsShader, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, 1, (u, _, _, _) =>
+        {
+            u["range"] = range; u["shift"] = shift; u["sat"] = sat; u["noise"] = noise; u["k"] = k;
+        }, kids => { kids["rows"] = rowsShader; kids["rnd"] = rndShader; kids["band"] = bandShader; });
+    }
 }

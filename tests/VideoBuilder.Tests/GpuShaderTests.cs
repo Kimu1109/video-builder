@@ -161,6 +161,8 @@ public unsafe class GpuShaderTests
         { "filter.deinterlace", "mode", new double[] { 1 } },
         { "filter.deinterlace", "mode", new double[] { 2 } },
         { "filter.deinterlace", "mode", new double[] { 3 } },
+        { "filter.vhs", "strength,noise,wobble", new double[] { 80, 60, 70 } },
+        { "filter.vhs", "strength,noise,wobble", new double[] { 100, 0, 100 } },
     };
 
     [Theory]

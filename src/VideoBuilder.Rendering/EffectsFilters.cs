@@ -423,23 +423,30 @@ public static partial class Effects
             float noise = a.Track("noise") / 100f, wobble = a.Track("wobble") / 100f;
             uint seed = (uint)(int)a.Track("seed") * 977u + (uint)a.Frame * 2654435761u;
             float t = (float)a.Time;
+            int W = s.Width, H = s.Height;
+            float shift = Math.Max(1, W * 0.004f) * k, scroll = (t * 0.15f) % 1, sat = 1 - 0.25f * k;
+            float RowOff(int y)
+            {
+                float vy = y / (float)H;
+                // 横の揺れ: ゆっくりした揺れ + ときどき強く
+                float off = wobble * k * W * 0.004f * MathF.Sin(vy * 40 + t * 7) + wobble * k * W * 0.01f * (ValueNoise(vy * 30, t * 3, seed >> 8) - 0.5f);
+                // 下端の乱れ (テープの継ぎ目)
+                if (vy > 0.94f) off += k * W * 0.03f * (Rand01((uint)y, seed, 3) - 0.5f) * (vy - 0.94f) / 0.06f * 3;
+                return off;
+            }
+            // 流れるノイズの帯
+            bool InBand(int y) => MathF.Abs(((y / (float)H - scroll) % 1 + 1) % 1 - 0.5f) < 0.015f * noise * 3;
+            if (VhsOnGpu(s, a, RowOff, InBand, shift, sat, noise, k, seed) is { } onGpu) return onGpu;
             return Remap(s, a, (src, dst, w, h, rb) =>
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
                 int stride = rb / 4;
-                float shift = Math.Max(1, w * 0.004f) * k, scroll = (t * 0.15f) % 1;
                 PixelOps.ForBands(w, h, (y0, y1) =>
                 {
                     for (int y = y0; y < y1; y++)
                     {
-                        float vy = y / (float)h;
-                        // 横の揺れ: ゆっくりした揺れ + ときどき強く
-                        float off = wobble * k * w * 0.004f * MathF.Sin(vy * 40 + t * 7) + wobble * k * w * 0.01f * (ValueNoise(vy * 30, t * 3, seed >> 8) - 0.5f);
-                        // 下端の乱れ (テープの継ぎ目)
-                        if (vy > 0.94f) off += k * w * 0.03f * (Rand01((uint)y, seed, 3) - 0.5f) * (vy - 0.94f) / 0.06f * 3;
-                        // 流れるノイズの帯
-                        float band = MathF.Abs(((vy - scroll) % 1 + 1) % 1 - 0.5f);
-                        bool inBand = band < 0.015f * noise * 3;
+                        float off = RowOff(y);
+                        bool inBand = InBand(y);
                         uint* row = dp + (long)y * stride;
                         for (int x = 0; x < w; x++)
                         {
@@ -451,7 +458,7 @@ public static partial class Effects
                             uint al = c >> 24;
                             float r = (((r1 >> 16) & 0xFF) + ((r2 >> 16) & 0xFF)) / 2f, g = (c >> 8) & 0xFF, b = ((b1 & 0xFF) + (b2 & 0xFF)) / 2f;
                             // 彩度を少し下げる
-                            float l = 0.3f * r + 0.59f * g + 0.11f * b, sat = 1 - 0.25f * k;
+                            float l = 0.3f * r + 0.59f * g + 0.11f * b;
                             r = l + (r - l) * sat; g = l + (g - l) * sat; b = l + (b - l) * sat;
                             float n = 0;
                             if (noise > 0)
