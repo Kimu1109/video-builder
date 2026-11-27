@@ -98,7 +98,9 @@ public class MediaTests : IDisposable
     {
         if (!_ready) return;
         // キーフレームは 0.5 秒 (15 フレーム) ごと。testsrc はフレームごとに絵が変わる
-        byte[] Exact(double t) { using var r = new VideoReader(Clip); return r.GetFrame(t)!.ToArray(); }
+        // 比べる相手も同じ設定 (ソフトウェア・参照されないフレームのデブロッキングを省く) で開く。
+        // 省いた分の画素の違いは CPU の種類で出たり出なかったりするので、設定をそろえて、読み方の違いだけを見る
+        byte[] Exact(double t) { using var r = new VideoReader(Clip, absoluteTime: false, allowHardware: false); return r.GetFrame(t)!.ToArray(); }
         using var thumbs = new VideoReader(Clip, absoluteTime: false, allowHardware: false);
         Assert.False(thumbs.IsHardware);
 
