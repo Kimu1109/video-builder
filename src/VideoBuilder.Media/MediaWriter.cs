@@ -173,6 +173,93 @@ public sealed unsafe class MediaWriter : IDisposable
         FFmpegLoader.Check(ffmpeg.swr_init(_swr), "リサンプラの初期化に失敗");
     }
 
+    /// <summary>
+    /// GPU で YUV に変換して渡せるときの形式 (エンコーダの形式が 8 ビットの NV12 か YUV420P で、大きさを変えないとき)。
+    /// 色の式は BGRA から変換するときと同じ (高さ 720 以上は BT.709、それより小さければ BT.601。リミテッドレンジ)。設計書 22.58。
+    /// </summary>
+    public (YuvLayout Layout, bool Bt709)? GpuConversionTarget
+    {
+        get
+        {
+            if (_venc == null || _venc->width != _width || _venc->height != _height) return null;
+            bool bt709 = _height >= 720;
+            return _softwareFormat switch
+            {
+                AVPixelFormat.AV_PIX_FMT_NV12 => (YuvLayout.Nv12, bt709),
+                AVPixelFormat.AV_PIX_FMT_YUV420P => (YuvLayout.Planar, bt709),
+                _ => null,
+            };
+        }
+    }
+
+    /// <summary>
+    /// GPU で変換済みの YUV の面 (GpuConversionTarget の形式) を、エンコーダに渡すフレームに写す。WritePreparedVideoFrame に渡すこと。
+    /// </summary>
+    public IntPtr PrepareVideoFrame(in YuvPlanes planes)
+    {
+        if (_venc == null) return IntPtr.Zero;
+        var handle = TakePooledFrame();
+        var frame = (AVFrame*)handle;
+        int w = _venc->width, h = _venc->height;
+        void Copy(IntPtr src, int srcStride, byte* dst, int dstStride, int rowBytes, int rows)
+        {
+            for (int y = 0; y < rows; y++)
+                Buffer.MemoryCopy((byte*)src + (long)y * srcStride, dst + (long)y * dstStride, rowBytes, rowBytes);
+        }
+        Copy(planes.Y, planes.YStride, frame->data[0], frame->linesize[0], w, h);
+        if (planes.Layout == YuvLayout.Nv12) Copy(planes.U, planes.UStride, frame->data[1], frame->linesize[1], w, h / 2);
+        else
+        {
+            Copy(planes.U, planes.UStride, frame->data[1], frame->linesize[1], w / 2, h / 2);
+            Copy(planes.V, planes.VStride, frame->data[2], frame->linesize[2], w / 2, h / 2);
+        }
+        return handle;
+    }
+
+    /// <summary>
+    /// エンコーダに直接渡せる GPU 上のフレーム (VAAPI の NV12) を取れるか。取れるなら AllocateHardwareFrame で取り、
+    /// DMA-BUF として GPU で描いてから PrepareHardwareFrame で渡す (CPU を通さない。設計書 22.58)。
+    /// </summary>
+    public bool AcceptsHardwareFrames =>
+        _uploadToHardware && _venc->hw_frames_ctx != null && _softwareFormat == AVPixelFormat.AV_PIX_FMT_NV12
+        && ((AVHWFramesContext*)_venc->hw_frames_ctx->data)->format == AVPixelFormat.AV_PIX_FMT_VAAPI
+        && _venc->width == _width && _venc->height == _height;
+
+    /// <summary>エンコーダのフレーム置き場から、GPU 上のフレームを 1 つ取る。取れなければ null (error に理由)。どのスレッドからでもよい。</summary>
+    public HardwareFrame? AllocateHardwareFrame(out string? error)
+    {
+        error = null;
+        if (!AcceptsHardwareFrames) { error = "エンコーダが GPU 上のフレームを受け取りません"; return null; }
+        var f = ffmpeg.av_frame_alloc();
+        int ret = ffmpeg.av_hwframe_get_buffer(_venc->hw_frames_ctx, f, 0);
+        if (ret < 0) { ffmpeg.av_frame_free(&f); error = "GPU 側のフレームを確保できません: " + FFmpegLoader.ErrorText(ret); return null; }
+        return new HardwareFrame(f, HardwareFrameKinds.Vaapi);
+    }
+
+    // PrepareHardwareFrame で渡された GPU 上のフレーム (WritePreparedVideoFrame で見分ける)
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<IntPtr, byte> _hardwareHandles = new();
+
+    /// <summary>GPU で描き終えたフレーム (AllocateHardwareFrame で取ったもの) を引き取り、WritePreparedVideoFrame に渡せる形にする。</summary>
+    public IntPtr PrepareHardwareFrame(HardwareFrame frame)
+    {
+        var f = frame.Detach();
+        if (f == null) return IntPtr.Zero;
+        _hardwareHandles[(IntPtr)f] = 0;
+        return (IntPtr)f;
+    }
+
+    /// <summary>変換先のフレームを使い回しから取り出す (なければ作る)。</summary>
+    private IntPtr TakePooledFrame()
+    {
+        if (_framePool.TryTake(out var handle)) return handle;
+        var f = ffmpeg.av_frame_alloc();
+        f->format = _vframe->format; f->width = _vframe->width; f->height = _vframe->height;
+        FFmpegLoader.Check(ffmpeg.av_frame_get_buffer(f, 0), "フレームの確保に失敗");
+        handle = (IntPtr)f;
+        lock (_allFrames) _allFrames.Add(handle);
+        return handle;
+    }
+
     /// <summary>Width*Height*4 バイトの BGRA を 1 フレームとして書き込む。</summary>
     public void WriteVideoFrame(ReadOnlySpan<byte> bgra, int stride)
     {
@@ -196,14 +283,7 @@ public sealed unsafe class MediaWriter : IDisposable
         if (rgba && _swsRgba == null) _swsRgba = CreateConverter(AVPixelFormat.AV_PIX_FMT_RGBA, out _swsRgbaThreaded);
         var sws = rgba ? _swsRgba : _sws;
         bool threaded = rgba ? _swsRgbaThreaded : _swsThreaded;
-        if (!_framePool.TryTake(out var handle))
-        {
-            var f = ffmpeg.av_frame_alloc();
-            f->format = _vframe->format; f->width = _vframe->width; f->height = _vframe->height;
-            FFmpegLoader.Check(ffmpeg.av_frame_get_buffer(f, 0), "フレームの確保に失敗");
-            handle = (IntPtr)f;
-            lock (_allFrames) _allFrames.Add(handle);
-        }
+        var handle = TakePooledFrame();
         var frame = (AVFrame*)handle;
         fixed (byte* p = bgra)
         {
@@ -237,6 +317,17 @@ public sealed unsafe class MediaWriter : IDisposable
     {
         if (_venc == null || handle == IntPtr.Zero) return;
         var frame = (AVFrame*)handle;
+        if (_hardwareHandles.TryRemove(handle, out _))
+        {
+            // GPU で描いた VAAPI のフレーム: そのままエンコーダに渡す
+            try
+            {
+                frame->pts = _videoPts++;
+                Encode(_venc, _vst, frame);
+            }
+            finally { ffmpeg.av_frame_free(&frame); }
+            return;
+        }
         try
         {
             frame->pts = _videoPts++;
@@ -339,6 +430,8 @@ public sealed unsafe class MediaWriter : IDisposable
 
     public void Dispose()
     {
+        foreach (var h in _hardwareHandles.Keys) { var f = (AVFrame*)h; ffmpeg.av_frame_free(&f); }
+        _hardwareHandles.Clear();
         if (_vframe != null) { var f = _vframe; ffmpeg.av_frame_free(&f); _vframe = null; }
         lock (_allFrames)
         {

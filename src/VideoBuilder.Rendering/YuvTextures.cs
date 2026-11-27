@@ -71,6 +71,19 @@ internal sealed unsafe class YuvTextures : IDisposable
     private readonly List<(uint Texture, int W, int H)> _free = new();
     private readonly SKImageTextureReleaseDelegate _release;
     private bool _disposed;
+    // GPU 上のフレームを取り込むもの (使えなければ null。理由は HardwareError)
+    private readonly EglDmaBuf? _dmaBuf;
+    private CudaGl? _cuda;
+    private readonly uint[] _imported = new uint[2];   // DMA-BUF を取り込むテクスチャ (Y・UV)
+    // GPU が読み終えるまで手放さないもの (DMA-BUF の元のフレームはデコーダが使い回すので、描き終えてから返す)
+    private readonly Queue<(IntPtr Fence, HardwareFrame Frame, IntPtr[] Images)> _inUse = new();
+
+    /// <summary>GPU 上のまま取り込めるフレームの種類。</summary>
+    public HardwareFrameKinds HardwareKinds { get; private set; }
+    /// <summary>GPU 上のフレームを取り込めないとき (取り込めなくなったとき)、その理由。</summary>
+    public string? HardwareError { get; private set; }
+    /// <summary>GPU 上のまま取り込んで変換した回数 (計測・テスト用)。</summary>
+    public long HardwareConverted { get; private set; }
 
     /// <summary>変換した回数 (計測・テスト用)。</summary>
     public long Converted { get; private set; }
@@ -92,6 +105,16 @@ internal sealed unsafe class YuvTextures : IDisposable
         _locChroma = gl.Uniform(program, "chroma");
         _locCsize = gl.Uniform(program, "csize");
         _release = ctx => { if (ctx is (uint t, int w, int h)) _returned.Enqueue((t, w, h)); };
+        var errors = new List<string>();
+        if (Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_FRAMES") == "0") errors.Add("VIDEO_BUILDER_GPU_FRAMES=0");
+        else
+        {
+            _dmaBuf = EglDmaBuf.Create(gpu, out var dmaError);
+            if (_dmaBuf != null) HardwareKinds |= HardwareFrameKinds.Vaapi; else errors.Add("VAAPI: " + dmaError);
+            _cuda = CudaGl.Create(gpu, out var cudaError);
+            if (_cuda != null) HardwareKinds |= HardwareFrameKinds.Cuda; else errors.Add("CUDA: " + cudaError);
+        }
+        HardwareError = errors.Count == 0 ? null : string.Join(" / ", errors);
     }
 
     /// <summary>作れなければ null (error に理由)。描画のスレッドで、コンテキストを有効にしてから呼ぶ。</summary>
@@ -136,49 +159,188 @@ internal sealed unsafe class YuvTextures : IDisposable
                 Plane(2, cw, ch, GlFunctions.R8, GlFunctions.RED, p.V, p.VStride, 1, GlFunctions.NEAREST);
             }
             gl.PixelStorei(GlFunctions.UNPACK_ROW_LENGTH, 0);
-
-            gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, _fbo);
-            gl.FramebufferTexture2D(GlFunctions.FRAMEBUFFER, GlFunctions.COLOR_ATTACHMENT0, GlFunctions.TEXTURE_2D, output, 0);
-            if (gl.CheckFramebufferStatus(GlFunctions.FRAMEBUFFER) != GlFunctions.FRAMEBUFFER_COMPLETE)
+            int mode = !nv12 ? 0 : VideoReader.SwsInterpolatesNv12ChromaVertically ? 2 : 1;
+            if (!Draw(output, w, h, w, h, cw, ch, p.ChromaShiftX, p.ChromaShiftY, p.FullRange, mode, _planes[0], _planes[1], nv12 ? _planes[1] : _planes[2]))
             {
                 ReturnOutput(output, w, h);
                 return null;
             }
-            gl.Viewport(0, 0, w, h);
-            foreach (var cap in new[] { GlFunctions.BLEND, GlFunctions.SCISSOR_TEST, GlFunctions.DEPTH_TEST, GlFunctions.STENCIL_TEST, GlFunctions.CULL_FACE, GlFunctions.DITHER })
-                gl.Disable(cap);
-            gl.ColorMask(1, 1, 1, 1);
-            gl.UseProgram(_program);
-            // NV12 の U・V を縦に補間するかは、sws に合わせる (CPU の種類で違う)
-            gl.Uniform1i(_locNv12, !nv12 ? 0 : VideoReader.SwsInterpolatesNv12ChromaVertically ? 2 : 1);
-            var (matrix, offset) = Coefficients(p.FullRange);
-            fixed (float* mp = matrix) gl.UniformMatrix3fv(_locM, 1, 0, mp);
-            gl.Uniform3f(_locOff, offset.X, offset.Y, offset.Z);
-            // U・V の面は、Y の面と同じ範囲を指すように (奇数の幅・高さでは、U・V の面の方が少し広い)
-            gl.Uniform2f(_locChroma, (float)w / (cw << p.ChromaShiftX), (float)h / (ch << p.ChromaShiftY));
-            gl.Uniform2i(_locCsize, cw, ch);
-            for (int i = 0; i < 3; i++)
-            {
-                gl.ActiveTexture(GlFunctions.TEXTURE0 + (uint)i);
-                gl.BindTexture(GlFunctions.TEXTURE_2D, i == 2 && nv12 ? _planes[1] : _planes[i]);
-            }
-            gl.BindVertexArray(_vao);
-            gl.DrawArrays(GlFunctions.TRIANGLE_STRIP, 0, 4);
-            gl.BindVertexArray(0);
-            gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, 0);
         }
         finally
         {
             // Skia が覚えている GL の状態 (結び付けたテクスチャ・描画先など) を捨てさせる
             _gpu.Context.ResetContext();
         }
+        return Wrap(output, w, h);
+    }
 
+    /// <summary>描いた絵 (RGBA8 のテクスチャ) を Skia の画像にする。</summary>
+    private SKImage? Wrap(uint output, int w, int h)
+    {
         var info = new GRGlTextureInfo(GlFunctions.TEXTURE_2D, output, GlFunctions.RGBA8);
         using var backend = new GRBackendTexture(w, h, false, info);
         var image = SKImage.FromTexture(_gpu.Context, backend, GRSurfaceOrigin.TopLeft, SKColorType.Rgba8888, SKAlphaType.Opaque, null, _release, (output, w, h));
         if (image == null) { ReturnOutput(output, w, h); return null; }
         Converted++;
         return image;
+    }
+
+    /// <summary>
+    /// Y・U・V のテクスチャから、output (ow x oh の RGBA8) に描く。w・h は元のフレームの大きさ、cw・ch は U・V の面の大きさ。
+    /// mode は NV12 の U・V の読み方 (0: NV12 でない, 1: 補間しない/テクスチャの補間に任せる, 2: sws の x64 と同じく縦に補間)。
+    /// </summary>
+    private bool Draw(uint output, int w, int h, int ow, int oh, int cw, int ch, int shiftX, int shiftY, bool fullRange, int mode, uint ty, uint tu, uint tv)
+    {
+        var gl = _gl;
+        {
+            gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, _fbo);
+            gl.FramebufferTexture2D(GlFunctions.FRAMEBUFFER, GlFunctions.COLOR_ATTACHMENT0, GlFunctions.TEXTURE_2D, output, 0);
+            if (gl.CheckFramebufferStatus(GlFunctions.FRAMEBUFFER) != GlFunctions.FRAMEBUFFER_COMPLETE)
+            {
+                gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, 0);
+                return false;
+            }
+            gl.Viewport(0, 0, ow, oh);
+            foreach (var cap in new[] { GlFunctions.BLEND, GlFunctions.SCISSOR_TEST, GlFunctions.DEPTH_TEST, GlFunctions.STENCIL_TEST, GlFunctions.CULL_FACE, GlFunctions.DITHER })
+                gl.Disable(cap);
+            gl.ColorMask(1, 1, 1, 1);
+            gl.UseProgram(_program);
+            // NV12 の U・V を縦に補間するかは、sws に合わせる (CPU の種類で違う)
+            gl.Uniform1i(_locNv12, mode);
+            var (matrix, offset) = Coefficients(fullRange);
+            fixed (float* mp = matrix) gl.UniformMatrix3fv(_locM, 1, 0, mp);
+            gl.Uniform3f(_locOff, offset.X, offset.Y, offset.Z);
+            // U・V の面は、Y の面と同じ範囲を指すように (奇数の幅・高さでは、U・V の面の方が少し広い)
+            gl.Uniform2f(_locChroma, (float)w / (cw << shiftX), (float)h / (ch << shiftY));
+            gl.Uniform2i(_locCsize, cw, ch);
+            var textures = new[] { ty, tu, tv };
+            for (int i = 0; i < 3; i++)
+            {
+                gl.ActiveTexture(GlFunctions.TEXTURE0 + (uint)i);
+                gl.BindTexture(GlFunctions.TEXTURE_2D, textures[i]);
+            }
+            gl.BindVertexArray(_vao);
+            gl.DrawArrays(GlFunctions.TRIANGLE_STRIP, 0, 4);
+            gl.BindVertexArray(0);
+            gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, 0);
+            gl.ActiveTexture(GlFunctions.TEXTURE0);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// GPU 上の NV12 のフレーム (メモリへ写していないもの) を、GPU の中で RGBA に変換した画像を返す (設計書 22.58)。
+    /// ow・oh は作る画像の大きさ (縮めてデコードするときは元より小さい)。frame はここで引き取る (GPU が読み終えたら手放す)。
+    /// 取り込めなければ null (frame は手放す。その種類はこのあと使わない)。
+    /// </summary>
+    public SKImage? ConvertHardware(HardwareFrame frame, int ow, int oh)
+    {
+        ReleaseFinished(wait: false);
+        if (_disposed || (HardwareKinds & frame.Kind) == 0) { frame.Dispose(); return null; }
+        var gl = _gl;
+        int w = frame.Width, h = frame.Height, cw = (w + 1) / 2, ch = (h + 1) / 2;
+        // 元の大きさなら、メモリへ写したときと同じ読み方 (CPU 描画と同じ絵)。縮めるときはテクスチャの補間で縮める
+        bool scaled = ow != w || oh != h;
+        int filter = scaled ? GlFunctions.LINEAR : GlFunctions.NEAREST;
+        int mode = scaled ? 1 : VideoReader.SwsInterpolatesNv12ChromaVertically ? 2 : 1;
+        uint output = TakeOutput(ow, oh);
+        IntPtr[] images = Array.Empty<IntPtr>();
+        string? error = null;
+        bool keep = false;
+        try
+        {
+            uint ty, tuv;
+            if (frame.Kind == HardwareFrameKinds.Vaapi)
+            {
+                if (!frame.TryMapDmaBuf(out var layers, out error)) return Fail();
+                if (layers.Length != 2 || layers[0].DrmFormat != HardwareFrame.DrmR8 || layers[1].DrmFormat != HardwareFrame.DrmGR88)
+                {
+                    error = "DMA-BUF の形式が NV12 (R8 + GR88) ではありません";
+                    return Fail();
+                }
+                images = new IntPtr[2];
+                for (int i = 0; i < 2; i++)
+                {
+                    images[i] = _dmaBuf!.Import(layers[i]);
+                    if (images[i] == IntPtr.Zero) { error = $"DMA-BUF を EGL に取り込めません (0x{EglApi.GetError():X4}, modifier 0x{layers[i].Modifier:X})"; return Fail(); }
+                    if (_imported[i] == 0) _imported[i] = gl.GenTexture();
+                    gl.GetError();
+                    gl.BindTexture(GlFunctions.TEXTURE_2D, _imported[i]);
+                    _dmaBuf.BindToTexture(images[i]);
+                    if (gl.GetError() is var e and not 0) { error = $"DMA-BUF をテクスチャにできません (0x{e:X4})"; return Fail(); }
+                    SetFilter(filter);
+                }
+                ty = _imported[0]; tuv = _imported[1];
+            }
+            else
+            {
+                EnsurePlane(0, w, h, GlFunctions.R8, GlFunctions.RED);
+                EnsurePlane(1, cw, ch, GlFunctions.RG8, GlFunctions.RG);
+                for (int i = 0; i < 2; i++) { gl.BindTexture(GlFunctions.TEXTURE_2D, _planes[i]); SetFilter(filter); }
+                int r = _cuda!.Copy(frame, new[] { (_planes[0], w, h), (_planes[1], cw * 2, ch) });
+                if (r != 0) { error = $"CUDA から GL のテクスチャへ写せません (CUDA のエラー {r})"; return Fail(); }
+                ty = _planes[0]; tuv = _planes[1];
+            }
+            if (!Draw(output, w, h, ow, oh, cw, ch, 1, 1, false, mode, ty, tuv, tuv)) { error = "変換の描画先を作れません"; return Fail(); }
+            if (frame.Kind == HardwareFrameKinds.Vaapi)
+            {
+                // デコーダの置き場を GPU が読み終えるまで持っておく
+                var fence = gl.FenceSync(GlFunctions.SYNC_GPU_COMMANDS_COMPLETE, 0);
+                gl.Flush();
+                _inUse.Enqueue((fence, frame, images));
+                keep = true;
+            }
+            // 縮めたときのために、使い回す面のテクスチャの補間を元に戻しておく
+            if (frame.Kind == HardwareFrameKinds.Cuda && scaled)
+                for (int i = 0; i < 2; i++) { gl.BindTexture(GlFunctions.TEXTURE_2D, _planes[i]); SetFilter(GlFunctions.NEAREST); }
+        }
+        finally
+        {
+            if (!keep)
+            {
+                foreach (var img in images) _dmaBuf?.Destroy(img);
+                frame.Dispose();
+            }
+            _gpu.Context.ResetContext();
+        }
+        HardwareConverted++;
+        return Wrap(output, ow, oh);
+
+        SKImage? Fail()
+        {
+            ReturnOutput(output, ow, oh);
+            HardwareKinds &= ~frame.Kind;
+            HardwareError = error;
+            return null;
+        }
+    }
+
+    private void SetFilter(int filter)
+    {
+        _gl.TexParameteri(GlFunctions.TEXTURE_2D, GlFunctions.TEXTURE_MIN_FILTER, filter);
+        _gl.TexParameteri(GlFunctions.TEXTURE_2D, GlFunctions.TEXTURE_MAG_FILTER, filter);
+        _gl.TexParameteri(GlFunctions.TEXTURE_2D, GlFunctions.TEXTURE_WRAP_S, GlFunctions.CLAMP_TO_EDGE);
+        _gl.TexParameteri(GlFunctions.TEXTURE_2D, GlFunctions.TEXTURE_WRAP_T, GlFunctions.CLAMP_TO_EDGE);
+    }
+
+    /// <summary>GPU が読み終えたフレームを手放す。wait なら、全部読み終えるまで待つ。</summary>
+    private void ReleaseFinished(bool wait)
+    {
+        while (_inUse.TryPeek(out var item))
+        {
+            if (item.Fence != IntPtr.Zero)
+            {
+                uint r = _gl.ClientWaitSync(item.Fence, wait ? GlFunctions.SYNC_FLUSH_COMMANDS_BIT : 0, wait ? 1_000_000_000UL : 0);
+                // 古いものが溜まりすぎたら待つ (デコーダの置き場が足りなくならないように)
+                if (r == GlFunctions.TIMEOUT_EXPIRED && !wait && _inUse.Count > 3)
+                    r = _gl.ClientWaitSync(item.Fence, GlFunctions.SYNC_FLUSH_COMMANDS_BIT, 1_000_000_000UL);
+                if (r == GlFunctions.TIMEOUT_EXPIRED && !wait) return;
+                _gl.DeleteSync(item.Fence);
+            }
+            _inUse.Dequeue();
+            foreach (var img in item.Images) _dmaBuf?.Destroy(img);
+            item.Frame.Dispose();
+        }
     }
 
     /// <summary>BT.601 の YUV → RGB (値は 0〜1)。列ごとに並べる (GL の mat3)。</summary>
@@ -192,20 +354,25 @@ internal sealed unsafe class YuvTextures : IDisposable
         return (m, (fullRange ? 0 : 16f / 255f, 128f / 255f, 128f / 255f));
     }
 
-    private void Plane(int i, int w, int h, uint internalFormat, uint format, IntPtr data, int stride, int bytesPerPixel, int filter)
+    /// <summary>面のテクスチャを、この大きさ・形式で用意して結び付ける (違うときだけ作り直す)。</summary>
+    private void EnsurePlane(int i, int w, int h, uint internalFormat, uint format)
     {
         var gl = _gl;
         if (_planes[i] == 0) _planes[i] = gl.GenTexture();
         gl.BindTexture(GlFunctions.TEXTURE_2D, _planes[i]);
         if (_planeShape[i] != (w, h, internalFormat))
         {
+            _cuda?.Forget(_planes[i]);   // 中身の置き場が変わるので、CUDA への登録をやめる
             gl.TexImage2D(GlFunctions.TEXTURE_2D, 0, (int)internalFormat, w, h, 0, format, GlFunctions.UNSIGNED_BYTE, null);
-            gl.TexParameteri(GlFunctions.TEXTURE_2D, GlFunctions.TEXTURE_MIN_FILTER, filter);
-            gl.TexParameteri(GlFunctions.TEXTURE_2D, GlFunctions.TEXTURE_MAG_FILTER, filter);
-            gl.TexParameteri(GlFunctions.TEXTURE_2D, GlFunctions.TEXTURE_WRAP_S, GlFunctions.CLAMP_TO_EDGE);
-            gl.TexParameteri(GlFunctions.TEXTURE_2D, GlFunctions.TEXTURE_WRAP_T, GlFunctions.CLAMP_TO_EDGE);
+            SetFilter(GlFunctions.NEAREST);
             _planeShape[i] = (w, h, internalFormat);
         }
+    }
+
+    private void Plane(int i, int w, int h, uint internalFormat, uint format, IntPtr data, int stride, int bytesPerPixel, int filter)
+    {
+        var gl = _gl;
+        EnsurePlane(i, w, h, internalFormat, format);
         gl.PixelStorei(GlFunctions.UNPACK_ROW_LENGTH, stride / bytesPerPixel);
         gl.TexSubImage2D(GlFunctions.TEXTURE_2D, 0, 0, 0, w, h, format, GlFunctions.UNSIGNED_BYTE, (void*)data);
     }
@@ -238,6 +405,10 @@ internal sealed unsafe class YuvTextures : IDisposable
         if (_disposed) return;
         _disposed = true;
         var gl = _gl;
+        ReleaseFinished(wait: true);
+        _cuda?.Dispose();
+        _cuda = null;
+        foreach (var t in _imported) gl.DeleteTexture(t);
         while (_returned.TryDequeue(out var r)) _free.Add(r);
         foreach (var f in _free) gl.DeleteTexture(f.Texture);
         _free.Clear();

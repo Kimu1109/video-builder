@@ -1325,6 +1325,7 @@ NVDEC の結果は NV12 で、ソフトウェアの結果 (YUV420P) とは sws �
 
 また、GPU でデコードしても、フレームをメモリへ写す時間がかかるため、1080p 程度では速くならないこともある。
 4K 以上や H.265 / AV1 など、CPU でのデコードが重い素材で効果が出るはず。
+GPU 描画のときは、フレームをメモリへ写さずに GPU 上のまま使うようにした ([22.58](#2258-ハードウェアデコードのフレームを-cpu-に写さない書き出しの色変換を-gpu-で))。4K の H.264 を描く時間が NVDEC で 11.5 → 6.0 ms、VAAPI で 18.8 → 10.4 ms になった。
 
 ---
 
@@ -2791,7 +2792,7 @@ Mesa のソフトウェアの GL (llvmpipe, OpenGL ES 3.2) で、テスト (`Gpu
 
 **実際の GPU での速さは測れていない** (開発環境に GPU がない)。llvmpipe では GPU の処理も CPU で動くので、シェーダでの色変換は sws より遅い (1080p の書き出しで 78 fps → 65 fps、読み戻しを待たないと 70〜76 fps)。描画方式の「自動」はソフトウェアの GL を選ばないので、ふだんはこの経路にならない。実際の GPU では、CPU の色変換 (1080p で約 2.5 ms/フレーム) と送る量が減り、読み戻しの待ちが色変換と重なるはず。`GpuTransferTests.Report_gpu_export_speed` を、環境変数を変えて (`VIDEO_BUILDER_GPU_YUV=0`・`VIDEO_BUILDER_ASYNC_READBACK=0`) 流すと比べられる。
 
-残っていること: 動画の書き出しで、YUV への変換も GPU で行う (読み戻す量がさらに減る)、ハードウェアデコードのフレームを CPU に写さずに使う (VAAPI の DMA-BUF を EGL で取り込む)、VAAPI のエンコードに GPU 上のフレームを渡す、ピクセルを直接扱うほかの効果 (モザイク・グローの明部抽出など) を GPU で処理する (SkiaSharp 3 への更新が必要)。
+残っていること: ~~動画の書き出しで、YUV への変換も GPU で行う、ハードウェアデコードのフレームを CPU に写さずに使う、VAAPI のエンコードに GPU 上のフレームを渡す~~ (この 3 つは [22.58](#2258-ハードウェアデコードのフレームを-cpu-に写さない書き出しの色変換を-gpu-で) で入れた)、ピクセルを直接扱うほかの効果 (モザイク・グローの明部抽出など) を GPU で処理する (SkiaSharp 3 への更新が必要)。
 
 ### 22.53 SkiaSharp 3 の CPU 描画の地雷と、自前の合成 (検証中)
 
@@ -2962,3 +2963,62 @@ CPU 内蔵の GPU で画面を出し、外付けの GPU で描く PC (ハイブ�
 | 既定を変えない理由 | 重い効果では、CPU 内蔵の GPU で描く方が、外付けの GPU で描いて読み戻すより遅いことがある。どちらが速いかは PC と効果で変わり、開発環境 (GPU なし) では測れない。共有しないときは、理由に「プレビューを描く GPU で、画面の表示と同じ GPU にすると共有できる」と書く (描画方式の説明・パフォーマンスチェックに出る) |
 | 確かめたこと | 判定 (`PreviewService.GlSharingAllowed`) のテスト: 画面が Intel・描画が NVIDIA のとき、既定では共有しない、設定を変えると共有する、同じ GPU なら設定にかかわらず共有する、画面がソフトウェアなら自動のときは使わない。環境設定に行が出ることを画面で確かめた。実際のハイブリッドの GPU の PC では確かめていない |
 
+
+### 22.58 ハードウェアデコードのフレームを CPU に写さない・書き出しの色変換を GPU で
+
+[22.52](#2252-gpu-と-cpu-の間の受け渡しを減らす-linux-の-gpu-描画) で残っていた 3 つを入れた。どれも Linux の GPU 描画のとき。
+
+| 手法 | 内容 |
+|---|---|
+| VAAPI のフレームを DMA-BUF で取り込む | 以前は GPU でデコードしたフレームを毎回メモリへ写し (`av_hwframe_transfer_data`)、また GPU へ送っていた。`av_hwframe_map` で DRM PRIME (DMA-BUF) として取り出し、`EGL_EXT_image_dma_buf_import` (並び方 (modifier) があれば `_modifiers` も) で EGL の画像にして、GL のテクスチャにする (`EglDmaBuf`)。VAAPI は NV12 を R8 (Y) と GR88 (U・V) の 2 つの層で返すので、YUV のまま送るときと同じシェーダでそのまま RGBA にできる |
+| NVDEC のフレームを CUDA から GL へ | CUDA と GL の相互運用 (`cuGraphicsGLRegisterImage`)。Y・U・V の面のテクスチャを CUDA に登録し、フレームのストリームの上で `cuMemcpy2DAsync` で GPU の中で写す (`CudaGl`)。`libcuda.so.1` は実行時に読む (なければ使わない)。GL が NVIDIA の GPU のときだけ |
+| 書き出しの色変換を GPU で | 以前は RGBA で読み戻して、CPU の sws でエンコーダの形式にしていた。エンコーダの形式が 8 ビットの NV12 か YUV420P なら、読み戻す前に GPU のシェーダで変換し (`GpuYuvExport`)、1.5 バイト/画素だけ読み戻す。変換先は RGBA8 のテクスチャで、1 画素に 4 つの値を詰める (OpenGL ES 3 で必ず読み戻せる形式は RGBA だけのため)。色の式は sws と同じ (高さ 720 以上は BT.709、それより小さければ BT.601。リミテッドレンジ)。U・V は 2x2 画素の平均。x264 (YUV420P) にも効く |
+| VAAPI のエンコーダのフレームへ直接描く | VAAPI でエンコードするときは、エンコーダのフレームの置き場から 1 つ取り (`MediaWriter.AllocateHardwareFrame`)、書き込み用に DMA-BUF として取り出して EGL で取り込み、その Y・U・V の面へ直接 NV12 を描く。描き終えたら (フェンス) そのままエンコーダへ渡す (`PrepareHardwareFrame`)。CPU を一度も通らない |
+
+#### GPU 上のまま持つ仕組み
+
+| 項目 | 内容 |
+|---|---|
+| デコーダ側 | `VideoReader.AcceptHardwareFrames` に受け取れる種類 (VAAPI・CUDA) を指定すると、その種類の 8 ビットの NV12 のフレームは写さずに、置き場にフレームの参照を持つ (`HardwareFramesKept`)。描画のスレッドが `TryTakeHardwareFrame` で参照を受け取る。受け取らずに `TryGetYuv`・`EnsureBgra` を呼べば、そこで初めてメモリへ写す (取り込めなかったときの戻り道)。参照を持つ分、デコーダの置き場を 4 つ多く用意する (`extra_hw_frames`) |
+| 描画側 | `YuvTextures.ConvertHardware`。元の大きさなら、メモリへ写したときと同じ読み方 (CPU 描画と同じ絵)。縮めてデコードするとき (プレビュー) は、出力を縮めた大きさで描き、テクスチャの補間 (双線形) で縮める (以前は sws で YUV のまま縮めていた) |
+| 待ち合わせ | VAAPI: 取り出すときに FFmpeg がデコードの終わりを待つ (`vaSyncSurface`)。描いたあとはフェンスを置き、GPU が読み終えるまでフレームを手放さない (デコーダが置き場を使い回すため。溜まりすぎたら待つ)。CUDA: 写す命令はデコードと同じストリームに出し、`cuGraphicsUnmapResources` で GL がテクスチャを使う前に終わることが保証される |
+| 使えないとき | 画面と共有するコンテキスト (GLX) では DMA-BUF を取り込めない (EGL のディスプレイがない)。CUDA は GLX でも使える。取り込めなかった種類は、その描画では使わない (`MediaCache.GpuHardwareError` に理由)。描画の GPU とデコードの GPU が違うと、多くは取り込めない (NVIDIA の GL に Intel のタイル化された DMA-BUF を渡すと `EGL_BAD_MATCH`)。環境変数 `VIDEO_BUILDER_GPU_FRAMES=0` で使わない |
+
+#### 書き出しの経路
+
+`AsyncReadback` (読み戻しを待たない。22.52) の中で、次の順に試す。途中で使えなくなったら、次の方法に戻る (順番は保つ)。
+
+1. VAAPI のエンコーダのフレームへ直接描く (`EnableDirect`。エンコーダが VAAPI・GPU で NV12 に変換できる・EGL で DMA-BUF を取り込める)。`ExportStats.VaapiDirectFrames`・`VaapiDirectError`。環境変数 `VIDEO_BUILDER_VAAPI_DIRECT=0` で使わない
+2. GPU で NV12 / YUV420P にしてから読み戻す (`ExportStats.GpuYuvFrames`・`GpuYuvError`)。環境変数 `VIDEO_BUILDER_GPU_YUV_EXPORT=0` で使わない
+3. これまでどおり RGBA で読み戻して sws で変換する
+
+#### 確かめたこと
+
+Intel UHD Graphics 770 (Alder Lake-HX、iHD のドライバ 24.1、Mesa) と NVIDIA GeForce RTX 4070 Laptop GPU (ドライバの GL) の載ったノート PC で、FFmpeg 9 (`--enable-vaapi --enable-libdrm --enable-nvdec`) を使って確かめた (2026-11-27)。
+
+- 取り込んだフレームの色: x264 の 640x360 の動画を、GPU 上のまま変換したものと CPU 描画 (メモリへ写して sws) で比べて、平均の差 0.92〜0.95・最大 3〜4 (YUV のまま送る 22.52 と同じ程度)。縮めてデコードするとき (1/2) は平均 0.96〜1.06・最大 4。VAAPI (描画も Intel) と CUDA (描画も NVIDIA) のどちらも (`GpuTransferTests.Hardware_decoded_frames_are_converted_without_copying_to_memory`。`VB_REQUIRE_GPU_FRAMES=1` で、GPU 上のまま変換できなければ失敗にする)
+- GPU での色変換の書き出し: x264 で、フレームごとに CPU で書き出したものと同じ (`Gpu_export_with_async_readback_matches_cpu_frame_by_frame`。途中で読み戻せなくなったときも)
+- VAAPI のエンコード (`Gpu_export_to_vaapi_matches_cpu`): 描画も Intel なら 12 フレームすべてエンコーダのフレームへ直接描いた。CPU で描いて sws で変換したものと比べて、デコードした絵の平均の差 0.04・最大 16〜19 (エンコードの誤差。読み戻す経路でも同じ値)。描画が NVIDIA のときは取り込めず (`EGL_BAD_MATCH`、modifier 0x100000000000002 = Intel の 4 タイル)、NV12 で読み戻す経路に戻って同じ絵になる
+
+速さ (Release ではなくテストのビルド。2 回ずつ流して、ほぼ同じ値):
+
+| 動画を 1080p に描く (240 フレーム、`Report_hardware_decode_speed`) | 写す (以前) | 写さない |
+|---|---|---|
+| 1080p の H.264、NVIDIA (NVDEC) | 4.03 ms (CPU 6.68 ms) | 2.86 ms (CPU 4.32 ms) |
+| 4K の H.264、NVIDIA (NVDEC) | 11.47 ms (CPU 11.32 ms) | 5.96 ms (CPU 7.31 ms) |
+| 1080p の H.264、Intel (VAAPI) | 10.08 ms (CPU 8.85 ms) | 7.30 ms (CPU 6.08 ms) |
+| 4K の H.264、Intel (VAAPI) | 18.81 ms (CPU 20.27 ms) | 10.36 ms (CPU 7.25 ms) |
+
+(CPU はプロセスの CPU 時間の 1 フレームあたり。4K では、22.12 に書いた「写す時間がかかって速くならない」がなくなる。)
+
+| 1080p の書き出し (`Report_gpu_export_speed`) | 色変換 (読み戻しの受け取りを含む) | fps |
+|---|---|---|
+| x264、NVIDIA、RGBA で読み戻して sws (以前) | 1.7〜1.8 ms | 58〜64 |
+| x264、NVIDIA、GPU で YUV420P にして読み戻す | 0.7〜0.9 ms | 64 |
+| h264_vaapi、Intel、RGBA で読み戻して sws (以前) | 5.2〜6.1 ms | 56〜58 |
+| h264_vaapi、Intel、GPU で NV12 にして読み戻す | 3.3〜3.4 ms | 63〜65 |
+| h264_vaapi、Intel、エンコーダのフレームへ直接描く | 1.0〜1.3 ms (フェンスを待つ時間) | 68〜70 |
+
+この書き出しの測り方では、1 フレームあたり約 10 ms の描画 (動画のデコードを含む) が大半なので、fps の差は色変換の分だけ。
+
+しなかったこと: DMA-BUF の取り込みを画面と共有する GLX のコンテキストでも使う (GLX には DMA-BUF を取り込む方法がない。Avalonia が EGL で画面を描くようになれば使える)。NVENC に CUDA のフレームを直接渡す (GL のテクスチャを CUDA で読んで NVENC へ。今回は VAAPI だけ)。10 ビット (P010) のフレームは、これまでどおりメモリへ写す。

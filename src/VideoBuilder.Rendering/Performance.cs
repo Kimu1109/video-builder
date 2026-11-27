@@ -98,6 +98,20 @@ public sealed class ExportStats
     private long _asyncFrames;
     internal void AddAsyncReadback() => Interlocked.Increment(ref _asyncFrames);
 
+    private long _gpuYuvFrames;
+    /// <summary>GPU で YUV に変換してから読み戻したフレームの数 (設計書 22.58)。</summary>
+    public long GpuYuvFrames => Interlocked.Read(ref _gpuYuvFrames);
+    /// <summary>GPU で YUV に変換できなかった理由 (変換したら null)。</summary>
+    public string? GpuYuvError { get; internal set; }
+    internal void AddGpuYuv() => Interlocked.Increment(ref _gpuYuvFrames);
+
+    private long _vaapiDirectFrames;
+    /// <summary>VAAPI のエンコーダのフレームへ直接描いた (読み戻さなかった) フレームの数 (設計書 22.58)。</summary>
+    public long VaapiDirectFrames => Interlocked.Read(ref _vaapiDirectFrames);
+    /// <summary>VAAPI のエンコーダのフレームへ直接描けなかった理由。</summary>
+    public string? VaapiDirectError { get; internal set; }
+    internal void AddVaapiDirect() => Interlocked.Increment(ref _vaapiDirectFrames);
+
     /// <summary>1 秒あたりに書けたフレーム数。</summary>
     public double FramesPerSecond => Elapsed.TotalSeconds > 0 ? Frames / Elapsed.TotalSeconds : 0;
 

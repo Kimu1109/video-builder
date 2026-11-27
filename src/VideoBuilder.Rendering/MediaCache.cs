@@ -79,6 +79,15 @@ public sealed class MediaCache : IDisposable
     /// <summary>YUV のまま GPU へ送って変換したフレームの数 (計測・テスト用)。</summary>
     public long GpuYuvFrames => _yuv?.Converted ?? 0;
 
+    /// <summary>ハードウェアデコードしたフレームを、メモリへ写さずに GPU 上のまま変換した数 (計測・テスト用。設計書 22.58)。</summary>
+    public long GpuHardwareFrames => _yuv?.HardwareConverted ?? 0;
+
+    /// <summary>ハードウェアデコードしたフレームを GPU 上のまま使えないとき、その理由。</summary>
+    public string? GpuHardwareError => _yuv?.HardwareError;
+
+    // GPU 上のまま受け取るフレームの種類 (YuvTextures を作ってから決まる。取り込めなくなった種類は外れる)
+    private volatile int _hardwareKinds;
+
     /// <summary>動画のフレームを YUV のまま GPU へ送るか (GPU 描画中で、使えないと分かっていなければ)。</summary>
     private bool WantsYuv => _yuvState >= 0 && DrawingOnGpu;
 
@@ -364,6 +373,7 @@ public sealed class MediaCache : IDisposable
         e.Position = seconds;
         r.OutputDivisor = DivisorFor(e, original ?? e.Path, detail);
         r.PreferYuv = WantsYuv;
+        r.AcceptHardwareFrames = WantsYuv ? (HardwareFrameKinds)_hardwareKinds : HardwareFrameKinds.None;
         long before = r.CurrentFrameId;
         e.Data = r.GetFramePointer(seconds);
         e.Lost = e.Data == IntPtr.Zero && _zeroCopy && r.CurrentFrameId != before;
@@ -382,6 +392,7 @@ public sealed class MediaCache : IDisposable
             // アニメーション WebP・GIF は透明な部分を残す (VideoReader がアルファを掛けて渡す)
             var info = new SKImageInfo(r.FrameWidth, r.FrameHeight, SKColorType.Bgra8888, r.HasAlpha ? SKAlphaType.Premul : SKAlphaType.Opaque);
             if (_zeroCopy) e.Image = SKImage.FromPixels(info, e.Data, r.FrameWidth * 4);
+            else if (HardwareImage(r, e.Data) is { } gpuFrame) e.Image = gpuFrame;
             else if (r.TryGetYuv(e.Data, out var planes))
             {
                 // YUV のまま持っている: GPU で色を変換する。できなければ、ここで BGRA にしてから送る
@@ -395,6 +406,20 @@ public sealed class MediaCache : IDisposable
         return e.Image;
     }
 
+    /// <summary>
+    /// フレームを GPU 上のまま持っていれば、GPU の中で RGBA にした画像。持っていない・取り込めないときは null
+    /// (取り込めなければ、TryGetYuv でメモリへ写して続ける)。描画のスレッドから呼ぶ。
+    /// </summary>
+    private SKImage? HardwareImage(VideoReader r, IntPtr data)
+    {
+        if (_yuv == null || !DrawingOnGpu) return null;
+        var frame = r.TryTakeHardwareFrame(data);
+        if (frame == null) return null;
+        var image = _yuv.ConvertHardware(frame, r.FrameWidth, r.FrameHeight);
+        _hardwareKinds = (int)_yuv.HardwareKinds;
+        return image;
+    }
+
     /// <summary>YUV の面を GPU へ送って、GPU で RGBA にした画像。GPU 描画中でない・使えないときは null。描画のスレッドから呼ぶ。</summary>
     private SKImage? YuvImage(in VideoBuilder.Media.YuvPlanes planes)
     {
@@ -404,6 +429,7 @@ public sealed class MediaCache : IDisposable
             _yuv = YuvTextures.Create(_gpuContext, out var error);
             if (_yuv == null) { GpuYuvError = error; _yuvState = -1; return null; }
             _yuvState = 1;
+            _hardwareKinds = (int)_yuv.HardwareKinds;
         }
         return _yuv.Convert(planes);
     }
