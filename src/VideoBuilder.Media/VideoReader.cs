@@ -502,6 +502,7 @@ public sealed unsafe class VideoReader : IDisposable
                 ffmpeg.av_frame_unref(_swFrame);
                 int ret = ffmpeg.av_hwframe_transfer_data(_swFrame, _frame, 0);
                 if (ret < 0) { FallBackToSoftware("GPU からフレームを写せません: " + FFmpegLoader.ErrorText(ret)); return; }
+                MarkFullRange(_swFrame, _frame);
                 source = _swFrame;
             }
         }
@@ -527,6 +528,7 @@ public sealed unsafe class VideoReader : IDisposable
         _sws = ffmpeg.sws_getCachedContext(_sws, w, h, (AVPixelFormat)source->format, ow, oh,
             AVPixelFormat.AV_PIX_FMT_BGRA, (int)SwsFlags.SWS_BILINEAR, null, null, null);
         if (_sws == null) return;
+        MatchRange(_sws, source);
         var dst = new byte*[4] { _native[index], null, null, null };
         var stride = new int[4] { ow * 4, 0, 0, 0 };
         ffmpeg.sws_scale(_sws, source->data, source->linesize, 0, h, dst, stride);
@@ -611,6 +613,7 @@ public sealed unsafe class VideoReader : IDisposable
         else
         {
             dst->format = (int)format; dst->width = ow; dst->height = oh;
+            dst->color_range = source->color_range;
             if (ffmpeg.av_frame_get_buffer(dst, 0) < 0) { ffmpeg.av_frame_unref(dst); return false; }
             if (ow == w && oh == h)
             {
@@ -635,6 +638,8 @@ public sealed unsafe class VideoReader : IDisposable
         if (!PreferYuv || HasAlpha || AcceptHardwareFrames == HardwareFrameKinds.None) return false;
         var kind = HardwareFrame.KindOf(frame);
         if (kind == HardwareFrameKinds.None || (AcceptHardwareFrames & kind) == 0) return false;
+        // 10 ビット (P010) は、受け取る側が 16 ビットのテクスチャを使えるときだけ
+        if (HardwareFrame.SurfaceOf(frame) == HardwareSurface.P010 && (AcceptHardwareFrames & HardwareFrameKinds.TenBit) == 0) return false;
         var (ow, oh) = OutputSizeFor(_divisor);
         // U・V を間引いているので、奇数の大きさは CPU の変換と合わせられない (StoreYuv と同じ)
         if ((ow & 1) != 0 || (oh & 1) != 0 || (frame->width & 1) != 0 || (frame->height & 1) != 0) return false;
@@ -652,6 +657,39 @@ public sealed unsafe class VideoReader : IDisposable
         _convertedCount++;
         HardwareFramesKept++;
         return true;
+    }
+
+    /// <summary>
+    /// GPU から写したフレームに、レンジ (フルレンジか) を写す (設計書 22.62)。av_hwframe_transfer_data は中身しか写さない。
+    /// GPU の置き場の形式 (yuv420p・nv12) にはレンジの区別がないので、MJPEG のプロキシなどのフルレンジは color_range で伝える
+    /// (<see cref="IsFullRange"/>・<see cref="MatchRange"/>)。伝えないと、ソフトウェアでデコードしたとき (yuvj420p) や
+    /// GPU 上のまま変換したときと、明るさの幅が違ってしまう。
+    /// </summary>
+    private static void MarkFullRange(AVFrame* sw, AVFrame* hw) => sw->color_range = hw->color_range;
+
+    /// <summary>フルレンジの YUV か (J 形式、または color_range がフルレンジ)。</summary>
+    internal static bool IsFullRange(AVFrame* f) =>
+        YuvFormatOf((AVPixelFormat)f->format) is { Full: true } || f->color_range == AVColorRange.AVCOL_RANGE_JPEG;
+
+    // フルレンジに設定した sws の変換 (J 形式でない YUV から BGRA へ。使い回すとき、リミテッドに戻すため)
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<nint, byte> _fullRangeSws = new();
+
+    /// <summary>
+    /// YUV から BGRA への sws の変換を、source のレンジに合わせる。J 形式は sws がフルレンジとして扱うので何もしない。
+    /// それ以外でも color_range がフルレンジなら、フルレンジとして変換する (BT.601 のまま)。
+    /// </summary>
+    private void MatchRange(SwsContext* sws, AVFrame* source)
+    {
+        if (sws == null || YuvFormatOf((AVPixelFormat)source->format) is not { Full: false }) return;
+        bool full = source->color_range == AVColorRange.AVCOL_RANGE_JPEG;
+        bool wasFull = _fullRangeSws.ContainsKey((nint)sws);
+        // フルレンジは毎回設定する (sws_getCachedContext が作り直したとき、同じアドレスになることがあるため)
+        if (!full && !wasFull) return;
+        var coef = ffmpeg.sws_getCoefficients(ffmpeg.SWS_CS_DEFAULT);
+        var table = new int_array4();
+        for (uint i = 0; i < 4; i++) table[i] = coef[i];
+        ffmpeg.sws_setColorspaceDetails(sws, table, full ? 1 : 0, table, 1, 0, 1 << 16, 1 << 16);
+        if (full) _fullRangeSws[(nint)sws] = 0; else _fullRangeSws.TryRemove((nint)sws, out _);
     }
 
     private void ReleaseHardware(int index)
@@ -692,11 +730,13 @@ public sealed unsafe class VideoReader : IDisposable
         try
         {
             if (ffmpeg.av_hwframe_transfer_data(sw, _hw[i], 0) < 0) return false;
+            MarkFullRange(sw, _hw[i]);
             var (ow, oh) = (FrameWidth, FrameHeight);
             if (StoreYuv(i, sw, ow, oh, ref _swsMaterialize)) { ReleaseHardware(i); return true; }
             _swsLate = ffmpeg.sws_getCachedContext(_swsLate, sw->width, sw->height, (AVPixelFormat)sw->format, ow, oh,
                 AVPixelFormat.AV_PIX_FMT_BGRA, (int)SwsFlags.SWS_BILINEAR, null, null, null);
             if (_swsLate == null) return false;
+            MatchRange(_swsLate, sw);
             var dst = new byte*[4] { _native[i], null, null, null };
             var stride = new int[4] { ow * 4, 0, 0, 0 };
             ffmpeg.sws_scale(_swsLate, sw->data, sw->linesize, 0, sw->height, dst, stride);
@@ -734,7 +774,7 @@ public sealed unsafe class VideoReader : IDisposable
         if (!_slotYuv[i]) return false;
         var f = _yuv[i];
         var layout = YuvFormatOf((AVPixelFormat)f->format)!.Value;
-        planes = new YuvPlanes(f->width, f->height, layout.Layout, layout.ShiftX, layout.ShiftY, layout.Full,
+        planes = new YuvPlanes(f->width, f->height, layout.Layout, layout.ShiftX, layout.ShiftY, IsFullRange(f),
             (IntPtr)f->data[0], f->linesize[0], (IntPtr)f->data[1], f->linesize[1],
             layout.Layout == YuvLayout.Nv12 ? IntPtr.Zero : (IntPtr)f->data[2], layout.Layout == YuvLayout.Nv12 ? 0 : f->linesize[2]);
         return true;
@@ -753,6 +793,7 @@ public sealed unsafe class VideoReader : IDisposable
         _swsLate = ffmpeg.sws_getCachedContext(_swsLate, f->width, f->height, (AVPixelFormat)f->format, f->width, f->height,
             AVPixelFormat.AV_PIX_FMT_BGRA, (int)SwsFlags.SWS_BILINEAR, null, null, null);
         if (_swsLate == null) return IntPtr.Zero;
+        MatchRange(_swsLate, f);
         var dst = new byte*[4] { _native[i], null, null, null };
         var stride = new int[4] { f->width * 4, 0, 0, 0 };
         ffmpeg.sws_scale(_swsLate, f->data, f->linesize, 0, f->height, dst, stride);

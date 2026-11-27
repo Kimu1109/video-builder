@@ -171,6 +171,10 @@
   <Style Selector="TextBlock.secondary">
     <Setter Property="Foreground" Value="{DynamicResource Fg.Secondary}" />
   </Style>
+  <!-- 目立たせる値 (おすすめの構成で、変わる項目など) -->
+  <Style Selector="TextBlock.accent-text">
+    <Setter Property="Foreground" Value="{DynamicResource Accent}" />
+  </Style>
   <Style Selector="TextBlock.mono">
     <Setter Property="FontFamily" Value="{DynamicResource MonoFont}" />
   </Style>

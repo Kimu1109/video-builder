@@ -112,6 +112,13 @@ public sealed class ExportStats
     public string? VaapiDirectError { get; internal set; }
     internal void AddVaapiDirect() => Interlocked.Increment(ref _vaapiDirectFrames);
 
+    private long _cudaDirectFrames;
+    /// <summary>GPU の中で NVENC の CUDA のフレームへ写して渡した (読み戻さなかった) フレームの数 (設計書 22.62)。</summary>
+    public long CudaDirectFrames => Interlocked.Read(ref _cudaDirectFrames);
+    /// <summary>NVENC に CUDA のフレームを渡せなかった理由 (NVENC で GPU 描画のときだけ)。</summary>
+    public string? CudaDirectError { get; internal set; }
+    internal void AddCudaDirect() => Interlocked.Increment(ref _cudaDirectFrames);
+
     /// <summary>1 秒あたりに書けたフレーム数。</summary>
     public double FramesPerSecond => Elapsed.TotalSeconds > 0 ? Frames / Elapsed.TotalSeconds : 0;
 
@@ -122,7 +129,17 @@ public sealed class ExportStats
     internal void AddAudio(TimeSpan t) => Interlocked.Add(ref _audio, t.Ticks);
     internal void AddEncode(TimeSpan t) => Interlocked.Add(ref _encode, t.Ticks);
     internal void AddWait(TimeSpan t) => Interlocked.Add(ref _wait, t.Ticks);
-    internal void FrameDone() => Interlocked.Increment(ref _frames);
+    internal void FrameDone()
+    {
+        if (Interlocked.Increment(ref _frames) == 1) _firstFrame = _clock.Elapsed;
+    }
+
+    private TimeSpan _firstFrame;
+    /// <summary>
+    /// 1 フレーム目を書き終えてからの、1 秒あたりに書けたフレーム数 (エンコーダを開く時間などを除いた速さ。
+    /// 短い書き出しで比べるときに使う。設計書 22.63)。
+    /// </summary>
+    public double SteadyFramesPerSecond => Frames > 1 && (Elapsed - _firstFrame).TotalSeconds > 0 ? (Frames - 1) / (Elapsed - _firstFrame).TotalSeconds : FramesPerSecond;
 }
 
 /// <summary>シーンを続けて描画して、描画の速さを測る (プレビューと同じ描き方)。</summary>

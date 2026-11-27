@@ -23,7 +23,9 @@ internal sealed unsafe class GlFunctions
     public const uint VERTEX_SHADER = 0x8B31, FRAGMENT_SHADER = 0x8B30, COMPILE_STATUS = 0x8B81, LINK_STATUS = 0x8B82;
     public const uint TRIANGLE_STRIP = 0x0005;
     public const uint BLEND = 0x0BE2, SCISSOR_TEST = 0x0C11, DEPTH_TEST = 0x0B71, STENCIL_TEST = 0x0B90, CULL_FACE = 0x0B44, DITHER = 0x0BD0;
-    public const uint VERSION = 0x1F02;
+    public const uint VERSION = 0x1F02, EXTENSIONS = 0x1F03;
+    /// <summary>16 ビットの正規化した形式 (10 ビットの P010 の面。OpenGL ES では GL_EXT_texture_norm16 が要る)。</summary>
+    public const uint R16 = 0x822A, RG16 = 0x822C, UNSIGNED_SHORT = 0x1403;
     public const uint SYNC_GPU_COMMANDS_COMPLETE = 0x9117, SYNC_FLUSH_COMMANDS_BIT = 0x0001;
     public const uint ALREADY_SIGNALED = 0x911A, CONDITION_SATISFIED = 0x911C, TIMEOUT_EXPIRED = 0x911B, WAIT_FAILED = 0x911D;
 
@@ -45,6 +47,7 @@ internal sealed unsafe class GlFunctions
     public delegate* unmanaged<int, int, void> Uniform1i;
     public delegate* unmanaged<int, int, int, void> Uniform2i;
     public delegate* unmanaged<int, float, float, void> Uniform2f;
+    public delegate* unmanaged<int, float, void> Uniform1f;
     public delegate* unmanaged<int, float, float, float, void> Uniform3f;
     public delegate* unmanaged<int, int, byte, float*, void> UniformMatrix3fv;
     public delegate* unmanaged<uint, uint, uint, uint, int, void> FramebufferTexture2D;
@@ -60,6 +63,12 @@ internal sealed unsafe class GlFunctions
     public delegate* unmanaged<IntPtr, uint, ulong, uint> ClientWaitSync;
     public delegate* unmanaged<IntPtr, void> DeleteSync;
     public delegate* unmanaged<void> Flush;
+
+    /// <summary>
+    /// R16・RG16 (16 ビットの正規化した形式) のテクスチャを作れるか。デスクトップの OpenGL 3 には必ずあり、
+    /// OpenGL ES 3 では GL_EXT_texture_norm16 があるとき。10 ビットの P010 のフレームを GPU 上のまま扱うのに使う (設計書 22.62)。
+    /// </summary>
+    public bool Norm16 { get; private set; }
 
     /// <summary>OpenGL ES か (false ならデスクトップの OpenGL)。</summary>
     public bool IsGles { get; private set; }
@@ -152,6 +161,7 @@ internal sealed unsafe class GlFunctions
         gl.GetUniformLocation = (delegate* unmanaged<uint, byte*, int>)P("glGetUniformLocation");
         gl.Uniform1i = (delegate* unmanaged<int, int, void>)P("glUniform1i");
         gl.Uniform2f = (delegate* unmanaged<int, float, float, void>)P("glUniform2f");
+        gl.Uniform1f = (delegate* unmanaged<int, float, void>)P("glUniform1f");
         gl.Uniform2i = (delegate* unmanaged<int, int, int, void>)P("glUniform2i");
         gl.Uniform3f = (delegate* unmanaged<int, float, float, float, void>)P("glUniform3f");
         gl.UniformMatrix3fv = (delegate* unmanaged<int, int, byte, float*, void>)P("glUniformMatrix3fv");
@@ -169,6 +179,8 @@ internal sealed unsafe class GlFunctions
         gl.DeleteSync = (delegate* unmanaged<IntPtr, void>)P("glDeleteSync");
         gl.Flush = (delegate* unmanaged<void>)P("glFlush");
         if (missing.Count > 0) { error = "関数がありません: " + string.Join(", ", missing); return null; }
+        // OpenGL ES 3 では glGetString(GL_EXTENSIONS) で拡張機能の一覧を読める (デスクトップのコア プロファイルでは読めないが、R16 は必ずある)
+        gl.Norm16 = !gl.IsGles || (Marshal.PtrToStringAnsi((IntPtr)gl.GetString(EXTENSIONS)) ?? "").Contains("GL_EXT_texture_norm16");
         return gl;
     }
 

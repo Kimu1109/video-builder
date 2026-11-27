@@ -5,7 +5,8 @@ namespace VideoBuilder.Rendering;
 
 /// <summary>
 /// DMA-BUF (VAAPI のフレームなど) を EGL の画像として取り込み、GL のテクスチャにする (EGL_EXT_image_dma_buf_import。設計書 22.58)。
-/// Linux の EGL で作った GpuContext でだけ使える (画面と共有する GLX のコンテキストや、Windows の ANGLE では使えない)。
+/// Linux の EGL のコンテキストでだけ使える (自分で作ったものと、画面の描画が EGL のときの画面と共有するもの。
+/// 画面と共有する GLX のコンテキストや、Windows の ANGLE では使えない。設計書 22.62)。
 /// 作ったスレッド (GpuContext を有効にしたスレッド) からだけ使う。
 /// </summary>
 internal sealed unsafe class EglDmaBuf
@@ -34,14 +35,18 @@ internal sealed unsafe class EglDmaBuf
     public static EglDmaBuf? Create(GpuContext gpu, out string? error)
     {
         error = null;
-        if (!OperatingSystem.IsLinux() || gpu.IsExternal || gpu.Display == IntPtr.Zero) { error = "EGL で作った GPU コンテキストではありません"; return null; }
-        var ext = EglApi.String(gpu.Display, EGL_EXTENSIONS);
+        if (!OperatingSystem.IsLinux() || gpu.EglDisplay == IntPtr.Zero)
+        {
+            error = gpu.IsExternal ? "画面の描画が EGL ではありません (GLX)" : "EGL で作った GPU コンテキストではありません";
+            return null;
+        }
+        var ext = EglApi.String(gpu.EglDisplay, EGL_EXTENSIONS);
         if (!ext.Contains("EGL_EXT_image_dma_buf_import")) { error = "EGL_EXT_image_dma_buf_import がありません"; return null; }
         var create = EglApi.Proc("eglCreateImageKHR");
         var destroy = EglApi.Proc("eglDestroyImageKHR");
         var target = EglApi.Proc("glEGLImageTargetTexture2DOES");
         if (create == IntPtr.Zero || destroy == IntPtr.Zero || target == IntPtr.Zero) { error = "EGL の画像の関数がありません"; return null; }
-        return new EglDmaBuf(gpu.Display, create, destroy, target, ext.Contains("EGL_EXT_image_dma_buf_import_modifiers"));
+        return new EglDmaBuf(gpu.EglDisplay, create, destroy, target, ext.Contains("EGL_EXT_image_dma_buf_import_modifiers"));
     }
 
     /// <summary>1 つの層を EGL の画像にする。作れなければ IntPtr.Zero。</summary>
@@ -81,7 +86,7 @@ internal sealed unsafe class EglDmaBuf
 /// </summary>
 internal sealed unsafe class CudaGl : IDisposable
 {
-    private const int CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD = 2;
+    private const int CU_GRAPHICS_REGISTER_FLAGS_READ_ONLY = 1, CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD = 2;
     private const int CU_MEMORYTYPE_DEVICE = 2, CU_MEMORYTYPE_ARRAY = 3;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -112,10 +117,18 @@ internal sealed unsafe class CudaGl : IDisposable
     private static delegate* unmanaged<uint, IntPtr*, IntPtr, int> _map, _unmap;
     private static delegate* unmanaged<IntPtr*, IntPtr, uint, uint, int> _array;
     private static delegate* unmanaged<Memcpy2D*, IntPtr, int> _copy;
+    private static delegate* unmanaged<IntPtr, int> _streamSync;
 
     // テクスチャごとの登録 (テクスチャを作り直したら登録し直す)
     private readonly Dictionary<uint, IntPtr> _registered = new();
     private IntPtr _context;
+    // _context のデバイスへの参照。登録を外すまで CUDA のコンテキストが消えないように持つ
+    // (使う GPU を変えたあとなど、デコーダと共有のデバイスが先に手放されると、登録を外すときに消えたコンテキストを使って落ちた。設計書 22.63)
+    private HardwareDeviceRef? _device;
+    // テクスチャを書き込み先にする (デコードしたフレームを GL へ) か、読み出し元にする (GL で描いた絵をエンコーダのフレームへ)
+    private readonly bool _toFrame;
+
+    private CudaGl(bool toFrame) { _toFrame = toFrame; }
 
     private static bool Load(out string? error)
     {
@@ -126,7 +139,7 @@ internal sealed unsafe class CudaGl : IDisposable
             if (!NativeLibrary.TryLoad("libcuda.so.1", out var lib)) { error = _loadError = "libcuda.so.1 がありません"; return false; }
             IntPtr F(string name) => NativeLibrary.TryGetExport(lib, name, out var p) ? p : IntPtr.Zero;
             var names = new[] { "cuCtxPushCurrent_v2", "cuCtxPopCurrent_v2", "cuGraphicsGLRegisterImage", "cuGraphicsUnregisterResource",
-                "cuGraphicsMapResources", "cuGraphicsUnmapResources", "cuGraphicsSubResourceGetMappedArray", "cuMemcpy2DAsync_v2" };
+                "cuGraphicsMapResources", "cuGraphicsUnmapResources", "cuGraphicsSubResourceGetMappedArray", "cuMemcpy2DAsync_v2", "cuStreamSynchronize" };
             var p = names.Select(F).ToArray();
             var missing = names.Where((_, i) => p[i] == IntPtr.Zero).ToList();
             if (missing.Count > 0) { error = _loadError = "CUDA の関数がありません: " + string.Join(", ", missing); return false; }
@@ -138,6 +151,7 @@ internal sealed unsafe class CudaGl : IDisposable
             _unmap = (delegate* unmanaged<uint, IntPtr*, IntPtr, int>)p[5];
             _array = (delegate* unmanaged<IntPtr*, IntPtr, uint, uint, int>)p[6];
             _copy = (delegate* unmanaged<Memcpy2D*, IntPtr, int>)p[7];
+            _streamSync = (delegate* unmanaged<IntPtr, int>)p[8];
             _lib = lib;
             error = null;
             return true;
@@ -145,18 +159,21 @@ internal sealed unsafe class CudaGl : IDisposable
     }
 
     /// <summary>使えなければ null (error に理由)。</summary>
-    public static CudaGl? Create(GpuContext gpu, out string? error)
+    /// <param name="toFrame">GL のテクスチャから CUDA のフレームへ写す (書き出しで NVENC に渡すとき。設計書 22.62)。false なら CUDA のフレームから GL のテクスチャへ。</param>
+    public static CudaGl? Create(GpuContext gpu, out string? error, bool toFrame = false)
     {
         if (!OperatingSystem.IsLinux() && !OperatingSystem.IsWindows()) { error = "この OS では使えません"; return null; }
         if (!gpu.Renderer.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase)) { error = "GL のコンテキストが NVIDIA の GPU ではありません"; return null; }
         if (!OperatingSystem.IsLinux()) { error = "Linux でだけ使う"; return null; }
         if (!Load(out error)) return null;
-        return new CudaGl();
+        return new CudaGl(toFrame);
     }
 
     /// <summary>
-    /// CUDA のフレームの面を、GL のテクスチャ (同じ大きさの R8 か RG8) へ写す。
-    /// 写す命令はフレームのストリームに出し、GL がテクスチャを使う前に終わる (cuGraphicsUnmapResources が保証する)。失敗したら CUDA のエラー番号。
+    /// CUDA のフレームの面を、GL のテクスチャ (同じ大きさの R8・RG8 か、10 ビットなら R16・RG16) へ写す。
+    /// toFrame で作ったときは逆に、GL のテクスチャの各行の先頭 WidthBytes バイトを、CUDA のフレームの面へ写す。
+    /// 写す命令はフレームのストリームに出し、GL がテクスチャを使う前に終わる (cuGraphicsUnmapResources が保証する。
+    /// GL のそれまでの描画も、写す前に終わる)。失敗したら CUDA のエラー番号。
     /// </summary>
     public int Copy(HardwareFrame frame, (uint Texture, int WidthBytes, int Height)[] planes)
     {
@@ -171,6 +188,8 @@ internal sealed unsafe class CudaGl : IDisposable
                 // 別の CUDA のコンテキスト (デバイスを開き直したなど) になったら、登録し直す
                 foreach (var res in _registered.Values) _unregister(res);
                 _registered.Clear();
+                _device?.Dispose();
+                _device = frame.KeepDevice();
                 _context = ctx;
             }
             var resources = stackalloc IntPtr[planes.Length];
@@ -178,7 +197,7 @@ internal sealed unsafe class CudaGl : IDisposable
             {
                 if (!_registered.TryGetValue(planes[i].Texture, out var res))
                 {
-                    r = _register(&res, planes[i].Texture, GlFunctions.TEXTURE_2D, CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD);
+                    r = _register(&res, planes[i].Texture, GlFunctions.TEXTURE_2D, (uint)(_toFrame ? CU_GRAPHICS_REGISTER_FLAGS_READ_ONLY : CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD));
                     if (r != 0) return r;
                     _registered[planes[i].Texture] = res;
                 }
@@ -193,13 +212,20 @@ internal sealed unsafe class CudaGl : IDisposable
                     IntPtr array;
                     r = _array(&array, resources[i], 0, 0);
                     if (r != 0) return r;
-                    var (src, pitch) = frame.CudaPlane(i);
-                    var c = new Memcpy2D
-                    {
-                        SrcMemoryType = CU_MEMORYTYPE_DEVICE, SrcDevice = src, SrcPitch = (nuint)pitch,
-                        DstMemoryType = CU_MEMORYTYPE_ARRAY, DstArray = array,
-                        WidthInBytes = (nuint)planes[i].WidthBytes, Height = (nuint)planes[i].Height,
-                    };
+                    var (device, pitch) = frame.CudaPlane(i);
+                    var c = _toFrame
+                        ? new Memcpy2D
+                        {
+                            SrcMemoryType = CU_MEMORYTYPE_ARRAY, SrcArray = array,
+                            DstMemoryType = CU_MEMORYTYPE_DEVICE, DstDevice = device, DstPitch = (nuint)pitch,
+                            WidthInBytes = (nuint)planes[i].WidthBytes, Height = (nuint)planes[i].Height,
+                        }
+                        : new Memcpy2D
+                        {
+                            SrcMemoryType = CU_MEMORYTYPE_DEVICE, SrcDevice = device, SrcPitch = (nuint)pitch,
+                            DstMemoryType = CU_MEMORYTYPE_ARRAY, DstArray = array,
+                            WidthInBytes = (nuint)planes[i].WidthBytes, Height = (nuint)planes[i].Height,
+                        };
                     r = _copy(&c, stream);
                     if (r != 0) return r;
                 }
@@ -207,6 +233,17 @@ internal sealed unsafe class CudaGl : IDisposable
             finally { _unmap((uint)planes.Length, resources, stream); }
             return 0;
         }
+        finally { IntPtr popped; _pop(&popped); }
+    }
+
+    /// <summary>フレームのストリームに出した命令 (Copy) が終わるまで待つ。失敗したら CUDA のエラー番号。</summary>
+    public int Wait(HardwareFrame frame)
+    {
+        var (ctx, stream) = frame.CudaContext;
+        if (ctx == IntPtr.Zero) return -1;
+        int r = _push(ctx);
+        if (r != 0) return r;
+        try { return _streamSync(stream); }
         finally { IntPtr popped; _pop(&popped); }
     }
 
@@ -219,12 +256,13 @@ internal sealed unsafe class CudaGl : IDisposable
 
     public void Dispose()
     {
-        if (_registered.Count == 0) return;
-        if (_push(_context) == 0)
+        if (_registered.Count > 0 && _push(_context) == 0)
         {
             foreach (var res in _registered.Values) _unregister(res);
             IntPtr p; _pop(&p);
         }
         _registered.Clear();
+        _device?.Dispose();
+        _device = null;
     }
 }

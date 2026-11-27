@@ -13,6 +13,34 @@ public enum HardwareFrameKinds
     Vaapi = 1,
     /// <summary>NVDEC (CUDA) のフレーム。CUDA と GL の相互運用で、GPU の中で GL のテクスチャへ写す。</summary>
     Cuda = 2,
+    /// <summary>
+    /// 10 ビットの P010 のフレームも受け取る (VAAPI・CUDA と組み合わせて指定する)。GL で 16 ビットのテクスチャを使えるときだけ (設計書 22.62)。
+    /// </summary>
+    TenBit = 4,
+}
+
+/// <summary>GPU 上のフレームの面の並び (設計書 22.58・22.62)。</summary>
+public enum HardwareSurface
+{
+    /// <summary>8 ビットの NV12 (Y と、U・V が交互の面)。DMA-BUF は R8 + GR88。</summary>
+    Nv12,
+    /// <summary>8 ビットの I420 (Y・U・V が別々の面。VAAPI だけ。新しい iHD のドライバや MJPEG のデコード)。DMA-BUF は R8 x3。</summary>
+    I420,
+    /// <summary>10 ビットの P010 (NV12 と同じ並びで 1 画素 16 ビット、上位 10 ビットに値)。DMA-BUF は R16 + GR1616。</summary>
+    P010,
+}
+
+/// <summary>GPU のデバイスへの参照 (<see cref="HardwareFrame.KeepDevice"/>)。どのスレッドで Dispose してもよい。</summary>
+public sealed unsafe class HardwareDeviceRef : IDisposable
+{
+    private AVBufferRef* _ref;
+    internal HardwareDeviceRef(AVBufferRef* r) { _ref = r; }
+    public void Dispose()
+    {
+        var r = _ref;
+        _ref = null;
+        if (r != null) ffmpeg.av_buffer_unref(&r);
+    }
 }
 
 /// <summary>DMA-BUF の 1 つの層 (1 つの面)。</summary>
@@ -21,7 +49,7 @@ public enum HardwareFrameKinds
 public readonly record struct DmaBufLayer(uint DrmFormat, int Fd, long Offset, long Pitch, ulong Modifier, int Width, int Height);
 
 /// <summary>
-/// ハードウェアデコードした NV12 のフレーム (GPU 上のまま。メモリへ写していない)。設計書 22.58。
+/// ハードウェアデコードした NV12・I420・P010 のフレーム (GPU 上のまま。メモリへ写していない)。設計書 22.58。
 /// Dispose するまで、デコーダはこのフレームの置き場を使い回さない。
 /// どのスレッドで Dispose してもよい。
 /// </summary>
@@ -30,11 +58,17 @@ public sealed unsafe class HardwareFrame : IDisposable
     public const ulong DrmFormatModInvalid = 0x00ffffffffffffffUL;
     /// <summary>DRM_FORMAT_R8 / DRM_FORMAT_GR88 / DRM_FORMAT_NV12。</summary>
     public const uint DrmR8 = 0x20203852, DrmGR88 = 0x38385247, DrmNV12 = 0x3231564E;
+    /// <summary>DRM_FORMAT_R16 / DRM_FORMAT_GR1616 / DRM_FORMAT_P010 / DRM_FORMAT_YUV420 (I420)。</summary>
+    public const uint DrmR16 = 0x20363152, DrmGR1616 = 0x32335247, DrmP010 = 0x30313050, DrmYUV420 = 0x32315559;
 
     private AVFrame* _frame;
     private AVFrame* _mapped;
 
     public HardwareFrameKinds Kind { get; }
+    /// <summary>面の並び。</summary>
+    public HardwareSurface Surface { get; }
+    /// <summary>フルレンジ (0〜255。MJPEG のプロキシなど) か。リミテッドレンジ (16〜235) なら false。</summary>
+    public bool FullRange { get; }
     /// <summary>元のフレームの大きさ (縮めない)。</summary>
     public int Width { get; }
     public int Height { get; }
@@ -42,16 +76,31 @@ public sealed unsafe class HardwareFrame : IDisposable
     internal HardwareFrame(AVFrame* frame, HardwareFrameKinds kind)
     {
         _frame = frame; Kind = kind; Width = frame->width; Height = frame->height;
+        Surface = SurfaceOf(frame) ?? HardwareSurface.Nv12;
+        FullRange = frame->color_range == AVColorRange.AVCOL_RANGE_JPEG;
+    }
+
+    /// <summary>GPU 上のフレームの面の並び。扱えない並び (4:2:2 など) なら null。</summary>
+    internal static HardwareSurface? SurfaceOf(AVFrame* frame)
+    {
+        if (frame->hw_frames_ctx == null) return null;
+        var fc = (AVHWFramesContext*)frame->hw_frames_ctx->data;
+        return fc->sw_format switch
+        {
+            AVPixelFormat.AV_PIX_FMT_NV12 => HardwareSurface.Nv12,
+            // VAAPI の置き場の形式は、ドライバが対応するもののうち元の形式に合うものを FFmpeg が選ぶ (iHD は yuv420p に I420 を出す)
+            AVPixelFormat.AV_PIX_FMT_YUV420P or AVPixelFormat.AV_PIX_FMT_YUVJ420P when (AVPixelFormat)frame->format == AVPixelFormat.AV_PIX_FMT_VAAPI => HardwareSurface.I420,
+            AVPixelFormat.AV_PIX_FMT_P010LE => HardwareSurface.P010,
+            _ => null,
+        };
     }
 
     /// <summary>
-    /// フレームが GPU 上の 8 ビットの NV12 なら、その種類を返す (VAAPI・CUDA のどちらでもなければ None)。
+    /// フレームが GPU 上の扱える並び (8 ビットの NV12・I420、10 ビットの P010) なら、その種類を返す (VAAPI・CUDA のどちらでもなければ None)。
     /// </summary>
     internal static HardwareFrameKinds KindOf(AVFrame* frame)
     {
-        if (frame->hw_frames_ctx == null) return HardwareFrameKinds.None;
-        var fc = (AVHWFramesContext*)frame->hw_frames_ctx->data;
-        if (fc->sw_format != AVPixelFormat.AV_PIX_FMT_NV12) return HardwareFrameKinds.None;
+        if (SurfaceOf(frame) == null) return HardwareFrameKinds.None;
         return (AVPixelFormat)frame->format switch
         {
             AVPixelFormat.AV_PIX_FMT_VAAPI => HardwareFrameKinds.Vaapi,
@@ -97,9 +146,16 @@ public sealed unsafe class HardwareFrame : IDisposable
                 ref var plane = ref layer.Planes[p];
                 if (plane.ObjectIndex < 0 || plane.ObjectIndex >= d->NbObjects) { error = "DMA-BUF の中身が読めません"; return false; }
                 ref var obj = ref d->Objects[plane.ObjectIndex];
-                // NV12 を 1 つの層で返されたら、面ごとに R8・GR88 の層として扱う
-                uint format = layer.Format == DrmNV12 ? (p == 0 ? DrmR8 : DrmGR88) : layer.Format;
-                bool chroma = format == DrmGR88;
+                // NV12・P010・I420 を 1 つの層で返されたら、面ごとの層 (R8・GR88 / R16・GR1616 / R8 x3) として扱う
+                uint format = layer.Format switch
+                {
+                    DrmNV12 => p == 0 ? DrmR8 : DrmGR88,
+                    DrmP010 => p == 0 ? DrmR16 : DrmGR1616,
+                    DrmYUV420 => DrmR8,
+                    _ => layer.Format,
+                };
+                // 2 つ目の面からは U・V (4:2:0 なので縦横半分)
+                bool chroma = list.Count > 0;
                 list.Add(new DmaBufLayer(format, obj.Fd, plane.Offset, plane.Pitch, obj.FormatModifier, chroma ? cw : Width, chroma ? ch : Height));
             }
         }
@@ -119,6 +175,18 @@ public sealed unsafe class HardwareFrame : IDisposable
             var cu = (IntPtr*)fc->device_ctx->hwctx;   // AVCUDADeviceContext { CUcontext cuda_ctx; CUstream stream; ... }
             return (cu[0], cu[1]);
         }
+    }
+
+    /// <summary>
+    /// このフレームの GPU のデバイスへの参照 (Dispose で手放す)。持っている間は、デバイス (CUDA のコンテキストなど) が消えない。
+    /// デコーダや共有のデバイスが先に手放されても、このデバイスで作ったもの (CUDA に登録した GL のテクスチャなど) を後から片付けられるようにする。
+    /// </summary>
+    public HardwareDeviceRef? KeepDevice()
+    {
+        if (_frame == null || _frame->hw_frames_ctx == null) return null;
+        var fc = (AVHWFramesContext*)_frame->hw_frames_ctx->data;
+        var r = ffmpeg.av_buffer_ref(fc->device_ref);
+        return r == null ? null : new HardwareDeviceRef(r);
     }
 
     /// <summary>CUDA のフレームの面 (デバイスのアドレスと 1 行のバイト数)。0 が Y、1 が UV。</summary>

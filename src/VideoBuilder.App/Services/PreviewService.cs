@@ -102,6 +102,12 @@ public sealed class PreviewService : IDisposable
 
     /// <summary>今使っている描画方式の説明 (環境設定に表示する)。</summary>
     public string BackendDescription { get; private set; } = "";
+
+    /// <summary>
+    /// GPU 上のまま (CPU へ写さずに) 変換した動画のフレームの数と、取り込めない理由 (計測・確認用。描画のスレッドの値を読むだけ)。
+    /// </summary>
+    public (long Frames, string? Error, string Decoders) HardwareFrameStatus =>
+        _engine is { } e ? (e.Media.GpuHardwareFrames, e.Media.GpuHardwareError, e.Media.DecoderSummary) : (0, null, "");
     public bool IsGpuActive { get; private set; }
     public event Action? BackendChanged;
 
@@ -277,7 +283,8 @@ public sealed class PreviewService : IDisposable
             if (gpu != null)
             {
                 _presentsToShared = true;
-                description = $"GPU ({gpu.Renderer}、画面と共有)";
+                // EGL なら DMA-BUF (VAAPI のフレーム) も取り込める。GLX では取り込めない (設計書 22.62)
+                description = $"GPU ({gpu.Renderer}、画面と共有・{(gpu.IsExternalEgl ? "EGL" : "GLX")})";
             }
         }
         if (mode != RenderBackend.Cpu && gpu == null)

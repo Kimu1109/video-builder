@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Threading;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -305,6 +306,20 @@ public sealed class PreferencesDialog : DialogBase
         })));
         ShowBackend();
         page.Children.Add(backend);
+        // おすすめの構成: このパソコンでいちばん速い設定を測って出し、そのまま使える (設計書 22.63)
+        var setup = new Button { Content = "おすすめの構成を調べる...", HorizontalAlignment = HorizontalAlignment.Left };
+        setup.Click += async (_, _) =>
+        {
+            var dialog = new SetupDialog();
+            await dialog.ShowDialog(this);
+            // 使ったときは、この画面の項目も新しい設定で作り直す
+            if (dialog.Applied)
+            {
+                Close();
+                Dispatcher.UIThread.Post(async () => await EditorCommands.PreferencesAsync());
+            }
+        };
+        page.Children.Add(setup);
 
         // 使う GPU: CPU 内蔵と外付けの GPU があるとき、どちらで描くか (調べるのに少し時間がかかるので、裏で一覧を作る)
         var gpu = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch, IsEnabled = false, PlaceholderText = L.T("GPU を調べています...") };
@@ -323,6 +338,14 @@ public sealed class PreferencesDialog : DialogBase
             var previewGpuNote = new TextBlock { TextWrapping = TextWrapping.Wrap, Text = "画面の表示と描画で GPU が違うとき (CPU 内蔵の GPU で画面を出すノート PC など) に効きます。画面の表示と同じ GPU で描くと、プレビューを読み戻して送り直す手間がなくなりますが、外付けの GPU より遅いことがあります。出力と動画のデコードは「使う GPU」で行います。" };
             previewGpuNote.Classes.Add("secondary");
             page.Children.Add(previewGpuNote);
+            // 画面の描画の仕組み (設計書 22.62)。起動のときにしか決められない
+            page.Children.Add(Row("画面の描画 (Linux)", Combo(new[] { "EGL (おすすめ)", "GLX" }, s.ScreenGl == ScreenGlMode.Glx ? 1 : 0, i =>
+            {
+                s.ScreenGl = i == 1 ? ScreenGlMode.Glx : ScreenGlMode.Egl;
+            })));
+            var screenGlNote = new TextBlock { TextWrapping = TextWrapping.Wrap, Text = "EGL で画面を描くと、画面と共有するプレビューでも、GPU (VAAPI) でデコードした動画を CPU へ写さずに出せます。表示がおかしいときは GLX にしてください。変えたときは、アプリを起動し直すと切り替わります。" };
+            screenGlNote.Classes.Add("secondary");
+            page.Children.Add(screenGlNote);
         }
         var decodeInfo = new TextBlock { TextWrapping = TextWrapping.Wrap, Text = "確認中..." };
         decodeInfo.Classes.Add("secondary");

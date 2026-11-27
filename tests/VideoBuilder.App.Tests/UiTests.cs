@@ -15,6 +15,8 @@ using VideoBuilder.App.Views;
 using VideoBuilder.App.Workspaces.Advanced;
 using VideoBuilder.App.Workspaces.Simple;
 using VideoBuilder.Core;
+using VideoBuilder.Media;
+using VideoBuilder.Rendering;
 
 [assembly: AvaloniaTestApplication(typeof(VideoBuilder.App.Tests.TestApp))]
 [assembly: AvaloniaTestIsolation(AvaloniaTestIsolationLevel.PerAssembly)]
@@ -2163,6 +2165,64 @@ public class UiTests
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
+
+    /// <summary>
+    /// おすすめの構成 (設計書 22.63): ダイアログを開くと計測を始め、項目を出す。「この構成を使う」で設定に書き込み、描画を作り直す。
+    /// 計測は短くする (CPU だけ・書き出しなし)。書き出しの画面は、おすすめのエンコーダを最初に選ぶ。
+    /// </summary>
+    [AvaloniaFact]
+    public async Task Recommended_setup_is_measured_shown_and_applied()
+    {
+        var window = Open();
+        var s = Svc.Settings;
+        var saved = (s.RenderBackend, s.PreferredVideoEncoder, s.SetupSuggested);
+        try
+        {
+            // CPU に決め打ち・x265 を勧める結果を作って、使えば書き込まれることを確かめる
+            s.RenderBackend = RenderBackend.Gpu;
+            // VB_UI_SHOTS (見た目の確認) のときは、ふだんと同じ計測にする
+            bool full = Environment.GetEnvironmentVariable("VB_UI_SHOTS") is { Length: > 0 };
+            var dialog = new SetupDialog
+            {
+                Options = full ? new SetupBenchmark.Options()
+                    : new SetupBenchmark.Options { IncludeGpus = false, RenderFrames = 3, DecodeFrames = 3, ExportFrames = 0, ExportOnGpu = false },
+            };
+            dialog.Show(window);
+            for (int i = 0; i < 1500 && !dialog.Finished; i++) { await Task.Delay(20); Pump(); }
+            Assert.True(dialog.Finished, "計測が終わらない");
+            // 見た目の確認用: VB_UI_SHOTS にフォルダを指定すると、ダイアログの絵を保存する
+            if (Environment.GetEnvironmentVariable("VB_UI_SHOTS") is { Length: > 0 } shots)
+            {
+                Pump();
+                dialog.CaptureRenderedFrame()?.Save(Path.Combine(shots, $"setup-{(L.English ? "en" : "ja")}.png"));
+            }
+            var backend = Assert.Single(dialog.Items, i => i.Name == "描画方式");
+            if (!full)
+            {
+                // GPU を測らない計測なので、描画方式は自動 (GPU に決め打ちなら変える)
+                Assert.True(backend.Changes);
+                dialog.ClickApply();
+                Assert.True(dialog.Applied);
+                Assert.True(s.SetupSuggested);
+                Assert.Equal(RenderBackend.Auto, s.RenderBackend);
+            }
+            dialog.Close();
+
+            // 書き出しの画面: おすすめのエンコーダ (ここでは x265。ソフトウェアなので、はじめから選べる) を最初に選ぶ
+            if (MediaWriter.IsEncoderAvailable("libx265") && MediaWriter.IsEncoderAvailable("aac"))
+            {
+                s.PreferredVideoEncoder = "libx265";
+                var export = new ExportDialog();
+                Assert.Contains("H.265", export.SelectedFormatName);
+                export.Close();
+            }
+        }
+        finally
+        {
+            (s.RenderBackend, s.PreferredVideoEncoder, s.SetupSuggested) = saved;
+            Svc.Preview.ReloadBackend();
+        }
+    }
 }
 
 public class EffectMenuTests

@@ -137,7 +137,19 @@ internal static unsafe class VideoEncoderSetup
             else
             {
                 softwareFormat = PickPixelFormat(codec, family.Length > 0);
+                if (s.PixelFormat.Length > 0 && ffmpeg.av_get_pix_fmt(s.PixelFormat) is var wanted and not AVPixelFormat.AV_PIX_FMT_NONE
+                    && CodecSupport.PixelFormats(codec).Contains(wanted))
+                    softwareFormat = wanted;
                 ctx->pix_fmt = softwareFormat;
+                LastCudaError = null;
+                // NVENC に CUDA のフレームを渡す (GPU で描いた絵を、GPU の中で写して渡すため。設計書 22.62)
+                if (family == "nvenc" && s.CudaFrames)
+                {
+                    if (softwareFormat != AVPixelFormat.AV_PIX_FMT_NV12) LastCudaError = "エンコーダの形式が NV12 ではありません";
+                    else if (!CodecSupport.PixelFormats(codec).Contains(AVPixelFormat.AV_PIX_FMT_CUDA)) LastCudaError = "エンコーダが CUDA のフレームを受け取りません";
+                    else if (CudaFrames(ctx, out device, out frames, out var cudaError)) ctx->pix_fmt = AVPixelFormat.AV_PIX_FMT_CUDA;
+                    else LastCudaError = cudaError;
+                }
             }
 
             foreach (var (key, value) in OptionsFor(name, s.Crf, s.Preset)) ffmpeg.av_dict_set(&opts, key, value, 0);
@@ -181,6 +193,34 @@ internal static unsafe class VideoEncoderSetup
             if (device != null) ffmpeg.av_buffer_unref(&device);
             if (ctx != null) ffmpeg.avcodec_free_context(&ctx);
         }
+    }
+
+    /// <summary>直前の Open で、CUDA のフレームを使えなかった理由 (ExportSettings.CudaFrames のとき。同じスレッドで読む)。</summary>
+    [ThreadStatic] internal static string? LastCudaError;
+
+    /// <summary>CUDA のデバイスと、NV12 のフレームの置き場を作って ctx に付ける。作れなければ false (何も付けない)。</summary>
+    private static bool CudaFrames(AVCodecContext* ctx, out AVBufferRef* device, out AVBufferRef* frames, out string? error)
+    {
+        device = null; frames = null; error = null;
+        AVBufferRef* d = null;
+        int ret = ffmpeg.av_hwdevice_ctx_create(&d, AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, null, null, 0);
+        if (ret < 0) { error = "CUDA のデバイスを開けません: " + FFmpegLoader.ErrorText(ret); return false; }
+        var f = ffmpeg.av_hwframe_ctx_alloc(d);
+        if (f == null) { ffmpeg.av_buffer_unref(&d); error = "CUDA のフレーム置き場を作れません"; return false; }
+        var fc = (AVHWFramesContext*)f->data;
+        fc->format = AVPixelFormat.AV_PIX_FMT_CUDA;
+        fc->sw_format = AVPixelFormat.AV_PIX_FMT_NV12;
+        fc->width = ctx->width; fc->height = ctx->height;
+        ret = ffmpeg.av_hwframe_ctx_init(f);
+        if (ret < 0)
+        {
+            ffmpeg.av_buffer_unref(&f); ffmpeg.av_buffer_unref(&d);
+            error = "CUDA のフレーム置き場を初期化できません: " + FFmpegLoader.ErrorText(ret);
+            return false;
+        }
+        ctx->hw_frames_ctx = ffmpeg.av_buffer_ref(f);
+        device = d; frames = f;
+        return true;
     }
 
     /// <summary>

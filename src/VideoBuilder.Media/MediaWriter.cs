@@ -18,6 +18,16 @@ public sealed class ExportSettings
     /// <summary>FFmpeg のエンコーダ名。空なら音声なし。</summary>
     public string AudioCodec { get; set; } = "aac";
     public int AudioBitrate { get; set; } = 192_000;
+    /// <summary>
+    /// ソフトウェアのエンコーダに渡す形式 (FFmpeg の名前。"yuv420p10le" など)。空ならエンコーダに合わせて決める。
+    /// エンコーダが対応していなければ使わない。10 ビットの動画を作るとき (テストなど) に使う。
+    /// </summary>
+    public string PixelFormat { get; set; } = "";
+    /// <summary>
+    /// NVENC のとき、エンコーダに CUDA のフレーム (GPU 上の NV12) を渡せるようにする (Linux。設計書 22.62)。
+    /// GPU で描いた絵を、CUDA と GL の相互運用で GPU の中でエンコーダのフレームへ写して渡す。CUDA を使えなければ、これまでどおりメモリ上のフレームを渡す。
+    /// </summary>
+    public bool CudaFrames { get; set; }
 }
 
 /// <summary>BGRA のフレームと float の音声を受け取って、動画ファイルに書き出す。</summary>
@@ -112,6 +122,7 @@ public sealed unsafe class MediaWriter : IDisposable
         _venc = VideoEncoderSetup.Open(s, _width, _height, globalHeader, out device, out var softwareFormat);
         _hwDevice = device;
         _uploadToHardware = _venc->hw_frames_ctx != null;
+        HardwareInputError = VideoEncoderSetup.LastCudaError;
         FFmpegLoader.Check(ffmpeg.avcodec_parameters_from_context(_vst->codecpar, _venc), "映像ストリームの設定に失敗");
         _vst->time_base = _venc->time_base;
         _vst->avg_frame_rate = _venc->framerate;
@@ -220,10 +231,26 @@ public sealed unsafe class MediaWriter : IDisposable
     /// エンコーダに直接渡せる GPU 上のフレーム (VAAPI の NV12) を取れるか。取れるなら AllocateHardwareFrame で取り、
     /// DMA-BUF として GPU で描いてから PrepareHardwareFrame で渡す (CPU を通さない。設計書 22.58)。
     /// </summary>
-    public bool AcceptsHardwareFrames =>
-        _uploadToHardware && _venc->hw_frames_ctx != null && _softwareFormat == AVPixelFormat.AV_PIX_FMT_NV12
-        && ((AVHWFramesContext*)_venc->hw_frames_ctx->data)->format == AVPixelFormat.AV_PIX_FMT_VAAPI
-        && _venc->width == _width && _venc->height == _height;
+    public bool AcceptsHardwareFrames => HardwareFrameKind != HardwareFrameKinds.None;
+
+    /// <summary>エンコーダに直接渡せる GPU 上のフレームの種類 (VAAPI か CUDA の NV12)。渡せなければ None。</summary>
+    public HardwareFrameKinds HardwareFrameKind
+    {
+        get
+        {
+            if (!_uploadToHardware || _venc->hw_frames_ctx == null || _softwareFormat != AVPixelFormat.AV_PIX_FMT_NV12
+                || _venc->width != _width || _venc->height != _height) return HardwareFrameKinds.None;
+            return ((AVHWFramesContext*)_venc->hw_frames_ctx->data)->format switch
+            {
+                AVPixelFormat.AV_PIX_FMT_VAAPI => HardwareFrameKinds.Vaapi,
+                AVPixelFormat.AV_PIX_FMT_CUDA => HardwareFrameKinds.Cuda,
+                _ => HardwareFrameKinds.None,
+            };
+        }
+    }
+
+    /// <summary>CudaFrames を指定したのに CUDA のフレームを使えないとき、その理由。</summary>
+    public string? HardwareInputError { get; private set; }
 
     /// <summary>エンコーダのフレーム置き場から、GPU 上のフレームを 1 つ取る。取れなければ null (error に理由)。どのスレッドからでもよい。</summary>
     public HardwareFrame? AllocateHardwareFrame(out string? error)
@@ -233,7 +260,7 @@ public sealed unsafe class MediaWriter : IDisposable
         var f = ffmpeg.av_frame_alloc();
         int ret = ffmpeg.av_hwframe_get_buffer(_venc->hw_frames_ctx, f, 0);
         if (ret < 0) { ffmpeg.av_frame_free(&f); error = "GPU 側のフレームを確保できません: " + FFmpegLoader.ErrorText(ret); return null; }
-        return new HardwareFrame(f, HardwareFrameKinds.Vaapi);
+        return new HardwareFrame(f, HardwareFrameKind);
     }
 
     // PrepareHardwareFrame で渡された GPU 上のフレーム (WritePreparedVideoFrame で見分ける)
@@ -319,7 +346,7 @@ public sealed unsafe class MediaWriter : IDisposable
         var frame = (AVFrame*)handle;
         if (_hardwareHandles.TryRemove(handle, out _))
         {
-            // GPU で描いた VAAPI のフレーム: そのままエンコーダに渡す
+            // GPU で描いた VAAPI・CUDA のフレーム: そのままエンコーダに渡す
             try
             {
                 frame->pts = _videoPts++;
@@ -333,7 +360,7 @@ public sealed unsafe class MediaWriter : IDisposable
             frame->pts = _videoPts++;
             if (!_uploadToHardware) { Encode(_venc, _vst, frame); return; }
 
-            // VAAPI など: メモリ上のフレームを GPU 側のフレームへ送ってから、エンコーダに渡す
+            // VAAPI・CUDA: メモリ上のフレームを GPU 側のフレームへ送ってから、エンコーダに渡す
             var hw = ffmpeg.av_frame_alloc();
             try
             {
