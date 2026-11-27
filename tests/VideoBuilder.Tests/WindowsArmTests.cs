@@ -87,10 +87,16 @@ public class WindowsArmTests
         var flags = Regex.Match(script, @"WINDOWS_FLAGS=\((.*?)\)").Groups[1].Value;
         Assert.Contains("--enable-d3d11va", flags);
         Assert.Contains("--enable-mediafoundation", flags);
+        Assert.Contains("--enable-d3d12va", flags);
+        // x64 は NVIDIA・AMD・Intel (Quick Sync) の GPU も明示する (黙って無効にならないように)。ARM64 には足さない
+        var x64 = Regex.Match(script, @"WINDOWS_X64_FLAGS=\((.*?)\)").Groups[1].Value;
+        foreach (var flag in new[] { "--enable-nvdec", "--enable-nvenc", "--enable-amf", "--enable-libvpl" }) Assert.Contains(flag, x64);
+        Assert.Contains("[ \"${MSYSTEM_CARCH:-$(uname -m)}\" = x86_64 ] && extra+=(\"${WINDOWS_X64_FLAGS[@]}\")", script);
         // 配布物も、CI も ARM64 の Windows 向けを作る
         Assert.Contains("win-arm64", File.ReadAllText(Path.Combine(root.FullName, "packaging", "publish-all.sh")));
         var package = File.ReadAllText(Path.Combine(root.FullName, ".github", "workflows", "package.yml"));
         Assert.Contains("rid: win-arm64", package);
         Assert.Contains("msystem: CLANGARM64", package);
+        Assert.Contains("libvpl:p", package);   // Quick Sync (x64 の MSYS2 の UCRT64)
     }
 }

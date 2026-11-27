@@ -140,7 +140,10 @@ public sealed class SharedPreviewTarget
     /// </summary>
     public Texture? Acquire(PixelSize size, Action<Texture>? disposeTag)
     {
-        for (int attempt = 0; attempt < 50; attempt++)
+        // 待つのは最大 50ms。空くのは Monitor.PulseAll で知らせるので、すぐに起きる
+        // (以前は Thread.Sleep(1) を 50 回。Windows では 1 回が約 15.6ms になり、最大 0.8 秒止まりえた)
+        var deadline = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
         {
             Texture? free = null;
             lock (_gate)
@@ -165,14 +168,16 @@ public sealed class SharedPreviewTarget
                 // Direct3D 11: 画面の描画が使い終えて鍵を返すのを待つ (返ってこなければ、このフレームは飛ばす)
                 if (OperatingSystem.IsWindows() && free.D3D is SharedD3DTexture d && !d.AcquireForDrawing(100))
                 {
-                    lock (_gate) free.Busy = false;
+                    lock (_gate) { free.Busy = false; Monitor.PulseAll(_gate); }
                     return null;
                 }
                 return free;
             }
-            Thread.Sleep(1);
+            long left = AcquireTimeoutMs - deadline.ElapsedMilliseconds;
+            if (left <= 0) return null;
+            lock (_gate)
+                if (!_textures.Any(t => !t.Busy)) Monitor.Wait(_gate, (int)left);
         }
-        return null;
     }
 
     /// <summary>新しいテクスチャを作る (_gate の中で、描画のスレッドから)。作れなければ null。</summary>
@@ -220,7 +225,7 @@ public sealed class SharedPreviewTarget
             lock (_gate)
             {
                 // 新しい絵に切り替わったので、前の絵には描いてよい
-                if (previous != null && !ReferenceEquals(previous, texture)) previous.Busy = false;
+                if (previous != null && !ReferenceEquals(previous, texture)) { previous.Busy = false; Monitor.PulseAll(_gate); }
             }
             HasFrame = true;
             Presented?.Invoke();
@@ -252,8 +257,12 @@ public sealed class SharedPreviewTarget
     public void Release(Texture texture)
     {
         if (OperatingSystem.IsWindows() && texture.D3D is SharedD3DTexture d) d.ReleaseUnused();
-        lock (_gate) if (!ReferenceEquals(texture, _shown)) texture.Busy = false;
+        lock (_gate)
+            if (!ReferenceEquals(texture, _shown)) { texture.Busy = false; Monitor.PulseAll(_gate); }
     }
+
+    /// <summary>すべてのテクスチャが使用中のとき、空くのを待つ上限 (ms)。</summary>
+    private const int AcquireTimeoutMs = 50;
 
     /// <summary>すべてのテクスチャを捨てる (描画のスレッドで、描画の GL を有効にしてから呼ぶ)。</summary>
     public void DisposeResources(Action<Texture>? disposeTag)

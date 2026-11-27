@@ -31,6 +31,7 @@ video-builder 本体のソースは LGPL-3.0-or-later のままで、GPL-3.0 と
 | libnuma | LGPL-2.1-or-later | https://github.com/numactl/numactl | x265 が使う。AppImage に同梱する |
 | nv-codec-headers (NVENC・NVDEC) | MIT | https://github.com/FFmpeg/nv-codec-headers | FFmpeg に組み込む (ヘッダだけ。ドライバは利用者の環境のもの) |
 | AMF のヘッダ | MIT | https://github.com/GPUOpen-LibrariesAndSDKs/AMF | Windows の FFmpeg に組み込む (ヘッダだけ) |
+| oneVPL (libvpl。Quick Sync) | MIT | https://github.com/intel/libvpl | Windows (x64) の FFmpeg に組み込み、DLL を同梱する |
 | GCC の実行時ライブラリ (libgcc_s・libstdc++) | GPL-3.0-or-later (GCC Runtime Library Exception 付き) | https://gcc.gnu.org/ | Windows に同梱する (MSYS2 で作った DLL が使う) |
 | winpthreads | MIT・BSD-3-Clause | https://www.mingw-w64.org/ | Windows に同梱する |
 | libva (Windows 版) | MIT | https://github.com/intel/libva | Windows に同梱する (MSYS2 の FFmpeg が使う) |

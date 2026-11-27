@@ -2069,7 +2069,7 @@ AviUtl 風の詳細編集とは別に、動画・写真を並べるだけで作�
 | 項目 | 内容 |
 |---|---|
 | 仕組み | Avalonia の画面の描画 (コンポジタ) が OpenGL でテクスチャの共有に対応していれば (`IOpenGlTextureSharingRenderInterfaceContextFeature`)、それと共有する GL コンテキストを作り (`SharedPreviewTarget`)、描画のスレッドの Skia をそのコンテキストで動かす (`GpuContext.FromExternal`)。共有のテクスチャ (最大 3 枚を順に使う) に直接描き (`RenderEngine.RenderToGpuSurface`)、`CompositionDrawingSurface` に渡して、`PreviewView` の子のビジュアルとしてフレームの位置に出す。読み戻しも、メモリ上の複製も、送り直しもない |
-| 同期 | 画面に渡す前に、GPU の処理が終わったことを確かめる。GL (Linux) ではフェンスを置いて待たずに次のフレームを組み立て、GPU に渡す直前に前のフレームのフェンスを待って画面に渡す ([22.55](#2255-linux-の高速化-画面と共有するプレビューvaapi-のエンコードreadytorun))。Direct3D 11 (Windows) は描き終えたら待つ (`Flush(submit, synchronous)`)。画面に出ている・出す途中・GPU を待っているテクスチャには描かない (次の絵に切り替わったら空く。最大 4 枚) |
+| 同期 | 画面に渡す前に、GPU の処理が終わったことを確かめる。GL (Linux) ではフェンスを置いて待たずに次のフレームを組み立て、GPU に渡す直前に前のフレームのフェンスを待って画面に渡す ([22.55](#2255-linux-の高速化-画面と共有するプレビューvaapi-のエンコードreadytorun))。Direct3D 11 (Windows) も同じくフェンスで待たずに組み立て、フェンスを待ってから鍵 (keyed mutex) を画面の描画に渡す ([22.64](#2264-windows-の高速化-共有のプレビューで待たないreadytorunffmpeg-の-gpu-機能の明示))。画面に出ている・出す途中・GPU を待っているテクスチャには描かない (次の絵に切り替わったら空く。最大 4 枚) |
 | 選択の枠 | 子のビジュアルはコントロール自身の描画より上に出るので、選択の枠は別の層 (`PreviewView.Selection`) に描いて上に重ねる |
 | 使う条件 | Linux (Windows は Direct3D 11 の共有テクスチャで。[22.35](#2235-windows-の-gpu-描画-angle))・描画方式が GPU (自動を含む)・画面の GPU と描画に選んだ GPU が同じ (`GL_RENDERER` で比べる。違う GPU の間では共有できないので、これまでどおり読み戻す。環境設定の「プレビューを描く GPU」を「画面の表示と同じ GPU」にすると、選んだ GPU と違っても画面の GPU で描いて共有する。[22.57](#2257-ハイブリッドの-gpu-の-pc-でプレビューを画面の-gpu-で描く))・自動のときは画面の GPU がソフトウェアでない。`--screenshot` のときは使わない (ウィンドウを画像に描く方法では写らないため)。環境変数 `VIDEO_BUILDER_SHARED_PREVIEW=0` で使わない、`=1` で条件を問わず使う |
 | 表示 | 使っているときは、描画方式の説明に「画面と共有」と出る。使える環境なのに使わないときは理由を添える |
@@ -2908,9 +2908,9 @@ Linux でのパフォーマンスの見直しで挙げた改善のうち、変�
 | 手法 | 内容 |
 |---|---|
 | 画面と共有するプレビューでも YUV のまま GPU へ | Linux の画面の描画 (Avalonia の GLX) と共有するコンテキストはデスクトップの OpenGL なので、OpenGL ES 3 だけに限っていた YUV の変換 ([22.52](#2252-gpu-と-cpu-の間の受け渡しを減らす-linux-の-gpu-描画)) が使われず、いちばん速いはずの共有のプレビューで、毎フレーム CPU で YUV → BGRA に変換していた。`GlFunctions` がデスクトップの OpenGL 3.0 以上も受け付け、シェーダの先頭の版の指定だけを付け替える (OpenGL ES 3 は `#version 300 es`、OpenGL 3.3 以上は `#version 330 core`、3.0〜3.2 は `#version 130`。本文はどれでも同じ意味になる書き方) |
-| 共有のプレビューで毎フレーム GPU を待たない | 以前は描き終えるたびに GPU の処理が全部終わるまで待っていた (`Flush(submit, synchronous)`。実質 `glFinish`)。GL ではフェンス (`glFenceSync`) を置いて待たずに次のフレームを組み立て、GPU に渡す直前か、次に描くものがなくなったときに前のフレームのフェンスを待って画面に渡す (`PreviewService.PresentPending`)。GPU がフレーム N を描く間に CPU がフレーム N+1 を組み立てられる。画面の描画が読む前に GPU の処理が終わっていることは同じ。待てなかったとき (1 秒) は以前どおり全部待つ。テクスチャは最大 4 枚 (画面に出ている・出す途中・GPU を待っている・描いている)。描画の時間 (パフォーマンスチェック) は、組み立てと GPU に渡す時間に、フェンスを待った時間を足したもの。環境変数 `VIDEO_BUILDER_SHARED_PREVIEW_FENCE=0` で以前どおり。Windows (Direct3D 11 の共有テクスチャ) は変えていない |
+| 共有のプレビューで毎フレーム GPU を待たない | 以前は描き終えるたびに GPU の処理が全部終わるまで待っていた (`Flush(submit, synchronous)`。実質 `glFinish`)。GL ではフェンス (`glFenceSync`) を置いて待たずに次のフレームを組み立て、GPU に渡す直前か、次に描くものがなくなったときに前のフレームのフェンスを待って画面に渡す (`PreviewService.PresentPending`)。GPU がフレーム N を描く間に CPU がフレーム N+1 を組み立てられる。画面の描画が読む前に GPU の処理が終わっていることは同じ。待てなかったとき (1 秒) は以前どおり全部待つ。テクスチャは最大 4 枚 (画面に出ている・出す途中・GPU を待っている・描いている)。描画の時間 (パフォーマンスチェック) は、組み立てと GPU に渡す時間に、フェンスを待った時間を足したもの。環境変数 `VIDEO_BUILDER_SHARED_PREVIEW_FENCE=0` で以前どおり。Windows (Direct3D 11 の共有テクスチャ) にも [22.64](#2264-windows-の高速化-共有のプレビューで待たないreadytorunffmpeg-の-gpu-機能の明示) で入れた |
 | VAAPI のエンコードを、選んだ GPU で | 以前は既定のデバイス → `renderD128` → `renderD129` の順に決め打ちで開いていたので、外付けの AMD の GPU を選んでいても CPU 内蔵の GPU でエンコードすることがあった。デコードと同じく、描画に選んだ GPU のレンダーノード (`HardwareDecoding.DevicePath`) を先に試す (`VideoEncoderSetup.VaapiDeviceCandidates`)。NVIDIA を選んだときは指定なし (NVENC を使う) |
-| Flatpak・tar.gz も ReadyToRun | AppImage (`packaging/appimage/build.sh`) だけ ReadyToRun で発行していた。Flatpak と tar.gz が使う `packaging/publish-all.sh` でも、Linux 向け (`linux-*`) は ReadyToRun にする。Windows・macOS 向けは変えていない |
+| Flatpak・tar.gz も ReadyToRun | AppImage (`packaging/appimage/build.sh`) だけ ReadyToRun で発行していた。Flatpak と tar.gz が使う `packaging/publish-all.sh` でも、Linux 向け (`linux-*`) は ReadyToRun にする。Windows 向けは [22.64](#2264-windows-の高速化-共有のプレビューで待たないreadytorunffmpeg-の-gpu-機能の明示) で入れた。macOS 向けは変えていない |
 
 #### 確かめたこと
 
@@ -3165,3 +3165,27 @@ Intel UHD Graphics 770 と NVIDIA GeForce RTX 4070 Laptop GPU の載ったノー
 - 画面の描画 (EGL / GLX) は起動し直さないと比べられないので、測らずに EGL を勧める
 - プロキシの設定は変えない (動画ごとに、この PC でのデコードの速さを測って自動で作るため)
 - 書き出しの計測は、今の「使う GPU」で描く (おすすめの GPU に変える前の値)
+
+### 22.64 Windows の高速化: 共有のプレビューで待たない・ReadyToRun・FFmpeg の GPU 機能の明示
+
+Windows でのパフォーマンスの見直しで、Linux だけに入っていた改善 (22.55・22.56) のうち、変更の範囲が狭いものを Windows にも入れた。
+
+| 手法 | 内容 |
+|---|---|
+| 共有のプレビューで毎フレーム GPU を待たない | Direct3D 11 の共有テクスチャ (22.35) では、描き終えるたびに GPU の処理が全部終わるまで待っていた (`Flush(submit, synchronous)`)。GL (22.55) と同じく、フェンス (`glFenceSync`。ANGLE の OpenGL ES 3 にもある) を置いて待たずに次のフレームを組み立て、次のフレームを渡す直前に前のフレームのフェンスを待ってから、鍵を画面の描画に渡す (`ReleaseSync`)。鍵を渡す前に GPU が描き終えていることは以前と同じ。フェンスを作れなければ以前どおり。環境変数 `VIDEO_BUILDER_SHARED_PREVIEW_FENCE=0` で以前どおり |
+| 空くテクスチャをすぐに受け取る | 共有のテクスチャがすべて使用中のとき、`Thread.Sleep(1)` を最大 50 回くり返して空くのを待っていた。Windows の標準のタイマーの精度では 1 回が約 15.6ms になるので、最大 0.8 秒止まりえた (フェンスで 1 枚多く使うので、待つことも増える)。テクスチャが空いたら知らせて (`Monitor.PulseAll`)、すぐに起きる。待つのは最大 50ms (`SharedPreviewTarget.AcquireTimeoutMs`) |
+| Windows も ReadyToRun | `packaging/publish-all.sh` で、`win-*` も ReadyToRun で発行する (Linux の上でも、crossgen2 で Windows 向けに作れる)。Linux では起動が約 1150ms → 650ms になった (22.55) |
+| FFmpeg の GPU 機能を明示する | Windows の FFmpeg (`packaging/ffmpeg/build.sh`) で、`--enable-d3d12va` を `WINDOWS_FLAGS` に足す。x64 だけ `WINDOWS_X64_FLAGS` (`--enable-ffnvcodec --enable-nvdec --enable-nvenc --enable-amf --enable-libvpl`) を足す。以前は自動検出に任せていて、Quick Sync (oneVPL) は自動検出の対象でもないので入っておらず、Intel の GPU のエンコードは Media Foundation だけだった。CI (`package.yml`) は MSYS2 の `libvpl` を入れ、作った FFmpeg に D3D12VA、x64 なら CUDA・`h264_nvenc`・`h264_amf`・`h264_qsv` があることを確かめる |
+
+#### 確かめたこと
+
+- ReadyToRun: Linux (GPU なし) の上で `win-x64` を ReadyToRun で発行し、本体と `VideoBuilder.*.dll` が ReadyToRun (PE の Machine が 0x8664 で、ManagedNativeHeader がある) になっていることを確かめた
+- `PackagingTests`・`WindowsArmTests` (設定の確認) と、UI のテスト (Xvfb の上)
+- **Windows の実機と、FFmpeg の Windows でのビルドは確かめていない** (開発環境が Linux で GPU もない)。FFmpeg のビルドと GPU の機能の確認は package.yml の CI で行う。共有のプレビューのフェンスは、Windows の実機で、パフォーマンスチェックの描画の時間と、表示に乱れがないことを確かめる
+
+#### 残っていること (Windows)
+
+- D3D11VA・NVDEC でデコードしたフレームを、メモリへ写さずに描画に使う (描画の Direct3D 11 のデバイスを FFmpeg に渡し、ANGLE の `EGL_D3D11_TEXTURE_ANGLE` で取り込む。NVDEC は CUDA と Direct3D 11 の相互運用)
+- 書き出しで、GPU 上のフレームをそのままエンコーダ (NVENC・Quick Sync・AMF・Media Foundation) に渡す (`AV_PIX_FMT_D3D11`)
+- 音声のスレッドの `Thread.Sleep` と、再生中のスレッドの優先度・電力の制限 (EcoQoS・E コア)
+

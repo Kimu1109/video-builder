@@ -45,10 +45,16 @@ MACOS_FLAGS=(--disable-libxcb --disable-xlib --disable-sdl2)
 
 # Windows だけに足す設定: GPU でのデコード (D3D11VA・DXVA2) と、Media Foundation のエンコーダ (h264_mf など) を必ず入れる。
 # Windows on ARM (Snapdragon) では NVENC・Quick Sync・AMF がないので、GPU のエンコーダは Media Foundation からしか使えない。
-# D3D12VA は、MSYS2 のヘッダが新しければ configure が自動で有効にする。
+# D3D12VA (D3D11VA が使えない形式・ドライバのときのデコード) も明示する (以前は自動検出に任せていて、ヘッダが古いと黙って無効になった)。
 # 画面の取り込み (gfxcapture。Windows.Graphics.Capture を使う C++ のフィルタ) はアプリが使わないうえ、
 # CLANGARM64 の libc++ では作れない (<chrono> の中で ratio などが見つからない) ので切る
-WINDOWS_FLAGS=(--enable-d3d11va --enable-dxva2 --enable-mediafoundation --disable-filter=gfxcapture)
+WINDOWS_FLAGS=(--enable-d3d11va --enable-d3d12va --enable-dxva2 --enable-mediafoundation --disable-filter=gfxcapture)
+
+# x64 の Windows だけに足す設定: NVIDIA (NVDEC・NVENC)・AMD (AMF)・Intel (Quick Sync。oneVPL = libvpl) の GPU のデコード・エンコード。
+# どれも自動検出に任せると、ヘッダやライブラリが足りないときに黙って無効になる (Quick Sync は自動検出の対象でもなく、
+# 以前は入っていなかったので、Intel の GPU では Media Foundation しか使えなかった)。足りなければ configure を失敗させる。
+# ARM64 の Windows にはどれもない
+WINDOWS_X64_FLAGS=(--enable-ffnvcodec --enable-nvdec --enable-nvenc --enable-amf --enable-libvpl)
 
 # Linux だけに足す設定: GPU でのデコード・エンコード (VAAPI・NVDEC・NVENC・V4L2 M2M) と、VAAPI のフレームを DRM (DMA-BUF) として
 # 取り出すための libdrm。どれも configure の自動検出に任せると、開発用パッケージ (libva-dev・libdrm-dev・libffmpeg-nvenc-dev など) が
@@ -66,6 +72,7 @@ while [ $# -gt 0 ]; do
     --print-version) echo "$FFMPEG_VERSION"; exit 0 ;;
     --print-configure) echo "${CONFIGURE_FLAGS[*]}"; exit 0 ;;
     --print-windows-configure) echo "${WINDOWS_FLAGS[*]}"; exit 0 ;;
+    --print-windows-x64-configure) echo "${WINDOWS_X64_FLAGS[*]}"; exit 0 ;;
     --print-linux-configure) echo "${LINUX_FLAGS[*]}"; exit 0 ;;
     *) echo "不明な引数: $1" >&2; exit 1 ;;
   esac
@@ -102,6 +109,7 @@ if [ ! -f "$licenses/CONFIGURATION.txt" ]; then
   extra=()
   [ "$os" = macos ] && extra=("${MACOS_FLAGS[@]}")
   [ "$os" = windows ] && extra=("${WINDOWS_FLAGS[@]}")
+  [ "$os" = windows ] && [ "${MSYSTEM_CARCH:-$(uname -m)}" = x86_64 ] && extra+=("${WINDOWS_X64_FLAGS[@]}")
   [ "$os" = linux ] && extra=("${LINUX_FLAGS[@]}")
   # MSYS2 の CLANG64・CLANGARM64: コンパイラは clang。何も指定しないと configure は gcc を探し、
   # Windows の PATH にある別の gcc (ランナーの x64 の MinGW など) を使ってしまう。
