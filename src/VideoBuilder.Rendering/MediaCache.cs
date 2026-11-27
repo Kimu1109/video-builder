@@ -70,7 +70,7 @@ public sealed class MediaCache : IDisposable
     private readonly GRContext? _gpu;
     private readonly GpuContext? _gpuContext;
     private YuvTextures? _yuv;
-    // 0: まだ試していない, 1: 使える, -1: 使えない (GPU 描画でない・OpenGL ES 3 でない・シェーダを作れない)
+    // 0: まだ試していない, 1: 使える, -1: 使えない (GPU 描画でない・OpenGL ES 3 / OpenGL 3 でない・シェーダを作れない)
     private volatile int _yuvState;
 
     /// <summary>YUV のまま GPU へ送れないとき、その理由 (計測・表示用)。</summary>

@@ -206,6 +206,7 @@ public sealed class PreviewService : IDisposable
     private void CreateEngine()
     {
         _engine?.Gpu?.MakeCurrent();
+        DropPending();
         var oldGpu = _engine?.Gpu;
         _engine?.Dispose();
         var requested = _sharedRequested;
@@ -327,7 +328,12 @@ public sealed class PreviewService : IDisposable
             {
                 Snapshot? req; int frame;
                 lock (_requestLock) { req = _requested; frame = _requestedFrame; _requested = null; }
-                if (req == null) break;
+                if (req == null)
+                {
+                    // 次に描くものがない: GPU の処理を待っている絵を、ここで画面に出す
+                    try { PresentPending(); } catch (Exception ex) { Debug.WriteLine(ex); }
+                    break;
+                }
                 try
                 {
                     if (_backendDirty) { _backendDirty = false; CreateEngine(); }
@@ -339,6 +345,7 @@ public sealed class PreviewService : IDisposable
         // GPU のリソースは、作ったこのスレッドで片付ける
         var gpu = _engine?.Gpu;
         gpu?.MakeCurrent();
+        DropPending();
         _engine?.Dispose();
         ReleaseShared(gpu, disposeContext: true);
         _shared = null;
@@ -364,6 +371,7 @@ public sealed class PreviewService : IDisposable
             RenderShared(engine, g, _shared, p, scene, frame, w, h, sw);
             return;
         }
+        PresentPending();
         engine.RenderToBitmap(p, scene, frame, _back);
         LastRenderMs = sw.Elapsed.TotalMilliseconds;
         LastRenderSize = (w, h);
@@ -384,7 +392,16 @@ public sealed class PreviewService : IDisposable
         }, DispatcherPriority.Render);
     }
 
-    /// <summary>共有のテクスチャに描いて、画面に出す。テクスチャが空かなければ、このフレームは飛ばす。</summary>
+    /// <summary>
+    /// 共有のテクスチャに描いて、画面に出す。テクスチャが空かなければ、このフレームは飛ばす。
+    /// <para>
+    /// GL (Linux) では、描いたあと GPU の処理が終わるのを待たない。Skia の命令を GPU に渡してフェンスを置き、
+    /// 画面に出すのは、次のフレームの描画を組み立て終えて GPU に渡す直前か、次に描くものがなくなったとき (<see cref="PresentPending"/>)。
+    /// GPU がフレーム N を描いている間に、CPU はフレーム N+1 を組み立てられる (以前は毎フレーム、GPU が描き終えるまで止まっていた)。
+    /// 画面の描画 (別のコンテキスト) が読む前に、フェンスで GPU の処理が終わったことを確かめるのは同じ。
+    /// 環境変数 VIDEO_BUILDER_SHARED_PREVIEW_FENCE=0 で、以前どおり毎フレーム待つ。
+    /// </para>
+    /// </summary>
     private void RenderShared(RenderEngine engine, GpuContext g, SharedPreviewTarget shared, Project p, Scene scene, int frame, int w, int h, Stopwatch sw)
     {
         g.MakeCurrent();
@@ -392,7 +409,7 @@ public sealed class PreviewService : IDisposable
         if (texture == null)
         {
             // 共有のテクスチャを作れない (Direct3D 11): これまでどおり読み戻す方法に戻す。そうでなければ、画面に出すのが追いつかない
-            if (shared.CreateError != null) FallBackFromShared();
+            if (shared.CreateError != null) { DropPending(); FallBackFromShared(); }
             return;
         }
         var surface = texture.Tag as SKSurface;
@@ -401,17 +418,92 @@ public sealed class PreviewService : IDisposable
         {
             // 共有のテクスチャに描けない: これまでどおり読み戻す方法に戻す
             shared.Release(texture);
+            DropPending();
             FallBackFromShared();
             return;
         }
         engine.RenderToGpuSurface(p, scene, frame, surface);
+        double recordMs = sw.Elapsed.TotalMilliseconds;
+        var quads = engine.LastQuads.ToList();
+        // 前のフレームは、ここまで (このフレームの組み立て) の間に GPU で描き終えているはず。画面に出す
+        PresentPending();
+        if (!shared.IsD3D && UsesFences)
+        {
+            var waitClock = Stopwatch.StartNew();
+            g.Context.Flush(true, false);   // GPU に渡す (待たない)
+            var fence = g.InsertFence();
+            if (fence != IntPtr.Zero)
+            {
+                _pending = new PendingFrame(texture, fence, recordMs + waitClock.Elapsed.TotalMilliseconds, w, h, quads);
+                return;
+            }
+        }
         // 画面の描画 (別のコンテキスト) が読む前に、GPU での描画を終わらせる
         g.Context.Flush(true, true);
         shared.Present(texture);
-        LastRenderMs = sw.Elapsed.TotalMilliseconds;
+        AfterSharedPresent(sw.Elapsed.TotalMilliseconds, w, h, quads);
+    }
+
+    /// <summary>GPU の処理を待たずに描き終えた (まだ画面に出していない) フレーム。</summary>
+    private sealed record PendingFrame(SharedPreviewTarget.Texture Texture, IntPtr Fence, double SubmitMs, int Width, int Height, List<(string Id, SKPoint[] Quad)> Quads);
+    private PendingFrame? _pending;
+
+    /// <summary>フェンスを使って、GPU の処理を待たずに次のフレームを組み立てるか (GL のときだけ)。</summary>
+    private static readonly bool UsesFences = Environment.GetEnvironmentVariable("VIDEO_BUILDER_SHARED_PREVIEW_FENCE") != "0";
+
+    /// <summary>フェンスを待つ上限 (ナノ秒)。GPU が止まったときに、描画のスレッドがいつまでも待たないように。</summary>
+    private const ulong FenceTimeoutNs = 1_000_000_000;
+
+    /// <summary>
+    /// 待っているフレームがあれば、GPU が描き終えるのを待って画面に出す (描画のスレッドで)。
+    /// 描画の時間 (<see cref="LastRenderMs"/>) は、組み立てと GPU に渡す時間に、ここで待った時間を足したもの。
+    /// </summary>
+    private void PresentPending()
+    {
+        var pending = _pending;
+        if (pending == null) return;
+        _pending = null;
+        var shared = _shared;
+        var g = _engine?.Gpu;
+        if (shared == null || g == null)
+        {
+            shared?.Release(pending.Texture);
+            return;
+        }
+        g.MakeCurrent();
+        var clock = Stopwatch.StartNew();
+        bool done = g.WaitFence(pending.Fence, FenceTimeoutNs);
+        g.DeleteFence(pending.Fence);
+        // 待てなかった (時間切れ・失敗): 以前どおり、GPU の処理が全部終わるまで待ってから出す
+        if (!done) g.Context.Flush(true, true);
+        shared.Present(pending.Texture);
+        AfterSharedPresent(pending.SubmitMs + clock.Elapsed.TotalMilliseconds, pending.Width, pending.Height, pending.Quads);
+    }
+
+    /// <summary>待っているフレームを、画面に出さずに捨てる (描き方を変えるとき・終わるとき。描画のスレッドで)。</summary>
+    private void DropPending()
+    {
+        var pending = _pending;
+        if (pending == null) return;
+        _pending = null;
+        try
+        {
+            if (_engine?.Gpu is { } g)
+            {
+                g.MakeCurrent();
+                g.DeleteFence(pending.Fence);
+            }
+        }
+        catch (Exception ex) { Debug.WriteLine(ex); }
+        _shared?.Release(pending.Texture);
+    }
+
+    /// <summary>共有のテクスチャで 1 フレーム出したあとの知らせ (描画の時間と、選択の枠の位置)。</summary>
+    private void AfterSharedPresent(double ms, int w, int h, List<(string Id, SKPoint[] Quad)> quads)
+    {
+        LastRenderMs = ms;
         LastRenderSize = (w, h);
         Rendered?.Invoke(LastRenderMs, w, h);
-        var quads = engine.LastQuads.ToList();
         bool post;
         lock (_frameLock)
         {

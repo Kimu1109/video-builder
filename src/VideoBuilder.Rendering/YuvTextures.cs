@@ -8,14 +8,14 @@ namespace VideoBuilder.Rendering;
 /// デコードしたままの YUV の動画フレームを GPU へ送り、GPU で RGBA に変換して Skia の画像にする (設計書 22.52)。
 /// CPU で BGRA に変換してから送るのに比べて、CPU の色変換がなくなり、送る量も 4 バイト/画素から 1.5 バイト/画素 (4:2:0) になる。
 /// SkiaSharp 2.88 には YUV の画像を作る API (SKYuvaPixmaps) がなく、SkSL のシェーダも描画時に落ちるので、
-/// OpenGL ES 3 を直接使う (Y・U・V の面を R8 / RG8 のテクスチャに送り、自前のシェーダで RGBA8 のテクスチャに描く)。
+/// OpenGL ES 3 (画面と共有するときはデスクトップの OpenGL 3) を直接使う (Y・U・V の面を R8 / RG8 のテクスチャに送り、自前のシェーダで RGBA8 のテクスチャに描く)。
+/// シェーダは版の指定 (<see cref="GlFunctions.ShaderVersion"/>) を先頭に付けて作る。
 /// 色の変換は BGRA に変換するとき (sws の既定) と同じ BT.601 (J 形式はフルレンジ) で、CPU 描画と同じ絵になる。
 /// 描画のスレッドからだけ使う。
 /// </summary>
 internal sealed unsafe class YuvTextures : IDisposable
 {
     private const string VertexShader = """
-        #version 300 es
         out vec2 uv;
         void main() {
             vec2 p = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
@@ -25,7 +25,6 @@ internal sealed unsafe class YuvTextures : IDisposable
         """;
 
     private const string FragmentShader = """
-        #version 300 es
         precision highp float;
         in vec2 uv;
         out vec4 color;
@@ -99,8 +98,8 @@ internal sealed unsafe class YuvTextures : IDisposable
     public static YuvTextures? Create(GpuContext gpu, out string? error)
     {
         var gl = gpu.Gl;
-        if (gl == null) { error = gpu.GlError ?? "OpenGL ES 3 の関数を使えません"; return null; }
-        uint program = gl.Program(VertexShader, FragmentShader, out error);
+        if (gl == null) { error = gpu.GlError ?? "OpenGL ES 3 / OpenGL 3 の関数を使えません"; return null; }
+        uint program = gl.Program(gl.ShaderVersion + "\n" + VertexShader, gl.ShaderVersion + "\n" + FragmentShader, out error);
         try
         {
             if (program == 0) { error = "YUV の変換のシェーダを作れません: " + error; return null; }

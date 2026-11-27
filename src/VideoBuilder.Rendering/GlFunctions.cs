@@ -4,8 +4,10 @@ using System.Text;
 namespace VideoBuilder.Rendering;
 
 /// <summary>
-/// Skia を通さずに使う OpenGL ES 3 の関数 (動画のフレームを YUV のまま送って GPU で色を変換する・描いた絵を待たずに読み戻す)。
-/// Skia と同じ取り出し方 (GpuContext の getProcAddress) で関数を探す。OpenGL ES 3.0 以上でなければ作らない。
+/// Skia を通さずに使う OpenGL の関数 (動画のフレームを YUV のまま送って GPU で色を変換する・描いた絵を待たずに読み戻す)。
+/// Skia と同じ取り出し方 (GpuContext の getProcAddress) で関数を探す。OpenGL ES 3.0 以上か、デスクトップの OpenGL 3.0 以上でなければ作らない。
+/// デスクトップの OpenGL は、Linux で画面の描画 (Avalonia の GLX) と共有するコンテキストのとき (設計書 22.28)。
+/// 使う関数はどちらにもあるので同じで、違うのはシェーダの書き方 (<see cref="ShaderVersion"/>) だけ。
 /// 使ったあとは GRContext.ResetContext で Skia に GL の状態が変わったことを知らせること。
 /// </summary>
 internal sealed unsafe class GlFunctions
@@ -57,8 +59,41 @@ internal sealed unsafe class GlFunctions
     public delegate* unmanaged<uint, uint, IntPtr> FenceSync;
     public delegate* unmanaged<IntPtr, uint, ulong, uint> ClientWaitSync;
     public delegate* unmanaged<IntPtr, void> DeleteSync;
+    public delegate* unmanaged<void> Flush;
 
-    /// <summary>関数を探す。OpenGL ES 3.0 以上でない・関数が足りないときは null (error に理由)。今のスレッドでコンテキストが有効なこと。</summary>
+    /// <summary>OpenGL ES か (false ならデスクトップの OpenGL)。</summary>
+    public bool IsGles { get; private set; }
+
+    /// <summary>
+    /// シェーダの先頭に付ける版の指定。OpenGL ES 3 は "#version 300 es"、デスクトップの OpenGL 3.3 以上は "#version 330 core"、
+    /// 3.0〜3.2 は "#version 130"。シェーダの本文は、どれでも同じ意味になる書き方にする
+    /// (precision の指定は GLSL 1.30 以降のデスクトップでも書けて、無視される)。
+    /// </summary>
+    public string ShaderVersion { get; private set; } = "#version 300 es";
+
+    /// <summary>
+    /// GL_VERSION の文字列から、OpenGL ES か・版 (major, minor) を読む。読めなければ null。
+    /// 例: "OpenGL ES 3.2 Mesa 24.0.5" / "OpenGL ES 3.0 (ANGLE 2.1 ...)" / "4.6.0 NVIDIA 550.54.14" / "4.5 (Compatibility Profile) Mesa 24.0.5"。
+    /// </summary>
+    internal static (bool Gles, int Major, int Minor)? ParseVersion(string version)
+    {
+        const string es = "OpenGL ES ";
+        bool gles = version.StartsWith(es, StringComparison.Ordinal);
+        var rest = gles ? version[es.Length..] : version;
+        int dot = rest.IndexOf('.');
+        if (dot <= 0 || !int.TryParse(rest[..dot], out int major)) return null;
+        int end = dot + 1;
+        while (end < rest.Length && char.IsAsciiDigit(rest[end])) end++;
+        if (end == dot + 1 || !int.TryParse(rest[(dot + 1)..end], out int minor)) return null;
+        return (gles, major, minor);
+    }
+
+    /// <summary>この版で使えるか (OpenGL ES 3.0 以上・デスクトップの OpenGL 3.0 以上)。使えるときはシェーダの版の指定も返す。</summary>
+    internal static string? ShaderVersionFor(bool gles, int major, int minor) =>
+        gles ? (major >= 3 ? "#version 300 es" : null)
+             : major > 3 || major == 3 && minor >= 3 ? "#version 330 core" : major == 3 ? "#version 130" : null;
+
+    /// <summary>関数を探す。OpenGL ES 3.0 以上・OpenGL 3.0 以上でない・関数が足りないときは null (error に理由)。今のスレッドでコンテキストが有効なこと。</summary>
     public static GlFunctions? Load(Func<string, IntPtr> proc, out string? error)
     {
         error = null;
@@ -73,12 +108,15 @@ internal sealed unsafe class GlFunctions
         gl.GetString = (delegate* unmanaged<uint, byte*>)P("glGetString");
         if (gl.GetString == null) { error = "glGetString がありません"; return null; }
         var version = Marshal.PtrToStringAnsi((IntPtr)gl.GetString(VERSION)) ?? "";
-        // "OpenGL ES 3.2 Mesa ..." / "OpenGL ES 3.0 (ANGLE ...)"。デスクトップの OpenGL (画面と共有する GLX など) では使わない
-        if (!version.StartsWith("OpenGL ES ", StringComparison.Ordinal) || version.Length < 11 || version[10] < '3')
+        var parsed = ParseVersion(version);
+        var shaderVersion = parsed is var (gles, major, minor) ? ShaderVersionFor(gles, major, minor) : null;
+        if (parsed == null || shaderVersion == null)
         {
-            error = $"OpenGL ES 3 ではありません ({version})";
+            error = $"OpenGL ES 3 / OpenGL 3 ではありません ({version})";
             return null;
         }
+        gl.IsGles = parsed.Value.Gles;
+        gl.ShaderVersion = shaderVersion;
         gl.GetError = (delegate* unmanaged<uint>)P("glGetError");
         gl.GenTextures = (delegate* unmanaged<int, uint*, void>)P("glGenTextures");
         gl.DeleteTextures = (delegate* unmanaged<int, uint*, void>)P("glDeleteTextures");
@@ -129,6 +167,7 @@ internal sealed unsafe class GlFunctions
         gl.FenceSync = (delegate* unmanaged<uint, uint, IntPtr>)P("glFenceSync");
         gl.ClientWaitSync = (delegate* unmanaged<IntPtr, uint, ulong, uint>)P("glClientWaitSync");
         gl.DeleteSync = (delegate* unmanaged<IntPtr, void>)P("glDeleteSync");
+        gl.Flush = (delegate* unmanaged<void>)P("glFlush");
         if (missing.Count > 0) { error = "関数がありません: " + string.Join(", ", missing); return null; }
         return gl;
     }

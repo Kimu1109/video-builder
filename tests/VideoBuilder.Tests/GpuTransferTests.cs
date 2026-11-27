@@ -228,6 +228,23 @@ public class GpuTransferTests
         if (!FFmpegLoader.EnsureLoaded() || !MediaWriter.IsEncoderAvailable(codec)) return;
         using var gpu = Gpu();
         if (gpu == null) return;
+        CheckVideoFrames(gpu, name, codec, w, h);
+    }
+
+    /// <summary>画面と共有するデスクトップの OpenGL でも、動画のフレームを YUV のまま送って、CPU 描画と同じ色になる。</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Video_frames_converted_on_desktop_opengl_match_cpu(bool core)
+    {
+        if (!FFmpegLoader.EnsureLoaded() || !MediaWriter.IsEncoderAvailable("libx264")) return;
+        using var gpu = DesktopGl(core);
+        if (gpu == null) return;
+        CheckVideoFrames(gpu, "yuv420.mp4", "libx264", 320, 180);
+    }
+
+    private static void CheckVideoFrames(GpuContext gpu, string name, string codec, int w, int h)
+    {
         var dir = Path.Combine(Path.GetTempPath(), $"vb-yuv-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
         try
@@ -294,11 +311,74 @@ public class GpuTransferTests
     [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUV422P, 64, 36)]
     [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUVJ444P, 64, 36)]
     [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUV444P, 37, 23)]
-    public unsafe void Gpu_yuv_conversion_matches_ffmpeg(FFmpeg.AutoGen.AVPixelFormat format, int w, int h)
+    public void Gpu_yuv_conversion_matches_ffmpeg(FFmpeg.AutoGen.AVPixelFormat format, int w, int h)
     {
         if (!FFmpegLoader.EnsureLoaded()) return;
         using var gpu = Gpu();
         if (gpu == null) return;
+        CheckYuvConversion(gpu, format, w, h);
+    }
+
+    /// <summary>
+    /// 画面と共有するデスクトップの OpenGL (Linux の GLX) でも、YUV のまま送って GPU で変換できる (以前は OpenGL ES 3 だけ)。
+    /// GLX の代わりに、EGL でデスクトップの OpenGL のコンテキストを作って確かめる (コア プロファイル 3.3 と互換プロファイル)。
+    /// </summary>
+    [Theory]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUV420P, 64, 36, true)]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_NV12, 64, 36, true)]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUV444P, 37, 23, true)]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUVJ420P, 64, 36, false)]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_NV12, 64, 36, false)]
+    [InlineData(FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_YUV422P, 64, 36, false)]
+    public void Gpu_yuv_conversion_on_desktop_opengl_matches_ffmpeg(FFmpeg.AutoGen.AVPixelFormat format, int w, int h, bool core)
+    {
+        if (!FFmpegLoader.EnsureLoaded()) return;
+        using var gpu = DesktopGl(core);
+        if (gpu == null) return;
+        var gl = gpu.Gl;
+        Assert.True(gl != null, gpu.GlError);
+        Assert.False(gl!.IsGles);
+        Assert.StartsWith("#version 330", gl.ShaderVersion);   // Mesa はどちらのプロファイルでも 3.3 以上
+        CheckYuvConversion(gpu, format, w, h);
+    }
+
+    /// <summary>
+    /// デスクトップの OpenGL のコンテキスト (画面と共有するコンテキストの代わり)。Linux で作れなければ null
+    /// (Linux で VB_REQUIRE_GPU=1 なら失敗にする)。
+    /// </summary>
+    private static GpuContext? DesktopGl(bool core)
+    {
+        var gpu = DesktopGlContext.Create(core, out var error);
+        if (gpu == null) Assert.False(GpuSelectionTests.GpuRequired && OperatingSystem.IsLinux(), "デスクトップの OpenGL を作れません: " + error);
+        else Console.WriteLine($"BENCH desktop-gl core={core} renderer={gpu.Renderer}");
+        return gpu;
+    }
+
+    [Theory]
+    [InlineData("OpenGL ES 3.2 Mesa 24.0.5", true, 3, 2, "#version 300 es")]
+    [InlineData("OpenGL ES 3.0 (ANGLE 2.1.27548 git hash: 1a2b3c)", true, 3, 0, "#version 300 es")]
+    [InlineData("OpenGL ES 2.0 Mesa 24.0.5", true, 2, 0, null)]
+    [InlineData("4.6.0 NVIDIA 550.54.14", false, 4, 6, "#version 330 core")]
+    [InlineData("4.5 (Compatibility Profile) Mesa 24.0.5", false, 4, 5, "#version 330 core")]
+    [InlineData("3.3 (Core Profile) Mesa 24.0.5", false, 3, 3, "#version 330 core")]
+    [InlineData("3.1 Mesa 24.0.5", false, 3, 1, "#version 130")]
+    [InlineData("2.1 Mesa 24.0.5", false, 2, 1, null)]
+    public void Gl_version_decides_the_shader_language(string version, bool gles, int major, int minor, string? shader)
+    {
+        Assert.Equal((gles, major, minor), GlFunctions.ParseVersion(version));
+        Assert.Equal(shader, GlFunctions.ShaderVersionFor(gles, major, minor));
+    }
+
+    [Fact]
+    public void Gl_version_that_cannot_be_read_is_not_used()
+    {
+        Assert.Null(GlFunctions.ParseVersion(""));
+        Assert.Null(GlFunctions.ParseVersion("OpenGL ES"));
+        Assert.Null(GlFunctions.ParseVersion("unknown"));
+    }
+
+    private static unsafe void CheckYuvConversion(GpuContext gpu, FFmpeg.AutoGen.AVPixelFormat format, int w, int h)
+    {
         var layout = VideoReader.YuvFormatOf(format)!.Value;
         int cw = (w + (1 << layout.ShiftX) - 1) >> layout.ShiftX, ch = (h + (1 << layout.ShiftY) - 1) >> layout.ShiftY;
         bool nv12 = layout.Layout == YuvLayout.Nv12;

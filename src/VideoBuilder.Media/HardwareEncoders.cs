@@ -183,11 +183,24 @@ internal static unsafe class VideoEncoderSetup
         }
     }
 
+    /// <summary>
+    /// VAAPI のデバイスを開くときに試す順番。描画に選んだ GPU のレンダーノード (chosen。動画のデコードと同じ
+    /// <see cref="HardwareDecoding.DevicePath"/>) → 既定のデバイス → よくあるレンダーノード。同じものは 2 回試さない。
+    /// 選んだ GPU で開かないと、描いた絵を別の GPU (多くは CPU 内蔵の GPU) へ送ってエンコードすることになる。
+    /// </summary>
+    internal static List<string?> VaapiDeviceCandidates(string? chosen)
+    {
+        var list = new List<string?>();
+        if (!string.IsNullOrEmpty(chosen)) list.Add(chosen);
+        foreach (var path in new string?[] { null, "/dev/dri/renderD128", "/dev/dri/renderD129" })
+            if (!list.Contains(path)) list.Add(path);
+        return list;
+    }
+
     private static AVBufferRef* OpenVaapiDevice()
     {
-        // 既定のデバイス → よくある描画ノードの順に試す
         int last = 0;
-        foreach (var path in new string?[] { null, "/dev/dri/renderD128", "/dev/dri/renderD129" })
+        foreach (var path in VaapiDeviceCandidates(HardwareDecoding.DevicePath(AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI)))
         {
             AVBufferRef* device = null;
             last = ffmpeg.av_hwdevice_ctx_create(&device, AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI, path, null, 0);

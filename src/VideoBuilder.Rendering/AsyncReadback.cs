@@ -47,7 +47,7 @@ internal sealed unsafe class AsyncReadback : IDisposable
         if (Environment.GetEnvironmentVariable("VIDEO_BUILDER_ASYNC_READBACK") == "0") { error = "VIDEO_BUILDER_ASYNC_READBACK=0"; return null; }
         gpu.MakeCurrent();
         var gl = gpu.Gl;
-        if (gl == null) { error = gpu.GlError ?? "OpenGL ES 3 の関数を使えません"; return null; }
+        if (gl == null) { error = gpu.GlError ?? "OpenGL ES 3 / OpenGL 3 の関数を使えません"; return null; }
         uint texture = 0, fbo = 0;
         var buffers = new uint[Depth];
         SKSurface? surface = null;
