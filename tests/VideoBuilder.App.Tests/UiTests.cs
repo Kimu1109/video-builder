@@ -1870,6 +1870,25 @@ public class UiTests
     }
 
     [Fact]
+    public void Preview_can_be_drawn_on_the_screen_gpu_when_rendering_uses_another_gpu()
+    {
+        // ハイブリッドの GPU のノート PC: 画面は CPU 内蔵の GPU (Intel)、描画には外付けの GPU (NVIDIA) を選んでいる
+        const string screen = "Mesa Intel(R) UHD Graphics 620 (KBL GT2)";
+        var nvidia = new VideoBuilder.Rendering.GpuAdapter(1, "NVIDIA GeForce RTX 3060/PCIe/SSE2", "NVIDIA Corporation", "/dev/dri/card1", "/dev/dri/renderD129", false);
+        var intel = new VideoBuilder.Rendering.GpuAdapter(0, screen, "Intel", "/dev/dri/card0", "/dev/dri/renderD128", false);
+        // 既定: 違う GPU の間では共有できないので、読み戻して表示する。理由に、設定で変えられることを書く
+        Assert.False(PreviewService.GlSharingAllowed(screen, nvidia, RenderBackend.Auto, onScreenGpu: false, force: false, out var reason));
+        Assert.Contains("プレビューを描く GPU", reason);
+        // 「画面の表示と同じ GPU」にすると、画面の GPU で描いて共有する
+        Assert.True(PreviewService.GlSharingAllowed(screen, nvidia, RenderBackend.Auto, onScreenGpu: true, force: false, out _));
+        // 同じ GPU を選んでいれば、設定にかかわらず共有する
+        Assert.True(PreviewService.GlSharingAllowed(screen, intel, RenderBackend.Auto, onScreenGpu: false, force: false, out _));
+        // 画面の GPU がソフトウェアなら、自動のときは画面の GPU で描かない (CPU 描画の方が速い)
+        Assert.False(PreviewService.GlSharingAllowed("llvmpipe (LLVM 20.1.2, 256 bits)", nvidia, RenderBackend.Auto, onScreenGpu: true, force: false, out _));
+        Assert.True(PreviewService.GlSharingAllowed("llvmpipe (LLVM 20.1.2, 256 bits)", nvidia, RenderBackend.Auto, onScreenGpu: true, force: true, out _));
+    }
+
+    [Fact]
     public void Screen_gpu_on_windows_follows_the_chosen_gpu_by_luid_then_by_name()
     {
         // Avalonia が渡す一覧: 名前は小文字、LUID は 8 バイト
