@@ -50,6 +50,9 @@ public sealed unsafe class VideoReader : IDisposable
     private bool _eof;
     /// <summary>シークできない形式 (アニメーション WebP) なので、前へ戻るときは開き直す。</summary>
     private bool _reopenToSeek;
+    // キーフレームだけをデコードした (GetFrameNear) あとは、参照するフレームが欠けているので、次は必ずシークし直す
+    private bool _skippedFrames;
+    private readonly bool _allowHardware = true;
     // 変換済みフレーム (BGRA) の置き場を 2 つ持ち、変換のたびに交互に使う。
     // 直前に返したフレームは、もう 1 回変換するまで書き換わらない (先読みしている間も前のフレームを描ける)。
     // アンマネージドなので GC で動かない。大きさは元の動画の大きさで確保し、縮めて変換するときもそのまま使う
@@ -148,8 +151,16 @@ public sealed unsafe class VideoReader : IDisposable
     /// 時刻をファイルの時刻そのまま (最初のフレームの時刻を 0 にしない) で扱う。
     /// 元の動画の途中から始まるプロキシの区切り (元の動画と同じ時刻で書いてある) を読むときに使う。
     /// </param>
-    public VideoReader(string path, bool absoluteTime)
+    public VideoReader(string path, bool absoluteTime) : this(path, absoluteTime, allowHardware: true) { }
+
+    /// <param name="allowHardware">
+    /// false なら、ハードウェアデコードの設定にかかわらずソフトウェアでデコードする。サムネイルのように小さな絵を
+    /// 少しだけ取り出すときは、GPU のデコーダを開く時間とメモリへ写す時間の方が長くなるので使わない。
+    /// このときは、参照されないフレームのデブロッキングも省く (小さな絵では見分けられず、後のフレームにも響かない)。
+    /// </param>
+    public VideoReader(string path, bool absoluteTime, bool allowHardware)
     {
+        _allowHardware = allowHardware;
         if (!FFmpegLoader.EnsureLoaded()) throw new InvalidOperationException(FFmpegLoader.Error);
         Path = path;
         AVFormatContext* fmt = null;
@@ -161,9 +172,10 @@ public sealed unsafe class VideoReader : IDisposable
             AVCodec* codec = null;
             _stream = ffmpeg.av_find_best_stream(_fmt, AVMediaType.AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
             FFmpegLoader.Check(_stream, "映像ストリームがありません");
+            FFmpegLoader.DiscardOtherStreams(_fmt, _stream);
             var st = _fmt->streams[_stream];
             _codec = codec;
-            if (!HardwareDecoding.Wanted || !OpenHardwareDecoder(st)) OpenSoftwareDecoder(st);
+            if (!allowHardware || !HardwareDecoding.Wanted || !OpenHardwareDecoder(st)) OpenSoftwareDecoder(st);
 
             Width = _dec->width; Height = _dec->height;
             FrameWidth = Width; FrameHeight = Height;
@@ -194,6 +206,7 @@ public sealed unsafe class VideoReader : IDisposable
         {
             FFmpegLoader.Check(ffmpeg.avcodec_parameters_to_context(ctx, st->codecpar), "デコーダの設定に失敗");
             ctx->thread_count = Math.Min(Environment.ProcessorCount, 8);
+            if (!_allowHardware) ctx->skip_loop_filter = AVDiscard.AVDISCARD_NONREF;
             FFmpegLoader.Check(ffmpeg.avcodec_open2(ctx, _codec, null), "デコーダを開けません");
         }
         catch { ffmpeg.avcodec_free_context(&ctx); throw; }
@@ -243,13 +256,63 @@ public sealed unsafe class VideoReader : IDisposable
     /// </summary>
     public byte[]? GetFrame(double seconds)
     {
-        var p = EnsureBgra(GetFramePointer(seconds));
+        return CopyOut(EnsureBgra(GetFramePointer(seconds)));
+    }
+
+    private byte[]? CopyOut(IntPtr p)
+    {
         if (p == IntPtr.Zero) return null;
         int size = FrameWidth * FrameHeight * 4;
         if (_managed.Length != size) _managed = new byte[size];
         System.Runtime.InteropServices.Marshal.Copy(p, _managed, 0, size);
         return _managed;
     }
+
+    /// <summary>
+    /// seconds の近くのフレームを返す (GetFrame と同じ形)。サムネイル用。
+    /// seconds の前 tolerance 秒以内にキーフレームがあれば、キーフレームだけをデコードしてそれを返す
+    /// (間のフレームをデコードしないので、GOP の長い動画ほど速い)。なければ GetFrame と同じく seconds のフレームを返す。
+    /// ハードウェアデコード中・シークできない形式 (アニメーション WebP など) では、GetFrame と同じ。
+    /// </summary>
+    public byte[]? GetFrameNear(double seconds, double tolerance)
+    {
+        if (_dec != null && !_hardware && !_reopenToSeek && tolerance > 0)
+        {
+            long target = TargetPts(seconds);
+            long limit = (long)(tolerance / ffmpeg.av_q2d(_tb));
+            // 前に取り出したキーフレームで足りる (近い時刻のサムネイルを続けて作るとき)
+            if (_skippedFrames && _hasFrame && Math.Abs(target - _curPts) <= limit) return CurrentFrameCopy();
+            bool covers = _hasFrame && !_skippedFrames && target >= _curPts && target < _curPts + _curDur;
+            if (!covers)
+            {
+                Seek(target);
+                _skippedFrames = true;
+                _dec->skip_frame = AVDiscard.AVDISCARD_NONKEY;
+                bool got;
+                try { got = DecodeNext(); }
+                finally { _dec->skip_frame = AVDiscard.AVDISCARD_DEFAULT; }
+                if (got && _hasFrame && Math.Abs(target - _curPts) <= limit)
+                {
+                    KeyframeShortcuts++;
+                    return CurrentFrameCopy();
+                }
+                // キーフレームが遠い: 下の GetFrame がシークし直して、ふつうにデコードする
+            }
+        }
+        return GetFrame(seconds);
+    }
+
+    private byte[]? CurrentFrameCopy()
+    {
+        if (!_converted) Convert();
+        return CopyOut(EnsureBgra(_nativeValid ? (IntPtr)_native[_nativeIndex] : IntPtr.Zero));
+    }
+
+    /// <summary>GetFrameNear がキーフレームで済ませた回数 (計測・テスト用)。</summary>
+    internal int KeyframeShortcuts { get; private set; }
+
+    private long TargetPts(double seconds) =>
+        _startPts + (long)Math.Floor(Math.Max(0, seconds) / ffmpeg.av_q2d(_tb) + 0.5 * 1e-6);
 
     /// <summary>
     /// seconds の位置のフレーム (BGRA, FrameWidth x FrameHeight, 1 行 FrameWidth*4 バイト) を指すポインタを返す。複製しないので速い。
@@ -271,13 +334,13 @@ public sealed unsafe class VideoReader : IDisposable
     private IntPtr GetFramePointerCore(double seconds)
     {
         if (_dec == null) return IntPtr.Zero;
-        long target = _startPts + (long)Math.Floor(Math.Max(0, seconds) / ffmpeg.av_q2d(_tb) + 0.5 * 1e-6);
+        long target = TargetPts(seconds);
         long seekAhead = (long)(2.0 / ffmpeg.av_q2d(_tb));
 
-        bool covers = _hasFrame && target >= _curPts && target < _curPts + _curDur;
+        bool covers = _hasFrame && !_skippedFrames && target >= _curPts && target < _curPts + _curDur;
         if (!covers)
         {
-            if (!_hasFrame || target < _curPts || target > _curPts + seekAhead)
+            if (!_hasFrame || _skippedFrames || target < _curPts || target > _curPts + seekAhead)
                 Seek(target);
             while (!(_hasFrame && target < _curPts + _curDur))
             {
@@ -292,6 +355,9 @@ public sealed unsafe class VideoReader : IDisposable
         return _nativeValid ? (IntPtr)_native[_nativeIndex] : IntPtr.Zero;
     }
 
+    /// <summary>読んだが、映像のストリームでなかったので捨てたパケットの数 (計測・テスト用)。</summary>
+    internal int OtherStreamPackets { get; private set; }
+
     /// <summary>シークした回数 (計測・テスト用)。</summary>
     public int SeekCount { get; private set; }
 
@@ -302,7 +368,7 @@ public sealed unsafe class VideoReader : IDisposable
         if (_reopenToSeek) Reopen();
         else ffmpeg.av_seek_frame(_fmt, _stream, target, ffmpeg.AVSEEK_FLAG_BACKWARD);
         ffmpeg.avcodec_flush_buffers(_dec);
-        _hasFrame = false; _draining = false; _eof = false;
+        _hasFrame = false; _draining = false; _eof = false; _skippedFrames = false;
     }
 
     /// <summary>ファイルを開き直して、読む位置を先頭に戻す (デコーダはそのまま使う)。</summary>
@@ -315,6 +381,7 @@ public sealed unsafe class VideoReader : IDisposable
         FFmpegLoader.Check(ffmpeg.avformat_open_input(&fmt, Path, null, null), "ファイルを開けません");
         _fmt = fmt;
         FFmpegLoader.Check(ffmpeg.avformat_find_stream_info(_fmt, null), "ストリーム情報を取得できません");
+        FFmpegLoader.DiscardOtherStreams(_fmt, _stream);
     }
 
     private bool DecodeNext()
@@ -349,6 +416,7 @@ public sealed unsafe class VideoReader : IDisposable
                 continue;
             }
             if (_pkt->stream_index == _stream) ffmpeg.avcodec_send_packet(_dec, _pkt);
+            else OtherStreamPackets++;
             ffmpeg.av_packet_unref(_pkt);
         }
     }

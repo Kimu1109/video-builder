@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Avalonia.Controls;
 using Avalonia.Threading;
 using SkiaSharp;
 using VideoBuilder.Core;
@@ -298,7 +299,7 @@ public sealed class PreviewService : IDisposable
         session.ProjectChanged += () => { _snapshot = null; RequestSoon(); };
         session.FrameChanged += Request;
         session.SceneChanged += () => { _snapshot = null; Request(); };
-        _timer = new DispatcherTimer(TimeSpan.FromMilliseconds(8), DispatcherPriority.Render, (_, _) => Tick());
+        _timer = new DispatcherTimer(PollInterval, DispatcherPriority.Render, (_, _) => Tick());
         _thread = new Thread(RenderLoop) { IsBackground = true, Name = "Render" };
         _thread.Start();
         Request();
@@ -612,17 +613,72 @@ public sealed class PreviewService : IDisposable
         Current();
         _clock.Restart();
         IsPlaying = true;
-        _timer.Start();
+        StartClock();
         PlayStateChanged?.Invoke();
     }
 
     private int _audioRate;
+
+    // ---------------- 再生の時計 ----------------
+    //
+    // 再生中に今のフレームを進めるきっかけ。以前は 8ms ごとのタイマー (1 秒に 125 回 UI スレッドを起こす) だけで、
+    // 画面の更新の間隔とずれるため、フレームの間隔が不揃いになることがあった。
+    // 今は画面の更新 (TopLevel.RequestAnimationFrame) ごとに進める。画面が更新されないとき (最小化など) にも
+    // 末尾で止まれるよう、タイマーも 100ms ごとに残す。画面がない (テストなど) ときは、以前どおり 8ms ごと。
+    // 環境変数 VIDEO_BUILDER_PLAYBACK_TIMER=1 で、以前どおりタイマーだけで進める。
+
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(8);
+    private static readonly TimeSpan FallbackInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly bool TimerOnly = Environment.GetEnvironmentVariable("VIDEO_BUILDER_PLAYBACK_TIMER") == "1";
+    private TopLevel? _frameClock;
+    private TopLevel? _frameRequestedOn;
+
+    /// <summary>画面の更新ごとに再生を進めるための、プレビューを表示しているウィンドウ (UI スレッドで設定する)。</summary>
+    public TopLevel? FrameClock
+    {
+        get => _frameClock;
+        set
+        {
+            if (ReferenceEquals(_frameClock, value)) return;
+            _frameClock = value;
+            if (IsPlaying) StartClock();
+        }
+    }
+
+    /// <summary>画面の更新ごとに進めた回数 (テスト用)。</summary>
+    internal long AnimationFrameTicks { get; private set; }
+
+    private bool UsesAnimationFrames => !TimerOnly && _frameClock != null;
+
+    private void StartClock()
+    {
+        _timer.Interval = UsesAnimationFrames ? FallbackInterval : PollInterval;
+        _timer.Start();
+        RequestAnimationTick();
+    }
+
+    private void RequestAnimationTick()
+    {
+        var clock = _frameClock;
+        if (!IsPlaying || TimerOnly || clock == null || ReferenceEquals(_frameRequestedOn, clock)) return;
+        _frameRequestedOn = clock;
+        clock.RequestAnimationFrame(_ =>
+        {
+            if (!ReferenceEquals(_frameRequestedOn, clock)) return;   // 別のウィンドウに移った: そちらで頼み直している
+            _frameRequestedOn = null;
+            if (!IsPlaying) return;
+            AnimationFrameTicks++;
+            Tick();
+            RequestAnimationTick();
+        });
+    }
 
     public void Stop()
     {
         if (!IsPlaying) return;
         IsPlaying = false;
         _timer.Stop();
+        _frameRequestedOn = null;
         _audio?.Stop();
         PlayStateChanged?.Invoke();
     }

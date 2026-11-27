@@ -63,12 +63,15 @@ public sealed class PreviewView : Control
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
+        // 再生は、このプレビューを表示している画面の更新ごとに進める
+        Svc.Preview.FrameClock = TopLevel.GetTopLevel(this);
         _ = AttachSharedAsync();
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnDetachedFromVisualTree(e);
+        if (ReferenceEquals(Svc.Preview.FrameClock, e.RootVisual as TopLevel)) Svc.Preview.FrameClock = null;
         // 別のウィンドウへ移るときなど: 共有をやめる (後片付けは描画のスレッドが行う)
         if (_shared != null)
         {

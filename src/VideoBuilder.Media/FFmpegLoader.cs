@@ -80,6 +80,18 @@ public static unsafe class FFmpegLoader
         return Marshal.PtrToStringAnsi((IntPtr)buf) ?? code.ToString();
     }
 
+    /// <summary>
+    /// keep 以外のストリームを読まない設定にする。動画ファイルの音声だけ (または映像だけ) を読むとき、
+    /// もう一方のパケットを読み込んで捨てる無駄がなくなる (MP4・MKV などは、その部分のデータを読み飛ばす)。
+    /// 環境変数 VIDEO_BUILDER_DISCARD_STREAMS=0 で、以前どおりすべて読む。
+    /// </summary>
+    internal static void DiscardOtherStreams(AVFormatContext* fmt, int keep)
+    {
+        if (fmt == null || Environment.GetEnvironmentVariable("VIDEO_BUILDER_DISCARD_STREAMS") == "0") return;
+        for (int i = 0; i < fmt->nb_streams; i++)
+            if (i != keep) fmt->streams[i]->discard = AVDiscard.AVDISCARD_ALL;
+    }
+
     internal static void Check(int code, string what)
     {
         if (code < 0) throw new InvalidOperationException($"{what}: {ErrorText(code)}");

@@ -40,6 +40,7 @@ public sealed unsafe class AudioReader : IDisposable
             AVCodec* codec = null;
             _stream = ffmpeg.av_find_best_stream(_fmt, AVMediaType.AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
             FFmpegLoader.Check(_stream, "音声ストリームがありません");
+            FFmpegLoader.DiscardOtherStreams(_fmt, _stream);
             var st = _fmt->streams[_stream];
             _dec = ffmpeg.avcodec_alloc_context3(codec);
             FFmpegLoader.Check(ffmpeg.avcodec_parameters_to_context(_dec, st->codecpar), "デコーダの設定に失敗");
@@ -95,6 +96,9 @@ public sealed unsafe class AudioReader : IDisposable
             .CopyTo(dst.Slice((int)(from - startSample) * Channels));
     }
 
+    /// <summary>読んだが、音声のストリームでなかったので捨てたパケットの数 (計測・テスト用)。</summary>
+    internal int OtherStreamPackets { get; private set; }
+
     private void DropFront(int frames)
     {
         Array.Copy(_buf, frames * Channels, _buf, 0, (_bufFrames - frames) * Channels);
@@ -122,6 +126,7 @@ public sealed unsafe class AudioReader : IDisposable
             ret = ffmpeg.av_read_frame(_fmt, _pkt);
             if (ret < 0) { ffmpeg.avcodec_send_packet(_dec, null); _draining = true; continue; }
             if (_pkt->stream_index == _stream) ffmpeg.avcodec_send_packet(_dec, _pkt);
+            else OtherStreamPackets++;
             ffmpeg.av_packet_unref(_pkt);
         }
     }

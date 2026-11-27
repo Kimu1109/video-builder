@@ -359,6 +359,27 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public async Task Playback_is_driven_by_the_screen_updates_of_the_preview_window()
+    {
+        var w = Open();
+        var s = Svc.Session;
+        // プレビューを表示しているウィンドウが、再生の時計になる
+        Assert.Same(TopLevel.GetTopLevel(w.PreviewArea.Preview), Svc.Preview.FrameClock);
+        s.AddObject(EffectRegistry.Shape, 0, 0, 12);
+        long ticks = Svc.Preview.AnimationFrameTicks;
+        Svc.Preview.Play();
+        for (int i = 0; i < 150 && Svc.Preview.IsPlaying; i++)
+        {
+            await Task.Delay(10);
+            Avalonia.Headless.AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+            Pump();
+        }
+        Assert.False(Svc.Preview.IsPlaying);
+        Assert.Equal(11, s.CurrentFrame);
+        Assert.True(Svc.Preview.AnimationFrameTicks > ticks, "画面の更新で進んでいない");
+    }
+
+    [AvaloniaFact]
     public async Task Demo_project_renders_fast_enough_to_report()
     {
         Open();
@@ -1905,6 +1926,38 @@ public class UiTests
         Assert.Equal(0, VideoBuilder.App.Platform.ScreenGpu.IndexOf(list, nvidia with { Name = "AMD Radeon RX 7600", Luid = 0x3333 }));
     }
 
+
+    [Fact]
+    public void Thumbnails_are_kept_on_disk()
+    {
+        if (!VideoBuilder.Media.FFmpegLoader.EnsureLoaded()) return;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-thumb-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var clip = Path.Combine(dir, "clip.mp4");
+            using (var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ffmpeg",
+                $"-y -loglevel error -f lavfi -i testsrc=size=320x240:rate=30:duration=2 -c:v libx264 -pix_fmt yuv420p -g 15 \"{clip}\"")))
+            {
+                proc!.WaitForExit(30000);
+                if (proc.ExitCode != 0) return;
+            }
+            var cacheRoot = Path.Combine(AppPaths.CacheDir, "thumbnail");
+            int before = Directory.Exists(cacheRoot) ? Directory.GetFiles(cacheRoot, "*.bgra", SearchOption.AllDirectories).Length : 0;
+            var first = ThumbnailCache.LoadOrCreate(clip, 1.0, true)!.Value;
+            Assert.Equal(ThumbnailCache.Height, first.H);
+            Assert.Equal(first.W * first.H * 4, first.Pixels.Length);
+            Assert.Equal(before + 1, Directory.GetFiles(cacheRoot, "*.bgra", SearchOption.AllDirectories).Length);
+            // 2 回目は保存したものを読む (同じ絵)。元のファイルが変わったら作り直す
+            var again = ThumbnailCache.LoadOrCreate(clip, 1.0, true)!.Value;
+            Assert.Equal(first.Pixels, again.Pixels);
+            Assert.Equal(before + 1, Directory.GetFiles(cacheRoot, "*.bgra", SearchOption.AllDirectories).Length);
+            File.SetLastWriteTimeUtc(clip, DateTime.UtcNow.AddMinutes(1));
+            ThumbnailCache.LoadOrCreate(clip, 1.0, true);
+            Assert.Equal(before + 2, Directory.GetFiles(cacheRoot, "*.bgra", SearchOption.AllDirectories).Length);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
 
     [Fact]
     public void Waveform_is_reported_part_by_part_while_it_is_computed()

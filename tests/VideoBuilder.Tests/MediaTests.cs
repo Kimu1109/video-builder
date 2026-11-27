@@ -74,6 +74,55 @@ public class MediaTests : IDisposable
     }
 
     [Fact]
+    public void Readers_skip_the_streams_they_do_not_decode()
+    {
+        if (!_ready) return;
+        // 映像と音声の入った動画から音声だけを読むとき、映像のパケットは読み込まない (設計書 22.59)
+        using (var a = new AudioReader(Clip, 48000))
+        {
+            var buf = new float[48000 * 2];
+            a.Read(0, buf);
+            a.Read(48000, buf);
+            Assert.Contains(buf, s => Math.Abs(s) > 0.01f);
+            Assert.Equal(0, a.OtherStreamPackets);
+        }
+        using (var v = new VideoReader(Clip))
+        {
+            Assert.NotNull(v.GetFrame(1.5));
+            Assert.Equal(0, v.OtherStreamPackets);
+        }
+    }
+
+    [Fact]
+    public void Thumbnail_frames_use_a_nearby_keyframe_and_leave_later_frames_exact()
+    {
+        if (!_ready) return;
+        // キーフレームは 0.5 秒 (15 フレーム) ごと。testsrc はフレームごとに絵が変わる
+        // 比べる相手も同じ設定 (ソフトウェア・参照されないフレームのデブロッキングを省く) で開く。
+        // 省いた分の画素の違いは CPU の種類で出たり出なかったりするので、設定をそろえて、読み方の違いだけを見る
+        byte[] Exact(double t) { using var r = new VideoReader(Clip, absoluteTime: false, allowHardware: false); return r.GetFrame(t)!.ToArray(); }
+        using var thumbs = new VideoReader(Clip, absoluteTime: false, allowHardware: false);
+        Assert.False(thumbs.IsHardware);
+
+        // 0.9 秒の 1 秒以内前にキーフレーム (0.5 秒) がある → キーフレームをそのまま使う
+        var near = thumbs.GetFrameNear(0.9, 1.0)!.ToArray();
+        Assert.Equal(1, thumbs.KeyframeShortcuts);
+        Assert.Equal(Exact(0.5), near);
+        // 同じキーフレームで足りる時刻は、デコードし直さない
+        Assert.Equal(near, thumbs.GetFrameNear(0.7, 1.0)!.ToArray());
+        Assert.Equal(1, thumbs.KeyframeShortcuts);
+
+        // キーフレーム (1.0 秒) が許す差 (0.1 秒) より前 → ふつうにデコードして、その時刻のフレーム
+        Assert.Equal(Exact(1.2), thumbs.GetFrameNear(1.2, 0.1)!.ToArray());
+        Assert.Equal(1, thumbs.KeyframeShortcuts);
+
+        // キーフレームだけをデコードしたあとでも、続けて読むフレームは正しい (参照の欠けたまま続きを読まない)
+        thumbs.GetFrameNear(0.6, 1.0);
+        Assert.Equal(Exact(0.8), thumbs.GetFrame(0.8)!.ToArray());
+        Assert.Equal(Exact(1.6), thumbs.GetFrame(1.6)!.ToArray());
+    }
+
+    [Fact]
     public void Audio_is_resampled_and_seekable()
     {
         if (!_ready) return;
