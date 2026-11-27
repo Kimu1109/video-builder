@@ -128,6 +128,7 @@ internal static class TranslationsEn
         ("プリセットから選ぶ", "Choose a preset"),
         ("プレビューの拡大率", "Preview zoom"),
         ("プレビュー品質", "Preview quality"),
+        ("再生が間に合わないときは、再生中だけ解像度を下げる (プレビュー品質が自動のとき)", "Lower the resolution while playing if playback can't keep up (when preview quality is Auto)"),
         ("プロジェクトを開く", "Open project"),
         ("プロジェクト設定", "Project settings"),
         ("プロジェクト設定...", "Project settings..."),

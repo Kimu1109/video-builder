@@ -730,62 +730,113 @@ public static partial class Effects
             {
                 uint* sp = (uint*)src, dp = (uint*)dst;
                 int stride = rb / 4;
-                var lum = new float[w * h];
-                for (int y = 0; y < h; y++)
+                // 作業用の配列は使い回す (1080p で 8MB の配列 3 つを、毎フレーム確保しない)
+                var pool = System.Buffers.ArrayPool<float>.Shared;
+                var lum = pool.Rent(w * h);
+                var inv = pool.Rent(w * h);
+                var tmp = pool.Rent(w * h);
+                try
+                {
+                    PixelOps.ForBands(w, h, (y0, y1) =>
+                    {
+                        for (int y = y0; y < y1; y++)
+                            for (int x = 0; x < w; x++)
+                            {
+                                uint c = sp[(long)y * stride + x];
+                                uint al = c >> 24;
+                                float l = al == 0 ? 1 : (0.299f * ((c >> 16) & 0xFF) + 0.587f * ((c >> 8) & 0xFF) + 0.114f * (c & 0xFF)) / al;
+                                lum[y * w + x] = l;
+                                inv[y * w + x] = 1 - l;
+                            }
+                    });
+                    // 反転した明るさを、箱型のぼかし 3 回 (ほぼガウス) でぼかす
+                    for (int pass = 0; pass < 3; pass++) { BoxBlur(inv, tmp, w, h, radius, true); BoxBlur(tmp, inv, w, h, radius, false); }
+                    Dodge(sp, dp, stride, w, h, lum, inv, strength, color, paper);
+                }
+                finally { pool.Return(lum); pool.Return(inv); pool.Return(tmp); }
+                return dst;
+            });
+        }
+
+        private static unsafe void Dodge(uint* sp, uint* dp, int stride, int w, int h, float[] lum, float[] inv, float strength, bool color, SKColor paper)
+        {
+            PixelOps.ForBands(w, h, (y0, y1) =>
+            {
+                for (int y = y0; y < y1; y++)
+                {
+                    uint* row = dp + (long)y * stride;
                     for (int x = 0; x < w; x++)
                     {
-                        uint c = sp[(long)y * stride + x];
-                        uint al = c >> 24;
-                        lum[y * w + x] = al == 0 ? 1 : (0.299f * ((c >> 16) & 0xFF) + 0.587f * ((c >> 8) & 0xFF) + 0.114f * (c & 0xFF)) / al;
-                    }
-                // 反転した明るさを、箱型のぼかし 3 回 (ほぼガウス) でぼかす
-                var inv = new float[w * h];
-                for (int i = 0; i < inv.Length; i++) inv[i] = 1 - lum[i];
-                var tmp = new float[w * h];
-                for (int pass = 0; pass < 3; pass++) { BoxBlur(inv, tmp, w, h, radius, true); BoxBlur(tmp, inv, w, h, radius, false); }
-                PixelOps.ForBands(w, h, (y0, y1) =>
-                {
-                    for (int y = y0; y < y1; y++)
-                    {
-                        uint* row = dp + (long)y * stride;
-                        for (int x = 0; x < w; x++)
+                        uint orig = sp[(long)y * stride + x];
+                        uint al = orig >> 24;
+                        if (al == 0) { row[x] = 0; continue; }
+                        int i = y * w + x;
+                        float v = Math.Min(1, lum[i] / Math.Max(0.02f, 1 - inv[i]));   // 覆い焼き
+                        v = MathF.Pow(v, 1 + strength * 2);                            // 線を濃く
+                        float r = v * paper.Red / 255f, g = v * paper.Green / 255f, b = v * paper.Blue / 255f;
+                        if (color)
                         {
-                            uint orig = sp[(long)y * stride + x];
-                            uint al = orig >> 24;
-                            if (al == 0) { row[x] = 0; continue; }
-                            int i = y * w + x;
-                            float v = Math.Min(1, lum[i] / Math.Max(0.02f, 1 - inv[i]));   // 覆い焼き
-                            v = MathF.Pow(v, 1 + strength * 2);                            // 線を濃く
-                            float r = v * paper.Red / 255f, g = v * paper.Green / 255f, b = v * paper.Blue / 255f;
-                            if (color)
-                            {
-                                float k = 1f / al;
-                                r *= 0.55f + 0.45f * ((orig >> 16) & 0xFF) * k; g *= 0.55f + 0.45f * ((orig >> 8) & 0xFF) * k; b *= 0.55f + 0.45f * (orig & 0xFF) * k;
-                            }
-                            row[x] = al << 24 | (uint)(Math.Clamp(r, 0, 1) * al) << 16 | (uint)(Math.Clamp(g, 0, 1) * al) << 8 | (uint)(Math.Clamp(b, 0, 1) * al);
+                            float k = 1f / al;
+                            r *= 0.55f + 0.45f * ((orig >> 16) & 0xFF) * k; g *= 0.55f + 0.45f * ((orig >> 8) & 0xFF) * k; b *= 0.55f + 0.45f * (orig & 0xFF) * k;
                         }
+                        row[x] = al << 24 | (uint)(Math.Clamp(r, 0, 1) * al) << 16 | (uint)(Math.Clamp(g, 0, 1) * al) << 8 | (uint)(Math.Clamp(b, 0, 1) * al);
                     }
-                });
-                return dst;
+                }
             });
         }
     }
 
-    /// <summary>箱型のぼかし (横か縦の 1 方向)。</summary>
+    /// <summary>
+    /// 箱型のぼかし (横か縦の 1 方向)。src・dst は w*h 以上の長さ (使い回しの配列なので長いことがある)。
+    /// 縦は、列ごとに縦にたどるとメモリを飛び飛びに読んで遅いので、列の帯ごとに、行の順に読みながら列ごとの合計を足していく
+    /// (足す順番は列ごとにたどるのと同じなので、結果も同じ)。
+    /// </summary>
     private static void BoxBlur(float[] src, float[] dst, int w, int h, int r, bool horizontal)
     {
-        int outer = horizontal ? h : w, inner = horizontal ? w : h;
-        Parallel.For(0, outer, o =>
+        float k = 1f / (2 * r + 1);
+        if (horizontal)
         {
-            float sum = 0;
-            int Idx(int i) => horizontal ? o * w + Math.Clamp(i, 0, w - 1) : Math.Clamp(i, 0, h - 1) * w + o;
-            for (int i = -r; i <= r; i++) sum += src[Idx(i)];
-            float k = 1f / (2 * r + 1);
-            for (int i = 0; i < inner; i++)
+            PixelOps.ForBands(w, h, (y0, y1) =>
             {
-                dst[horizontal ? o * w + i : i * w + o] = sum * k;
-                sum += src[Idx(i + r + 1)] - src[Idx(i - r)];
+                for (int y = y0; y < y1; y++)
+                {
+                    int row = y * w;
+                    float sum = 0;
+                    for (int i = -r; i <= r; i++) sum += src[row + Math.Clamp(i, 0, w - 1)];
+                    for (int i = 0; i < w; i++)
+                    {
+                        dst[row + i] = sum * k;
+                        sum += src[row + Math.Min(i + r + 1, w - 1)] - src[row + Math.Max(i - r, 0)];
+                    }
+                }
+            });
+            return;
+        }
+        // 列を帯に分ける (帯の中では、列ごとの合計を 1 行ずつ進める)
+        int bands = (long)w * h < 64 * 1024 ? 1 : Math.Clamp(w / 64, 1, Environment.ProcessorCount * 2);
+        Parallel.For(0, bands, b =>
+        {
+            int x0 = (int)((long)w * b / bands), x1 = (int)((long)w * (b + 1) / bands), n = x1 - x0;
+            var sums = System.Buffers.ArrayPool<float>.Shared.Rent(n);
+            try
+            {
+                Array.Clear(sums, 0, n);
+                for (int i = -r; i <= r; i++)
+                {
+                    int row = Math.Clamp(i, 0, h - 1) * w + x0;
+                    for (int j = 0; j < n; j++) sums[j] += src[row + j];
+                }
+                for (int i = 0; i < h; i++)
+                {
+                    int row = i * w + x0, add = Math.Min(i + r + 1, h - 1) * w + x0, sub = Math.Max(i - r, 0) * w + x0;
+                    for (int j = 0; j < n; j++)
+                    {
+                        dst[row + j] = sums[j] * k;
+                        sums[j] += src[add + j] - src[sub + j];
+                    }
+                }
             }
+            finally { System.Buffers.ArrayPool<float>.Shared.Return(sums); }
         });
     }
 
