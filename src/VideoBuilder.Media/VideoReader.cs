@@ -65,6 +65,9 @@ public sealed unsafe class VideoReader : IDisposable
     private readonly bool[] _slotYuv = new bool[2];
     private SwsContext* _swsYuv;      // YUV のまま縮める
     private SwsContext* _swsLate;     // 持っている YUV を、あとから BGRA にする (先読みと同時に使うので _sws とは別)
+    // AcceptHardwareFrames のとき: 置き場ごとに、メモリへ写さずに持っている GPU 上のフレーム (null ならなし)
+    private readonly AVFrame*[] _hw = new AVFrame*[2];
+    private SwsContext* _swsMaterialize;   // GPU 上のフレームをあとからメモリへ写して縮める (描画のスレッドで使うので _swsYuv とは別)
 
     public string Path { get; }
     public int Width { get; }
@@ -107,6 +110,15 @@ public sealed unsafe class VideoReader : IDisposable
     /// このとき GetFramePointer が返すポインタは目印で、中身は BGRA ではない。TryGetYuv で面を受け取るか、EnsureBgra で BGRA にすること。
     /// </summary>
     public bool PreferYuv { get; set; }
+
+    /// <summary>
+    /// PreferYuv のとき、ハードウェアデコードしたフレームのうち、この種類のもの (8 ビットの NV12) は、メモリへ写さずに GPU 上のまま持つ
+    /// (設計書 22.58)。TryTakeHardwareFrame で受け取る。受け取らずに TryGetYuv・EnsureBgra を呼べば、そこでメモリへ写す。
+    /// </summary>
+    public HardwareFrameKinds AcceptHardwareFrames { get; set; }
+
+    /// <summary>メモリへ写さずに GPU 上のまま持ったフレームの数 (計測・テスト用)。</summary>
+    public long HardwareFramesKept { get; private set; }
 
     /// <summary>OutputDivisor を n にしたときの、取り出すフレームの大きさ。</summary>
     public (int Width, int Height) OutputSizeFor(int divisor)
@@ -201,7 +213,8 @@ public sealed unsafe class VideoReader : IDisposable
             DecoderName = "TEST";
             return true;
         }
-        var ctx = HardwareDecoding.Open(_codec, st, out var format, out var name, out var error);
+        // GPU 上のフレームを置き場 (2 つ) と GPU での変換の途中で持つので、デコーダの置き場を多めに用意する
+        var ctx = HardwareDecoding.Open(_codec, st, out var format, out var name, out var error, extraFrames: 4);
         if (ctx == null) { HardwareError = error; return false; }
         _dec = ctx;
         _hardware = true;
@@ -217,6 +230,7 @@ public sealed unsafe class VideoReader : IDisposable
     private void FallBackToSoftware(string reason)
     {
         HardwareError = reason;
+        for (int i = 0; i < 2; i++) ReleaseHardware(i);
         if (_dec != null) { var d = _dec; ffmpeg.avcodec_free_context(&d); _dec = null; }
         OpenSoftwareDecoder(_fmt->streams[_stream]);
         _hasFrame = false; _converted = false; _draining = false; _eof = false;
@@ -352,6 +366,7 @@ public sealed unsafe class VideoReader : IDisposable
             }
             if ((AVPixelFormat)_frame->format == _hwFormat && _hwFormat != AVPixelFormat.AV_PIX_FMT_NONE)
             {
+                if (KeepHardware(_frame)) return;
                 // GPU 上のフレームをメモリへ写す (変換に使うのは表示するフレームだけ。シーク途中のフレームは写さない)
                 if (_swFrame == null) _swFrame = ffmpeg.av_frame_alloc();
                 ffmpeg.av_frame_unref(_swFrame);
@@ -364,20 +379,11 @@ public sealed unsafe class VideoReader : IDisposable
         if (w <= 0 || h <= 0) return;
         var (ow, oh) = OutputSizeFor(_divisor);
         // 置き場は元の大きさで確保する (縮める大きさが変わっても確保し直さない)
-        int capacity = Width * Height * 4;
-        if (_native[0] == null || _nativeCapacity != capacity)
-        {
-            for (int i = 0; i < 2; i++)
-            {
-                if (_native[i] != null) System.Runtime.InteropServices.NativeMemory.Free(_native[i]);
-                _native[i] = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc((nuint)capacity);
-            }
-            _nativeCapacity = capacity;
-            _nativeValid = false;
-        }
+        EnsureNative();
         // 直前に返したフレームを残すため、もう一方の置き場に変換する
         // (押さえられた置き場があれば、何回変換してもそちらには書かない)
         int index = _pinned >= 0 ? _pinned ^ 1 : _nativeValid ? _nativeIndex ^ 1 : _nativeIndex;
+        ReleaseHardware(index);
         if (PreferYuv && !HasAlpha && StoreYuv(index, source, ow, oh))
         {
             _nativeIndex = index;
@@ -453,7 +459,9 @@ public sealed unsafe class VideoReader : IDisposable
     /// source を、置き場 index の YUV のフレームとして持つ。元の大きさならデコーダのフレームを参照するだけ (複製しない)。
     /// 縮めるときは、YUV のまま縮める。持てない形式なら false (BGRA に変換する)。
     /// </summary>
-    private bool StoreYuv(int index, AVFrame* source, int ow, int oh)
+    private bool StoreYuv(int index, AVFrame* source, int ow, int oh) => StoreYuv(index, source, ow, oh, ref _swsYuv);
+
+    private bool StoreYuv(int index, AVFrame* source, int ow, int oh, ref SwsContext* scaler)
     {
         var format = (AVPixelFormat)source->format;
         if (YuvFormatOf(format) is not { } layout) return false;
@@ -480,13 +488,94 @@ public sealed unsafe class VideoReader : IDisposable
             }
             else
             {
-                _swsYuv = ffmpeg.sws_getCachedContext(_swsYuv, w, h, format, ow, oh, format, (int)SwsFlags.SWS_BILINEAR, null, null, null);
-                if (_swsYuv == null) { ffmpeg.av_frame_unref(dst); return false; }
-                ffmpeg.sws_scale(_swsYuv, source->data, source->linesize, 0, h, dst->data, dst->linesize);
+                scaler = ffmpeg.sws_getCachedContext(scaler, w, h, format, ow, oh, format, (int)SwsFlags.SWS_BILINEAR, null, null, null);
+                if (scaler == null) { ffmpeg.av_frame_unref(dst); return false; }
+                ffmpeg.sws_scale(scaler, source->data, source->linesize, 0, h, dst->data, dst->linesize);
             }
         }
         _slotYuv[index] = true;
         return true;
+    }
+
+    /// <summary>
+    /// GPU 上のフレームを、メモリへ写さずに置き場に持つ (AcceptHardwareFrames のとき)。持てなければ false (これまでどおり写す)。
+    /// </summary>
+    private bool KeepHardware(AVFrame* frame)
+    {
+        if (!PreferYuv || HasAlpha || AcceptHardwareFrames == HardwareFrameKinds.None) return false;
+        var kind = HardwareFrame.KindOf(frame);
+        if (kind == HardwareFrameKinds.None || (AcceptHardwareFrames & kind) == 0) return false;
+        var (ow, oh) = OutputSizeFor(_divisor);
+        // U・V を間引いているので、奇数の大きさは CPU の変換と合わせられない (StoreYuv と同じ)
+        if ((ow & 1) != 0 || (oh & 1) != 0 || (frame->width & 1) != 0 || (frame->height & 1) != 0) return false;
+        EnsureNative();
+        int index = _pinned >= 0 ? _pinned ^ 1 : _nativeValid ? _nativeIndex ^ 1 : _nativeIndex;
+        ReleaseHardware(index);
+        ReleaseYuv(index);
+        var copy = ffmpeg.av_frame_clone(frame);
+        if (copy == null) return false;
+        _hw[index] = copy;
+        _nativeIndex = index;
+        FrameWidth = ow; FrameHeight = oh;
+        _converted = true;
+        _nativeValid = true;
+        _convertedCount++;
+        HardwareFramesKept++;
+        return true;
+    }
+
+    private void ReleaseHardware(int index)
+    {
+        if (_hw[index] != null) { var f = _hw[index]; ffmpeg.av_frame_free(&f); _hw[index] = null; }
+    }
+
+    /// <summary>置き場 (元の大きさの BGRA が入る大きさ) を用意する。</summary>
+    private void EnsureNative()
+    {
+        int capacity = Width * Height * 4;
+        if (_native[0] != null && _nativeCapacity == capacity) return;
+        for (int i = 0; i < 2; i++)
+        {
+            if (_native[i] != null) System.Runtime.InteropServices.NativeMemory.Free(_native[i]);
+            _native[i] = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc((nuint)capacity);
+        }
+        _nativeCapacity = capacity;
+        _nativeValid = false;
+    }
+
+    /// <summary>
+    /// GetFramePointer が返したフレームを GPU 上のまま持っていれば、その参照を返す (呼び出し側が Dispose する)。
+    /// 置き場の中身はそのまま残るので、受け取ったあとで TryGetYuv・EnsureBgra を呼んでもよい (GPU で使えなかったとき)。
+    /// </summary>
+    public HardwareFrame? TryTakeHardwareFrame(IntPtr frame)
+    {
+        int i = SlotOf(frame);
+        if (i < 0 || _hw[i] == null) return null;
+        var kind = HardwareFrame.KindOf(_hw[i]);
+        var copy = ffmpeg.av_frame_clone(_hw[i]);
+        return copy == null ? null : new HardwareFrame(copy, kind);
+    }
+
+    /// <summary>GPU 上のまま持っている置き場の中身を、メモリへ写す (YUV で持つ。できなければ BGRA にする)。</summary>
+    private bool MaterializeHardware(int i)
+    {
+        if (_hw[i] == null) return true;
+        var sw = ffmpeg.av_frame_alloc();
+        try
+        {
+            if (ffmpeg.av_hwframe_transfer_data(sw, _hw[i], 0) < 0) return false;
+            var (ow, oh) = (FrameWidth, FrameHeight);
+            if (StoreYuv(i, sw, ow, oh, ref _swsMaterialize)) { ReleaseHardware(i); return true; }
+            _swsLate = ffmpeg.sws_getCachedContext(_swsLate, sw->width, sw->height, (AVPixelFormat)sw->format, ow, oh,
+                AVPixelFormat.AV_PIX_FMT_BGRA, (int)SwsFlags.SWS_BILINEAR, null, null, null);
+            if (_swsLate == null) return false;
+            var dst = new byte*[4] { _native[i], null, null, null };
+            var stride = new int[4] { ow * 4, 0, 0, 0 };
+            ffmpeg.sws_scale(_swsLate, sw->data, sw->linesize, 0, sw->height, dst, stride);
+            ReleaseHardware(i);
+            return true;
+        }
+        finally { ffmpeg.av_frame_free(&sw); }
     }
 
     private void ReleaseYuv(int index)
@@ -512,7 +601,9 @@ public sealed unsafe class VideoReader : IDisposable
     {
         planes = default;
         int i = SlotOf(frame);
-        if (i < 0 || !_slotYuv[i]) return false;
+        if (i < 0) return false;
+        if (_hw[i] != null && !MaterializeHardware(i)) return false;
+        if (!_slotYuv[i]) return false;
         var f = _yuv[i];
         var layout = YuvFormatOf((AVPixelFormat)f->format)!.Value;
         planes = new YuvPlanes(f->width, f->height, layout.Layout, layout.ShiftX, layout.ShiftY, layout.Full,
@@ -528,6 +619,7 @@ public sealed unsafe class VideoReader : IDisposable
     public IntPtr EnsureBgra(IntPtr frame)
     {
         int i = SlotOf(frame);
+        if (i >= 0 && _hw[i] != null && !MaterializeHardware(i)) return IntPtr.Zero;
         if (i < 0 || !_slotYuv[i]) return frame;
         var f = _yuv[i];
         _swsLate = ffmpeg.sws_getCachedContext(_swsLate, f->width, f->height, (AVPixelFormat)f->format, f->width, f->height,
@@ -543,9 +635,13 @@ public sealed unsafe class VideoReader : IDisposable
     {
         if (_frame != null) { var f = _frame; ffmpeg.av_frame_free(&f); _frame = null; }
         for (int i = 0; i < 2; i++)
+        {
+            ReleaseHardware(i);
             if (_yuv[i] != null) { var f = _yuv[i]; ffmpeg.av_frame_free(&f); _yuv[i] = null; }
+        }
         if (_swsYuv != null) { ffmpeg.sws_freeContext(_swsYuv); _swsYuv = null; }
         if (_swsLate != null) { ffmpeg.sws_freeContext(_swsLate); _swsLate = null; }
+        if (_swsMaterialize != null) { ffmpeg.sws_freeContext(_swsMaterialize); _swsMaterialize = null; }
         if (_swFrame != null) { var f = _swFrame; ffmpeg.av_frame_free(&f); _swFrame = null; }
         if (_pkt != null) { var p = _pkt; ffmpeg.av_packet_free(&p); _pkt = null; }
         if (_sws != null) { ffmpeg.sws_freeContext(_sws); _sws = null; }

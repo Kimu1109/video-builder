@@ -176,8 +176,16 @@ public static class Exporter
         AsyncReadback? readback = null;
         if (gpu != null && hasVideo)
         {
-            readback = AsyncReadback.Create(gpu, w, h, out var readbackError);
+            // エンコーダの形式 (NV12・YUV420P) にできれば、GPU で変換してから読み戻す (読み戻す量と CPU の色変換が減る)
+            readback = AsyncReadback.Create(gpu, w, h, out var readbackError, writer.GpuConversionTarget);
             if (readback == null && stats != null) stats.AsyncReadbackError = readbackError;
+            if (stats != null) stats.GpuYuvError = readback == null ? readbackError : readback.YuvError;
+            // VAAPI のエンコードなら、エンコーダのフレームへ直接描く (読み戻さない)
+            if (readback != null && writer.AcceptsHardwareFrames)
+            {
+                readback.EnableDirect(() => (writer.AllocateHardwareFrame(out var e), e));
+                if (stats != null) stats.VaapiDirectError = readback.DirectError;
+            }
         }
         // 読み戻しの途中のフレーム (描いた順)
         var inFlight = new Queue<int>();
@@ -226,10 +234,14 @@ public static class Exporter
             int frame = inFlight.Dequeue();
             IntPtr prepared = IntPtr.Zero;
             watch.Restart();
-            bool done = readback!.Finish((pixels, rowBytes) =>
+            var yuv = readback!.Yuv;
+            bool direct = false;
+            bool done = readback.Finish((pixels, rowBytes) =>
             {
+                if (yuv != null) { prepared = writer.PrepareVideoFrame(yuv.PlanesAt(pixels)); return; }
                 unsafe { prepared = writer.PrepareVideoFrame(new ReadOnlySpan<byte>((void*)pixels, rowBytes * h), rowBytes, rgba: true); }
-            });
+            }, hw => { prepared = writer.PrepareHardwareFrame(hw); direct = true; });
+            if (stats != null && readback.DirectError != null) stats.VaapiDirectError = readback.DirectError;
             stats?.AddConvert(watch.Elapsed);
             if (!done)
             {
@@ -244,6 +256,8 @@ public static class Exporter
                 return;
             }
             stats?.AddAsyncReadback();
+            if (yuv != null) stats?.AddGpuYuv();
+            if (direct) stats?.AddVaapiDirect();
             Enqueue(frame, prepared);
         }
 

@@ -210,11 +210,11 @@ public class GpuTransferTests
         return path;
     }
 
-    private static Project VideoProject(string video, int w, int h)
+    private static Project VideoProject(string video, int w, int h, int length = 6)
     {
         var p = new Project();
         p.Settings.Width = w; p.Settings.Height = h;
-        var o = ObjectFactory.Create(EffectRegistry.Video, 0, 0, 6);
+        var o = ObjectFactory.Create(EffectRegistry.Video, 0, 0, length);
         o.Main.Values["file"] = video;
         p.Root.Objects.Add(o);
         return p;
@@ -263,6 +263,53 @@ public class GpuTransferTests
                 Assert.True(max <= 24, $"大きく違う画素がある (frame {f}): max={max}");
             }
             Assert.True(engine.Media.GpuYuvFrames >= 4, $"YUV のまま送っていない: {engine.Media.GpuYuvFrames} {engine.Media.GpuYuvError}");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// ハードウェアデコードしたフレームを、メモリへ写さずに GPU 上のまま変換しても (VAAPI は DMA-BUF、NVDEC は CUDA と GL の相互運用)、
+    /// CPU 描画 (メモリへ写して sws で変換) と同じ色になる (設計書 22.58)。
+    /// ハードウェアデコードが使えない環境では何もしない (VB_REQUIRE_GPU_FRAMES=1 なら、GPU 上のまま変換できなければ失敗にする)。
+    /// VAAPI は VIDEO_BUILDER_GPU=Intel VIDEO_BUILDER_HWDEC=vaapi のように、描画とデコードを同じ GPU にして確かめる。
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void Hardware_decoded_frames_are_converted_without_copying_to_memory(int divisor)
+    {
+        if (!FFmpegLoader.EnsureLoaded() || !MediaWriter.IsEncoderAvailable("libx264")) return;
+        using var gpu = Gpu();
+        if (gpu == null) return;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-hwframe-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            const int w = 640, h = 360;
+            var video = WriteVideo(dir, "src.mp4", "libx264", w, h);
+            using (var probe = new VideoReader(video))
+                if (!probe.IsHardware)
+                {
+                    Console.WriteLine($"BENCH hwframe skipped: {probe.HardwareError}");
+                    Assert.False(Environment.GetEnvironmentVariable("VB_REQUIRE_GPU_FRAMES") == "1", "ハードウェアデコードできません: " + probe.HardwareError);
+                    return;
+                }
+            // 縮めてデコードするとき (プレビュー) は、出力の大きさ自体を小さくする
+            var p = VideoProject(video, w / divisor, h / divisor);
+            p.Root.Objects[0].Draw!.Tracks["scale"] = new AnimatedValue(100.0 / divisor);
+            using var cpu = new RenderEngine();
+            using var engine = new RenderEngine(gpu);
+            engine.Media.UseProxies = false;
+            for (int f = 0; f < 6; f++)
+            {
+                using var a = Render(cpu, p, f);
+                using var b = Render(engine, p, f);
+                var (mean, max) = Compare(a, b);
+                Console.WriteLine($"BENCH hwframe divisor={divisor} frame={f} mean={mean:0.000} max={max} gpuFrames={engine.Media.GpuHardwareFrames} error={engine.Media.GpuHardwareError}");
+                Assert.True(mean < (divisor == 1 ? 1.0 : 3.0), $"GPU 上のまま変換した色が違う (frame {f}): mean={mean} max={max}");
+            }
+            if (Environment.GetEnvironmentVariable("VB_REQUIRE_GPU_FRAMES") == "1")
+                Assert.True(engine.Media.GpuHardwareFrames >= 4, $"GPU 上のまま変換していない: {engine.Media.GpuHardwareFrames} {engine.Media.GpuHardwareError}");
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
@@ -475,7 +522,9 @@ public class GpuTransferTests
             AsyncReadback.TestFailAfter = failAfter;
             var stats = Export("gpu.mp4", true);
             AsyncReadback.TestFailAfter = old;
-            Console.WriteLine($"BENCH async-readback failAfter={failAfter} frames={stats.AsyncReadbackFrames} error={stats.AsyncReadbackError}");
+            Console.WriteLine($"BENCH async-readback failAfter={failAfter} frames={stats.AsyncReadbackFrames} error={stats.AsyncReadbackError} gpuYuv={stats.GpuYuvFrames} {stats.GpuYuvError}");
+            // x264 (YUV420P) なら、GPU で YUV にしてから読み戻す (設計書 22.58)
+            if (Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_YUV_EXPORT") != "0") Assert.Equal(stats.AsyncReadbackFrames, stats.GpuYuvFrames);
             if (failAfter < 0)
             {
                 Assert.Equal(Frames, stats.AsyncReadbackFrames);
@@ -510,6 +559,100 @@ public class GpuTransferTests
     }
 
     /// <summary>
+    /// VAAPI でエンコードするとき、GPU で NV12 に変換し、エンコーダのフレームへ DMA-BUF で直接描いても (読み戻さない)、
+    /// CPU で描いて sws で変換したものと同じ絵になる (設計書 22.58)。direct が false なら、NV12 で読み戻す経路を確かめる。
+    /// VAAPI のエンコーダがない環境では何もしない (VB_REQUIRE_VAAPI_ENCODE=1 なら失敗にする)。
+    /// 直接描くのは、描画の GPU とエンコードの GPU が同じとき (VIDEO_BUILDER_GPU=Intel など)。違えば読み戻しに戻ることも確かめる。
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Gpu_export_to_vaapi_matches_cpu(bool direct)
+    {
+        if (!FFmpegLoader.EnsureLoaded() || !MediaWriter.IsEncoderAvailable("h264_vaapi")) return;
+        using (var probe = Gpu()) if (probe == null) return;
+        bool required = Environment.GetEnvironmentVariable("VB_REQUIRE_VAAPI_ENCODE") == "1";
+        var p = Moving();
+        p.Settings.Width = 640; p.Settings.Height = 360;
+        const int Frames = 12;
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-vaapi-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var old = Environment.GetEnvironmentVariable("VIDEO_BUILDER_VAAPI_DIRECT");
+        try
+        {
+            ExportStats Export(string name, bool useGpu)
+            {
+                var stats = new ExportStats();
+                Task.Run(() => Exporter.Run(new ExportRequest
+                {
+                    Project = p, SceneId = "root", StartFrame = 0, EndFrame = Frames - 1, UseGpu = useGpu, Stats = stats,
+                    Settings = new ExportSettings { Path = Path.Combine(dir, name), VideoCodec = "h264_vaapi", Crf = 10, AudioCodec = "" },
+                }, null, CancellationToken.None)).Wait();
+                return stats;
+            }
+            try { Export("cpu.mp4", false); }
+            catch (AggregateException ex) when (!required)
+            {
+                Console.WriteLine($"BENCH vaapi-export skipped: {ex.InnerException?.Message}");
+                return;
+            }
+            Environment.SetEnvironmentVariable("VIDEO_BUILDER_VAAPI_DIRECT", direct ? null : "0");
+            var stats = Export("gpu.mp4", true);
+            Console.WriteLine($"BENCH vaapi-export direct={direct} async={stats.AsyncReadbackFrames} gpuYuv={stats.GpuYuvFrames} vaapiDirect={stats.VaapiDirectFrames} " +
+                $"directError={stats.VaapiDirectError} yuvError={stats.GpuYuvError}");
+            Assert.Equal(Frames, stats.Frames);
+            Assert.Equal(stats.AsyncReadbackFrames, stats.GpuYuvFrames);
+            if (!direct) Assert.Equal(0, stats.VaapiDirectFrames);
+            else if (Environment.GetEnvironmentVariable("VB_REQUIRE_VAAPI_DIRECT") == "1")
+                Assert.True(stats.VaapiDirectFrames == Frames, $"直接描いていない: {stats.VaapiDirectFrames} {stats.VaapiDirectError}");
+            var fps = p.Settings.Fps.Value;
+            var a = AllFrames(Path.Combine(dir, "cpu.mp4"), Frames, fps);
+            var b = AllFrames(Path.Combine(dir, "gpu.mp4"), Frames, fps);
+            for (int f = 0; f < Frames; f++)
+            {
+                long total = 0; int max = 0;
+                for (int i = 0; i < a[f].Length; i++) { int d = Math.Abs(a[f][i] - b[f][i]); total += d; max = Math.Max(max, d); }
+                double mean = (double)total / a[f].Length;
+                Console.WriteLine($"BENCH vaapi-export direct={direct} frame={f} mean={mean:0.000} max={max}");
+                Assert.True(mean < 2.0, $"frame {f} が違う: mean={mean} max={max}");
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VIDEO_BUILDER_VAAPI_DIRECT", old);
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// 動画 (環境変数 VB_BENCH_VIDEO) を GPU で 1 フレームずつ描く速さを表示する (設定しなければ何もしない)。
+    /// VIDEO_BUILDER_GPU_FRAMES=0 で、ハードウェアデコードのフレームをメモリへ写す以前の方法と比べられる (設計書 22.58)。
+    /// </summary>
+    [Fact]
+    public void Report_hardware_decode_speed()
+    {
+        var video = Environment.GetEnvironmentVariable("VB_BENCH_VIDEO");
+        if (string.IsNullOrEmpty(video) || !File.Exists(video) || !FFmpegLoader.EnsureLoaded()) return;
+        using var gpu = Gpu();
+        if (gpu == null) return;
+        var info = MediaInfo.Probe(video)!;
+        int frames = Math.Min(240, (int)(info.Duration * 30) - 1);
+        var p = VideoProject(video, 1920, 1080, frames + 1);
+        p.Root.Objects[0].Draw!.Tracks["scale"] = new AnimatedValue(100.0 * 1920 / info.Width);
+        using var engine = new RenderEngine(gpu) { Lookahead = true };
+        using var bmp = new SKBitmap(new SKImageInfo(1920, 1080, SKColorType.Rgba8888, SKAlphaType.Premul));
+        for (int f = 0; f < 10; f++) engine.RenderToBitmap(p, p.Root, f, bmp);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var cpu = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
+        for (int f = 10; f < frames; f++) engine.RenderToBitmap(p, p.Root, f, bmp);
+        double ms = watch.Elapsed.TotalMilliseconds / (frames - 10);
+        double cpuMs = (System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime - cpu).TotalMilliseconds / (frames - 10);
+        Console.WriteLine($"BENCH hwdecode {info.Width}x{info.Height} {gpu.Renderer} ms/frame={ms:0.00} cpu-ms/frame={cpuMs:0.00} " +
+            $"gpuFrames={engine.Media.GpuHardwareFrames} yuvFrames={engine.Media.GpuYuvFrames} error={engine.Media.GpuHardwareError} " +
+            $"env={Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_FRAMES") ?? "on"}");
+    }
+
+    /// <summary>
     /// 1080p の動画 + 図形を GPU で書き出す速さ (内訳つき) を表示する。
     /// VIDEO_BUILDER_GPU_YUV=0・VIDEO_BUILDER_ASYNC_READBACK=0 で、それぞれ以前の方法と比べられる。
     /// </summary>
@@ -523,17 +666,19 @@ public class GpuTransferTests
         try
         {
             var video = WriteVideo(dir, "src.mp4", "libx264", 1920, 1080);
-            var p = VideoProject(video, 1920, 1080);
+            var p = VideoProject(video, 1920, 1080, 30);
             Shape(p, 1, "#F2A900", 1, 300, -400, -100);
             var stats = new ExportStats();
             Task.Run(() => Exporter.Run(new ExportRequest
             {
                 Project = p, SceneId = "root", StartFrame = 0, EndFrame = 29, UseGpu = true, Stats = stats,
-                Settings = new ExportSettings { Path = Path.Combine(dir, "out.mp4"), AudioCodec = "", Preset = "ultrafast" },
+                // VB_BENCH_CODEC でエンコーダを変えられる (h264_vaapi など)
+                Settings = new ExportSettings { Path = Path.Combine(dir, "out.mp4"), AudioCodec = "", Preset = "ultrafast",
+                    VideoCodec = Environment.GetEnvironmentVariable("VB_BENCH_CODEC") is { Length: > 0 } c ? c : "libx264" },
             }, null, CancellationToken.None)).Wait();
             double Ms(TimeSpan t) => t.TotalMilliseconds / stats.Frames;
             Console.WriteLine($"BENCH gpu-export 1080p fps={stats.FramesPerSecond:0.0} render={Ms(stats.Render):0.0}ms convert={Ms(stats.Convert):0.0}ms " +
-                $"encode={Ms(stats.Encode):0.0}ms wait={Ms(stats.WaitForEncoder):0.0}ms async={stats.AsyncReadbackFrames} " +
+                $"encode={Ms(stats.Encode):0.0}ms wait={Ms(stats.WaitForEncoder):0.0}ms async={stats.AsyncReadbackFrames} gpuYuv={stats.GpuYuvFrames} direct={stats.VaapiDirectFrames} codec={Environment.GetEnvironmentVariable("VB_BENCH_CODEC")} " +
                 $"yuv={Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_YUV") ?? "on"} readback={Environment.GetEnvironmentVariable("VIDEO_BUILDER_ASYNC_READBACK") ?? "on"}");
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
