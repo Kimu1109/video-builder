@@ -98,6 +98,14 @@ modules:
       - --enable-libdav1d
       - --enable-libopus
       # ---- ここまで ----
+      # ---- packaging/ffmpeg/build.sh の LINUX_FLAGS と同じにする (GPU でのデコード・エンコード) ----
+      - --enable-vaapi
+      - --enable-libdrm
+      - --enable-v4l2-m2m
+      - --enable-ffnvcodec
+      - --enable-nvdec
+      - --enable-nvenc
+      # ---- ここまで (Linux) ----
       - --disable-programs   # ffmpeg コマンドは使わない
     post-install:
       - install -Dm644 COPYING.GPLv3 /app/share/licenses/ffmpeg/COPYING.GPLv3

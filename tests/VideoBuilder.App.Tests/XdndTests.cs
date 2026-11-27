@@ -138,6 +138,44 @@ public unsafe class XdndTests
         Assert.Equal(new[] { "/home/user/clip 1.mp4", "/home/user/画像.png" }, dropped.Value.Files);
     }
 
+    /// <summary>何もないときは、受け取りのスレッドが起きない (以前は終了を確かめるために 1 秒に 10 回起きていた)。終了はすぐ。</summary>
+    [Fact]
+    public void Idle_receiver_sleeps_until_something_happens_and_stops_at_once()
+    {
+        var target = XdndDropTarget.TryCreate();
+        if (target == null) return;     // X サーバーがない
+        try
+        {
+            Thread.Sleep(300);
+            // スレッドの名前 (XDND) で、そのスレッドが眠りから覚めた回数 (自分から手放した回数) を読む
+            static long? Wakeups()
+            {
+                foreach (var dir in Directory.EnumerateDirectories("/proc/self/task"))
+                {
+                    try
+                    {
+                        if (File.ReadAllText(Path.Combine(dir, "comm")).Trim() != "XDND") continue;
+                        var line = File.ReadLines(Path.Combine(dir, "status")).First(l => l.StartsWith("voluntary_ctxt_switches:"));
+                        return long.Parse(line.Split(':')[1].Trim());
+                    }
+                    catch (IOException) { }
+                }
+                return null;
+            }
+            var before = Wakeups();
+            Assert.NotNull(before);
+            Thread.Sleep(1000);
+            var after = Wakeups();
+            Assert.True(after - before <= 2, $"何もないのに {after - before} 回起きた");
+        }
+        finally
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            target.Dispose();
+            Assert.True(clock.ElapsedMilliseconds < 500, $"終了に {clock.ElapsedMilliseconds} ms かかった");
+        }
+    }
+
     [Fact]
     public void Drags_without_files_are_refused()
     {

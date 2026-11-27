@@ -28,6 +28,11 @@ public sealed unsafe class XdndDropTarget : IDisposable
     private readonly Atoms _a;
     private readonly Thread _thread;
     private volatile bool _quit;
+    /// <summary>
+    /// 終了の合図を送る eventfd。イベントを待つときに X の接続と一緒に待つので、何もないときは眠ったまま (起きない)。
+    /// 作れなければ -1 (そのときは、終了を確かめるために 100ms ごとに起きる)。
+    /// </summary>
+    private readonly int _wake = -1;
     private readonly HashSet<IntPtr> _windows = new();
 
     // ドラッグ中の状態 (イベントのスレッドだけが触る)
@@ -77,6 +82,8 @@ public sealed unsafe class XdndDropTarget : IDisposable
         SetAtomProperty(_proxy, _a.XdndAware, _a.ATOM, (IntPtr)Version);
         SetAtomProperty(_proxy, _a.XdndProxy, _a.WINDOW, _proxy);   // 代理ウィンドウ自身にも付ける (規約)
         X.XFlush(display);
+        try { _wake = Libc.eventfd(0, Libc.EFD_CLOEXEC | Libc.EFD_NONBLOCK); }
+        catch (EntryPointNotFoundException) { _wake = -1; }
         _thread = new Thread(Loop) { IsBackground = true, Name = "XDND" };
         _thread.Start();
     }
@@ -123,9 +130,11 @@ public sealed unsafe class XdndDropTarget : IDisposable
         {
             if (X.XPending(_display) == 0)
             {
-                // 終了の指示を確かめられるよう、待つのは最大 100ms ずつ
-                var pfd = new PollFd { fd = fd, events = 1 /* POLLIN */ };
-                Libc.poll(&pfd, 1, 100);
+                // X のイベントか終了の合図 (eventfd) が来るまで眠る。eventfd がなければ、終了を確かめられるよう最大 100ms ずつ
+                var pfd = stackalloc PollFd[2];
+                pfd[0] = new PollFd { fd = fd, events = Libc.POLLIN };
+                pfd[1] = new PollFd { fd = _wake, events = Libc.POLLIN };
+                Libc.poll(pfd, _wake >= 0 ? 2UL : 1UL, _wake >= 0 ? -1 : 100);
                 continue;
             }
             X.XNextEvent(_display, ref ev);
@@ -282,7 +291,13 @@ public sealed unsafe class XdndDropTarget : IDisposable
     {
         if (_quit) return;
         _quit = true;
+        if (_wake >= 0)
+        {
+            ulong one = 1;
+            Libc.write(_wake, &one, sizeof(ulong));   // 眠っているイベントのスレッドを起こす
+        }
         _thread.Join(1000);
+        if (_wake >= 0) Libc.close(_wake);
         // アプリのウィンドウに付けた目印 (XdndProxy) は消さない。ウィンドウがもう閉じていると X のエラーになるため。
         // 代理ウィンドウがなくなれば、ドラッグ元は目印を無視する (規約で、代理側の目印を確かめることになっている)
         X.XDestroyWindow(_display, _proxy);
@@ -356,7 +371,12 @@ public sealed unsafe class XdndDropTarget : IDisposable
 
     internal static class Libc
     {
+        public const short POLLIN = 1;
+        public const int EFD_NONBLOCK = 0x800, EFD_CLOEXEC = 0x80000;
         [DllImport("libc", SetLastError = true)] public static extern int poll(PollFd* fds, ulong nfds, int timeout);
+        [DllImport("libc", SetLastError = true)] public static extern int eventfd(uint initval, int flags);
+        [DllImport("libc", SetLastError = true)] public static extern nint write(int fd, void* buf, nuint count);
+        [DllImport("libc", SetLastError = true)] public static extern int close(int fd);
     }
 
     internal static class X

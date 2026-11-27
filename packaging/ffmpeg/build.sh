@@ -50,6 +50,11 @@ MACOS_FLAGS=(--disable-libxcb --disable-xlib --disable-sdl2)
 # CLANGARM64 の libc++ では作れない (<chrono> の中で ratio などが見つからない) ので切る
 WINDOWS_FLAGS=(--enable-d3d11va --enable-dxva2 --enable-mediafoundation --disable-filter=gfxcapture)
 
+# Linux だけに足す設定: GPU でのデコード・エンコード (VAAPI・NVDEC・NVENC・V4L2 M2M) と、VAAPI のフレームを DRM (DMA-BUF) として
+# 取り出すための libdrm。どれも configure の自動検出に任せると、開発用パッケージ (libva-dev・libdrm-dev・libffmpeg-nvenc-dev など) が
+# 足りないときに黙って無効になるので、明示して、足りなければ configure を失敗させる。Flatpak のマニフェストにも同じものを入れる
+LINUX_FLAGS=(--enable-vaapi --enable-libdrm --enable-v4l2-m2m --enable-ffnvcodec --enable-nvdec --enable-nvenc)
+
 # Linux の --bundle で写すライブラリ (ファイル名の先頭)。libc や GPU のドライバ (libva・libdrm) などは利用者の環境のものを使う
 BUNDLE_PATTERN='^(libavcodec|libavformat|libavutil|libavfilter|libavdevice|libswscale|libswresample|libx264|libx265|libvpx|libdav1d|libopus|libnuma)\.so'
 
@@ -61,6 +66,7 @@ while [ $# -gt 0 ]; do
     --print-version) echo "$FFMPEG_VERSION"; exit 0 ;;
     --print-configure) echo "${CONFIGURE_FLAGS[*]}"; exit 0 ;;
     --print-windows-configure) echo "${WINDOWS_FLAGS[*]}"; exit 0 ;;
+    --print-linux-configure) echo "${LINUX_FLAGS[*]}"; exit 0 ;;
     *) echo "不明な引数: $1" >&2; exit 1 ;;
   esac
 done
@@ -96,6 +102,7 @@ if [ ! -f "$licenses/CONFIGURATION.txt" ]; then
   extra=()
   [ "$os" = macos ] && extra=("${MACOS_FLAGS[@]}")
   [ "$os" = windows ] && extra=("${WINDOWS_FLAGS[@]}")
+  [ "$os" = linux ] && extra=("${LINUX_FLAGS[@]}")
   # MSYS2 の CLANG64・CLANGARM64: コンパイラは clang。何も指定しないと configure は gcc を探し、
   # Windows の PATH にある別の gcc (ランナーの x64 の MinGW など) を使ってしまう。
   # また ARM64 の Windows の MSYS2 はシェル自体が x64 のエミュレーションで動き、uname -m が x86_64 を返すので、CPU も指定する

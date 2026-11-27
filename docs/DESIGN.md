@@ -2931,3 +2931,23 @@ Mesa のソフトウェアの GL (llvmpipe) と Xvfb で確かめた。
 
 **実際の GPU での速さは測れていない** (開発環境に GPU がない)。
 
+### 22.56 Linux の高速化 (その 2): FFmpeg の GPU 機能の明示・待機中に起きない・音声を float で・GPU の一覧
+
+| 手法 | 内容 |
+|---|---|
+| FFmpeg の GPU 機能を明示する | Linux 向けの FFmpeg (`packaging/ffmpeg/build.sh` の `LINUX_FLAGS` と Flatpak のマニフェスト) で `--enable-vaapi --enable-libdrm --enable-v4l2-m2m --enable-ffnvcodec --enable-nvdec --enable-nvenc` を指定する。以前は configure の自動検出に任せていたので、開発用パッケージ (libva-dev・libdrm-dev・libffmpeg-nvenc-dev など) が足りないと、黙って GPU でのデコード・エンコードなしで作られていた。今は足りなければ configure が失敗する。libdrm は、VAAPI のフレームを DMA-BUF として取り出すのに要る (22.52 の残り)。Flatpak と同じ設定であることはテストで確かめる (`PackagingTests`) |
+| ドロップの受け取り口が待機中に起きない | `XdndDropTarget` のイベントのスレッドは、終了の指示を確かめるために 100ms ごとに起きていた (何もしなくても 1 秒に 10 回)。X の接続と eventfd を一緒に待ち、終了のときは eventfd に書いて起こす。eventfd が作れなければ以前どおり。何もないときに 1 秒間で起きた回数が 9 回 → 0〜2 回になることをテストで確かめる (`/proc/self/task/*/status` の `voluntary_ctxt_switches`) |
+| 音声を float のまま OpenAL へ | OpenAL が `AL_EXT_FLOAT32` に対応していれば (OpenAL Soft にはある)、ミックスした float をそのまま渡す。16 ビットの整数への変換がなくなり、小さな音の細かさも落ちない。再生中に確かめる間隔も、4ms ごとから、バッファ 1 つを鳴らす時間の 1/4 (48kHz で 10ms) ごとにした (バッファは 4 つ積むので途切れない)。環境変数 `VIDEO_BUILDER_AUDIO_FLOAT=0` で以前どおり 16 ビット |
+| GPU の一覧で Skia を作らない | GPU の一覧を作るとき、GPU ごとに Skia の GPU コンテキストまで作っていた。名前 (GL_RENDERER) を読むだけなので、EGL のコンテキストだけにする |
+
+#### 確かめたこと
+
+- FFmpeg: `LINUX_FLAGS` を付けて configure が通り、VAAPI・libdrm・V4L2 M2M・NVDEC・NVENC が有効になる (Ubuntu 24.04)。Flatpak のビルドは CI で確かめる
+- 音声: OpenAL Soft の wave 出力 (`ALSOFT_CONF` で `drivers=wave`) に 440Hz・振幅 0.25 の正弦波を 1 秒流し、書き出された音を正弦波と比べた。float でも 16 ビットでも正しく出る (差の最大 0.0013。float は振幅がちょうど 0.25、16 ビットは 0.24997)。実際の音声デバイスでは確かめていない
+- GPU の一覧: llvmpipe しかない環境では差が出ない (列挙 49 → 42 ms、Skia の初期化が開くときに移る分、合計は同じ)。GPU が 2 枚以上あると、選ばない GPU の分の Skia の初期化がなくなる (未計測)
+- テストすべて (Xvfb の上で、CI と同じ流し方): VideoBuilder.Tests 519 件・VideoBuilder.App.Tests 105 件が通った
+
+#### しなかったこと
+
+- GPU の一覧を覚えておく (起動のたびに GPU を開かない): GPU の名前 (GL_RENDERER) にはドライバや LLVM の版が入ることがあり (例: AMD の "(radeonsi, navi23, LLVM 17.0.6, DRM 3.54, ...)")、覚えた名前が古くなると、画面の GPU と同じかの判定 (22.28) を間違えて画面との共有が止まる。ドライバの更新を確実に見分ける方法がないので、入れていない。ハイブリッドの GPU の PC では、選ばない外付けの GPU も起動のたびに開くので、その GPU が眠りから覚める
+
