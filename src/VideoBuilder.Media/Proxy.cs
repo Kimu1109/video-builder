@@ -413,6 +413,7 @@ public static class ProxyGenerator
             AVCodec* decoder = null;
             _stream = ffmpeg.av_find_best_stream(_ic, AVMediaType.AVMEDIA_TYPE_VIDEO, -1, -1, &decoder, 0);
             FFmpegLoader.Check(_stream, "映像ストリームがありません");
+            FFmpegLoader.DiscardOtherStreams(_ic, _stream);
             _codec = decoder;
             _ist = _ic->streams[_stream];
             if (!HardwareDecoding.Wanted || !OpenHardware()) OpenSoftware();

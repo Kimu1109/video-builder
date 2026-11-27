@@ -114,6 +114,12 @@ public sealed class WaveformCache
 public sealed class ThumbnailCache
 {
     public const int Height = 40;
+
+    /// <summary>
+    /// 求めた時刻より、この秒数だけ前までのキーフレームなら、それをサムネイルにする (間のフレームをデコードしない)。
+    /// 高さ 40 ピクセルの絵では、1 秒以内の違いはほとんど見分けられない。
+    /// </summary>
+    internal const double KeyframeTolerance = 1.0;
     private readonly Dictionary<string, Bitmap?> _ready = new();
     private readonly HashSet<string> _pending = new();
     private readonly SemaphoreSlim _gate = new(1);
@@ -133,7 +139,7 @@ public sealed class ThumbnailCache
         {
             (byte[] Pixels, int W, int H)? result = null;
             await _gate.WaitAsync();
-            try { result = isVideo ? FromVideo(path, t) : FromImage(path); }
+            try { result = LoadOrCreate(path, t, isVideo); }
             catch { result = null; }
             finally { _gate.Release(); }
             Dispatcher.UIThread.Post(() =>
@@ -156,17 +162,65 @@ public sealed class ThumbnailCache
     private static readonly Dictionary<string, VideoReader> Readers = new();
     private static readonly Queue<string> ReaderOrder = new();
 
+    // 作ったサムネイルはディスクにも残す (開き直したときに、動画をデコードし直さない)。形式: 幅・高さ (int) と BGRA の画素
+    private static string CacheFile(string path, double seconds, bool isVideo)
+    {
+        var info = new FileInfo(path);
+        var key = $"{path}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{(isVideo ? seconds : 0):0.0}|{Height}|{(isVideo ? "v" : "i")}";
+        var hash = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(key)));
+        return Path.Combine(AppPaths.CacheDir, "thumbnail", hash[..2], hash + ".bgra");
+    }
+
+    internal static (byte[] Pixels, int W, int H)? LoadOrCreate(string path, double seconds, bool isVideo)
+    {
+        if (!File.Exists(path)) return null;
+        string cache = CacheFile(path, seconds, isVideo);
+        try
+        {
+            if (File.Exists(cache))
+            {
+                var bytes = File.ReadAllBytes(cache);
+                if (bytes.Length >= 8)
+                {
+                    int w = BitConverter.ToInt32(bytes, 0), h = BitConverter.ToInt32(bytes, 4);
+                    if (w > 0 && h > 0 && bytes.Length == 8 + (long)w * h * 4) return (bytes[8..], w, h);
+                }
+            }
+        }
+        catch { /* 読めなければ作り直す */ }
+        var result = isVideo ? FromVideo(path, seconds) : FromImage(path);
+        if (result is { } r)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(cache)!);
+                // 書きかけのファイルを読まないよう、別の名前で書いてから置き換える
+                string temp = cache + "." + Environment.ProcessId + ".tmp";
+                using (var fs = File.Create(temp))
+                {
+                    fs.Write(BitConverter.GetBytes(r.Item2));
+                    fs.Write(BitConverter.GetBytes(r.Item3));
+                    fs.Write(r.Item1);
+                }
+                File.Move(temp, cache, overwrite: true);
+            }
+            catch { /* キャッシュに書けなくても表示はできる */ }
+        }
+        return result;
+    }
+
     private static VideoReader OpenCached(string path, bool absoluteTime)
     {
         if (Readers.TryGetValue(path, out var r)) return r;
-        r = new VideoReader(path, absoluteTime);
+        // 小さな絵を少し取り出すだけなので、GPU のデコーダは開かない (開く時間とメモリへ写す時間の方が長い)
+        r = new VideoReader(path, absoluteTime, allowHardware: false);
         Readers[path] = r;
         ReaderOrder.Enqueue(path);
         while (ReaderOrder.Count > 4) { var old = ReaderOrder.Dequeue(); Readers[old].Dispose(); Readers.Remove(old); }
         return r;
     }
 
-    private static (byte[], int, int)? FromVideo(string path, double seconds)
+    internal static (byte[], int, int)? FromVideo(string path, double seconds)
     {
         if (!File.Exists(path) || !FFmpegLoader.EnsureLoaded()) return null;
         // プロキシがあれば、小さいプロキシから作る (元の動画をデコードするより速い)
@@ -174,7 +228,7 @@ public sealed class ThumbnailCache
         var reader = OpenCached(segment ?? path, absoluteTime: segment != null);
         // サムネイルは小さいので、縮めて変換する (縮小に使う大きさの 2 倍は残す)
         reader.OutputDivisor = Math.Max(1, reader.Height / (Height * 2));
-        var frame = reader.GetFrame(seconds);
+        var frame = reader.GetFrameNear(seconds, KeyframeTolerance);
         if (frame == null) return null;
         var info = new SKImageInfo(reader.FrameWidth, reader.FrameHeight, SKColorType.Bgra8888, reader.HasAlpha ? SKAlphaType.Premul : SKAlphaType.Opaque);
         using var src = new SKBitmap(info);
