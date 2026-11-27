@@ -2920,6 +2920,14 @@ Mesa のソフトウェアの GL (llvmpipe) と Xvfb で確かめた。
 - フェンスの速さ: llvmpipe では効果が出ない。重いシーン (1080p の動画にレンズブラー・グロー、ぼかした図形 6 つ) を 15 秒再生して描けたフレームは、フェンスありで 120・119、なしで 122・119 (差は誤差の範囲)。llvmpipe では、組み立てを終えたあとの GPU の処理が 1 フレーム約 128 ms のうち約 4 ms しかなく、重ねて縮む分がほとんどないため。実際の GPU では、組み立ての間に GPU が描くので、GPU の処理の時間の分だけ縮むはず (未計測)
 - VAAPI のデバイスの順番 (`GpuSelectionTests.Vaapi_encoding_opens_the_chosen_gpu_first`)。この環境には VAAPI の GPU がないので、実際のエンコードは確かめていない
 - ReadyToRun: `publish-all.sh linux-x64` で発行したアセンブリが ReadyToRun になっていること (PE の ManagedNativeHeader)。起動の時間は下の表
+- テストすべて (Xvfb の上で、CI と同じ流し方): VideoBuilder.Tests 518 件・VideoBuilder.App.Tests 104 件が通った
+
+起動の時間 (`--startup-time`。プロセスの開始からウィンドウが出るまで。Xvfb、4 コアの VM で 4 回ずつ):
+
+| 発行のしかた | 起動 | ランタイムと Avalonia の起動 | ウィンドウ作成 | 表示まで |
+|---|---|---|---|---|
+| ReadyToRun なし (以前の Flatpak・tar.gz) | 1127〜1173 ms | 371〜387 ms | 263〜303 ms | 428〜437 ms |
+| ReadyToRun (今の Flatpak・tar.gz・AppImage) | 639〜660 ms | 228〜251 ms | 129〜132 ms | 212〜216 ms |
 
 **実際の GPU での速さは測れていない** (開発環境に GPU がない)。
 
