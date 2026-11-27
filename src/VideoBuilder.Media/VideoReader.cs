@@ -53,23 +53,29 @@ public sealed unsafe class VideoReader : IDisposable
     // キーフレームだけをデコードした (GetFrameNear) あとは、参照するフレームが欠けているので、次は必ずシークし直す
     private bool _skippedFrames;
     private readonly bool _allowHardware = true;
-    // 変換済みフレーム (BGRA) の置き場を 2 つ持ち、変換のたびに交互に使う。
-    // 直前に返したフレームは、もう 1 回変換するまで書き換わらない (先読みしている間も前のフレームを描ける)。
+    // 変換済みフレーム (BGRA) の置き場を最大 3 つ持ち、変換のたびに、押さえられていない・今のものでない置き場を使う
+    // (いちばん前に使ったもの)。直前に返したフレームは、もう 1 回変換するまで書き換わらない (先読みしている間も前のフレームを描ける)。
+    // 3 つ目は、2 つが押さえられているとき (2 フレーム先まで先読みするとき。設計書 22.61) だけ確保する。
     // アンマネージドなので GC で動かない。大きさは元の動画の大きさで確保し、縮めて変換するときもそのまま使う
-    private readonly byte*[] _native = new byte*[2];
+    /// <summary>置き場の数の上限 (同時に押さえられるのは、これより 1 つ少ない数まで)。</summary>
+    public const int Slots = 3;
+    private readonly byte*[] _native = new byte*[Slots];
+    private readonly long[] _slotWritten = new long[Slots];
+    private long _writes;
     private int _nativeCapacity;
     private int _nativeIndex;
     private bool _nativeValid;
     private int _divisor = 1;
-    private int _pinned = -1;       // 書き換えない置き場 (PinCurrentFrame)。-1 ならなし
+    // 書き換えない置き場 (PinCurrentFrame・PinFrame) のビット。先読みのスレッドと描画のスレッドから触るので Interlocked で
+    private int _pinnedMask;
     private byte[] _managed = Array.Empty<byte>();
     // PreferYuv のとき: 置き場ごとに、BGRA に変換するかわりに持っている YUV のフレーム (_slotYuv が true の置き場だけ)
-    private readonly AVFrame*[] _yuv = new AVFrame*[2];
-    private readonly bool[] _slotYuv = new bool[2];
+    private readonly AVFrame*[] _yuv = new AVFrame*[Slots];
+    private readonly bool[] _slotYuv = new bool[Slots];
     private SwsContext* _swsYuv;      // YUV のまま縮める
     private SwsContext* _swsLate;     // 持っている YUV を、あとから BGRA にする (先読みと同時に使うので _sws とは別)
     // AcceptHardwareFrames のとき: 置き場ごとに、メモリへ写さずに持っている GPU 上のフレーム (null ならなし)
-    private readonly AVFrame*[] _hw = new AVFrame*[2];
+    private readonly AVFrame*[] _hw = new AVFrame*[Slots];
     private SwsContext* _swsMaterialize;   // GPU 上のフレームをあとからメモリへ写して縮める (描画のスレッドで使うので _swsYuv とは別)
 
     public string Path { get; }
@@ -134,9 +140,61 @@ public sealed unsafe class VideoReader : IDisposable
     /// 今のフレームの置き場を、UnpinFrame するまで書き換えないようにする。
     /// 返したフレームを別のスレッドで使っている間に、このデコーダで先を読ませるときに使う。
     /// </summary>
-    public void PinCurrentFrame() => _pinned = _nativeValid ? _nativeIndex : -1;
+    public void PinCurrentFrame()
+    {
+        if (_nativeValid) Interlocked.Or(ref _pinnedMask, 1 << _nativeIndex);
+    }
 
-    public void UnpinFrame() => _pinned = -1;
+    /// <summary>確保した置き場の数 (計測・テスト用)。</summary>
+    internal int AllocatedSlots
+    {
+        get { int n = 0; for (int i = 0; i < Slots; i++) if (_native[i] != null) n++; return n; }
+    }
+
+    /// <summary>最後に取り出したフレームの置き場 (GetFramePointer が最後に返したもの)。なければ IntPtr.Zero。</summary>
+    public IntPtr CurrentFramePointer => _nativeValid ? (IntPtr)_native[_nativeIndex] : IntPtr.Zero;
+
+    /// <summary>押さえた置き場をすべて放す。</summary>
+    public void UnpinFrame() => Interlocked.Exchange(ref _pinnedMask, 0);
+
+    /// <summary>
+    /// GetFramePointer が返したフレームの置き場を、放すまで書き換えないようにする。ほかのスレッドがこのデコーダで先を読んでいる間に呼んでもよい。
+    /// 同時に押さえられるのは Slots - 1 個まで (残りの 1 つに変換する)。
+    /// </summary>
+    public void PinFrame(IntPtr frame)
+    {
+        int i = SlotOf(frame);
+        if (i >= 0) Interlocked.Or(ref _pinnedMask, 1 << i);
+    }
+
+    /// <summary>PinFrame で押さえた置き場を放す。ほかのスレッドがこのデコーダで先を読んでいる間に呼んでもよい。</summary>
+    public void UnpinFrame(IntPtr frame)
+    {
+        int i = SlotOf(frame);
+        if (i >= 0) Interlocked.And(ref _pinnedMask, ~(1 << i));
+    }
+
+    /// <summary>
+    /// 次に変換する置き場。押さえられていない・今のフレームでないもののうち、いちばん前に使ったもの。
+    /// 確保してある置き場で足りなければ、新しく確保する (押さえられているものが多いときだけ、3 つ目を確保する)。
+    /// </summary>
+    private int NextSlot()
+    {
+        int pinned = Volatile.Read(ref _pinnedMask);
+        int best = -1, spare = -1;
+        for (int i = 0; i < Slots; i++)
+        {
+            if ((pinned & (1 << i)) != 0 || (_nativeValid && i == _nativeIndex)) continue;
+            if (_native[i] == null) { if (spare < 0) spare = i; continue; }
+            if (best < 0 || _slotWritten[i] < _slotWritten[best]) best = i;
+        }
+        int index = best >= 0 ? best : spare;
+        // すべて押さえられている (使い方の誤り): 今のフレームの置き場に書く (以前の 2 つのときと同じ振る舞い)
+        if (index < 0) index = _nativeValid ? _nativeIndex : 0;
+        if (_native[index] == null) _native[index] = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc((nuint)_nativeCapacity);
+        _slotWritten[index] = ++_writes;
+        return index;
+    }
 
     /// <summary>最後に取り出したフレームの大きさ (OutputDivisor で縮めた大きさ)。1 行は FrameWidth*4 バイト。</summary>
     public int FrameWidth { get; private set; }
@@ -226,8 +284,8 @@ public sealed unsafe class VideoReader : IDisposable
             DecoderName = "TEST";
             return true;
         }
-        // GPU 上のフレームを置き場 (2 つ) と GPU での変換の途中で持つので、デコーダの置き場を多めに用意する
-        var ctx = HardwareDecoding.Open(_codec, st, out var format, out var name, out var error, extraFrames: 4);
+        // GPU 上のフレームを置き場 (最大 3 つ) と GPU での変換の途中で持つので、デコーダの置き場を多めに用意する
+        var ctx = HardwareDecoding.Open(_codec, st, out var format, out var name, out var error, extraFrames: 5);
         if (ctx == null) { HardwareError = error; return false; }
         _dec = ctx;
         _hardware = true;
@@ -243,7 +301,11 @@ public sealed unsafe class VideoReader : IDisposable
     private void FallBackToSoftware(string reason)
     {
         HardwareError = reason;
-        for (int i = 0; i < 2; i++) ReleaseHardware(i);
+        // 押さえている置き場 (先読みしたフレーム・描画中のフレーム) は、ほかのスレッドが読んでいるかもしれないので残す
+        // (GPU 上のフレームは参照を持っているので、デコーダを閉じても使える。次にその置き場に書くときに手放す)
+        int pinned = Volatile.Read(ref _pinnedMask);
+        for (int i = 0; i < Slots; i++)
+            if ((pinned & (1 << i)) == 0) ReleaseHardware(i);
         if (_dec != null) { var d = _dec; ffmpeg.avcodec_free_context(&d); _dec = null; }
         OpenSoftwareDecoder(_fmt->streams[_stream]);
         _hasFrame = false; _converted = false; _draining = false; _eof = false;
@@ -450,7 +512,7 @@ public sealed unsafe class VideoReader : IDisposable
         EnsureNative();
         // 直前に返したフレームを残すため、もう一方の置き場に変換する
         // (押さえられた置き場があれば、何回変換してもそちらには書かない)
-        int index = _pinned >= 0 ? _pinned ^ 1 : _nativeValid ? _nativeIndex ^ 1 : _nativeIndex;
+        int index = NextSlot();
         ReleaseHardware(index);
         if (PreferYuv && !HasAlpha && StoreYuv(index, source, ow, oh))
         {
@@ -577,7 +639,7 @@ public sealed unsafe class VideoReader : IDisposable
         // U・V を間引いているので、奇数の大きさは CPU の変換と合わせられない (StoreYuv と同じ)
         if ((ow & 1) != 0 || (oh & 1) != 0 || (frame->width & 1) != 0 || (frame->height & 1) != 0) return false;
         EnsureNative();
-        int index = _pinned >= 0 ? _pinned ^ 1 : _nativeValid ? _nativeIndex ^ 1 : _nativeIndex;
+        int index = NextSlot();
         ReleaseHardware(index);
         ReleaseYuv(index);
         var copy = ffmpeg.av_frame_clone(frame);
@@ -601,12 +663,10 @@ public sealed unsafe class VideoReader : IDisposable
     private void EnsureNative()
     {
         int capacity = Width * Height * 4;
-        if (_native[0] != null && _nativeCapacity == capacity) return;
-        for (int i = 0; i < 2; i++)
-        {
-            if (_native[i] != null) System.Runtime.InteropServices.NativeMemory.Free(_native[i]);
-            _native[i] = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc((nuint)capacity);
-        }
+        if (_nativeCapacity == capacity) return;
+        // 置き場そのものは、使うときに確保する (NextSlot)
+        for (int i = 0; i < Slots; i++)
+            if (_native[i] != null) { System.Runtime.InteropServices.NativeMemory.Free(_native[i]); _native[i] = null; }
         _nativeCapacity = capacity;
         _nativeValid = false;
     }
@@ -656,7 +716,7 @@ public sealed unsafe class VideoReader : IDisposable
     private int SlotOf(IntPtr frame)
     {
         if (frame == IntPtr.Zero) return -1;
-        for (int i = 0; i < 2; i++)
+        for (int i = 0; i < Slots; i++)
             if ((IntPtr)_native[i] == frame) return i;
         return -1;
     }
@@ -702,7 +762,7 @@ public sealed unsafe class VideoReader : IDisposable
     public void Dispose()
     {
         if (_frame != null) { var f = _frame; ffmpeg.av_frame_free(&f); _frame = null; }
-        for (int i = 0; i < 2; i++)
+        for (int i = 0; i < Slots; i++)
         {
             ReleaseHardware(i);
             if (_yuv[i] != null) { var f = _yuv[i]; ffmpeg.av_frame_free(&f); _yuv[i] = null; }
@@ -715,7 +775,7 @@ public sealed unsafe class VideoReader : IDisposable
         if (_sws != null) { ffmpeg.sws_freeContext(_sws); _sws = null; }
         if (_dec != null) { var d = _dec; ffmpeg.avcodec_free_context(&d); _dec = null; }
         if (_fmt != null) { var f = _fmt; ffmpeg.avformat_close_input(&f); _fmt = null; }
-        for (int i = 0; i < 2; i++)
+        for (int i = 0; i < Slots; i++)
             if (_native[i] != null) { System.Runtime.InteropServices.NativeMemory.Free(_native[i]); _native[i] = null; }
     }
 }

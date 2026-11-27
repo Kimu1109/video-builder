@@ -21,12 +21,31 @@ public sealed class MediaCache : IDisposable
         public double Position = double.NaN;
         /// <summary>最後に使った描画の番号。同じ描画の中で、別のオブジェクトに貸さないために使う。</summary>
         public long UsedInFrame = -1;
-        /// <summary>裏で次のフレームを読んでいる (先読み) 間は、その作業。終わるまでデコーダに触らない。</summary>
+        // ---- 先読み (設計書 22.61) ----
+        // 裏のスレッドが Targets の位置を順に取り出し、取り出したフレームの置き場を押さえて Ready に並べる。
+        // 裏のスレッドが動いている (Pending) 間、描画のスレッドはデコーダの状態に触らず、Ready に並んだフレームだけを使う
+        // (置き場ごとの読み出し TryGetYuv・EnsureBgra・TryTakeHardwareFrame は、ほかの置き場への書き込みと同時でよい)。
+        // Gate で守る: Pending・Targets・Working・Ready
+        public readonly object Gate = new();
+        /// <summary>裏で先読みしている間は、その作業。</summary>
         public Task? Pending;
-        /// <summary>先読みしている位置 (秒)。</summary>
+        /// <summary>これから先読みする位置 (秒。古い順)。</summary>
+        public readonly List<double> Targets = new();
+        /// <summary>今先読みしている位置。なければ NaN。</summary>
+        public double Working = double.NaN;
+        /// <summary>先読みし終えたフレーム (古い順)。置き場は押さえてある。</summary>
+        public readonly List<Ahead> Ready = new();
+        /// <summary>今の描画で使っているフレームの置き場 (先読みしている間は押さえておく)。なければ IntPtr.Zero。</summary>
+        public IntPtr Current;
+        /// <summary>開いておく位置 (Preload)。</summary>
         public double PendingPosition;
         /// <summary>直前の Fetch で取り出したフレーム (デコーダの置き場)。取り出せなければ IntPtr.Zero。</summary>
         public IntPtr Data;
+        /// <summary>Data のフレームの目印と大きさ (先読みのスレッドが動いている間も読めるよう、取り出したときに控える)。</summary>
+        public long DataFrameId;
+        public int DataWidth, DataHeight, DataDivisor;
+        /// <summary>今の画像を作った置き場 (zeroCopy の画像は置き場を指すので、置き場が変われば作り直す)。</summary>
+        public IntPtr ImageData;
         /// <summary>直前の Fetch で、前の画像が指していた置き場の中身が失われた (zeroCopy で取り出しに失敗した)。</summary>
         public bool Lost;
         /// <summary>これから始まるクリップのために、裏で開いて最初のフレームまで読んでいる間は、その作業 (Preload)。</summary>
@@ -105,7 +124,7 @@ public sealed class MediaCache : IDisposable
     /// <summary>新しいフレームの描画を始める。RenderEngine が描画のはじめに呼ぶ。</summary>
     public void BeginFrame()
     {
-        WaitLookahead();
+        // 先読みは待たない (要るフレームだけを、取り出すときに待つ。設計書 22.61)
         FinishPreloads(wait: false);
         _frame++;
         _assigned.Clear();
@@ -186,32 +205,165 @@ public sealed class MediaCache : IDisposable
     public (int Width, int Height) LastFrameSize { get; private set; }
 
     /// <summary>先読みを裏で走らせている数 (計測・テスト用)。</summary>
-    public int PendingLookaheads => _byPath.Values.Sum(l => l.Count(e => e.Pending != null));
+    public int PendingLookaheads => _byPath.Values.Sum(l => l.Count(e => { lock (e.Gate) return e.Pending != null || e.Ready.Count > 0; }));
+
+    /// <summary>先読みし終えた・先読みしている・する予定のフレームの数の合計 (計測・テスト用)。</summary>
+    internal int AheadFrames => _byPath.Values.Sum(l => l.Sum(e => { lock (e.Gate) return e.Ready.Count + (double.IsNaN(e.Working) ? 0 : 1) + e.Targets.Count; }));
+
+    /// <summary>裏の先読みが一区切りつくまで待つ (テスト用。先読みは続けたまま)。</summary>
+    internal void WaitForLookahead()
+    {
+        foreach (var e in _byPath.Values.SelectMany(l => l))
+        {
+            Task? pending;
+            lock (e.Gate) pending = e.Pending;
+            try { pending?.Wait(); } catch { }
+        }
+    }
+
+    /// <summary>先読みしておいたフレームをそのまま使えた回数 (計測・テスト用)。</summary>
+    public long LookaheadHits => Interlocked.Read(ref _lookaheadHits);
+    private long _lookaheadHits;
+
+    /// <summary>
+    /// 何フレーム先まで先読みするか。1 なら次のフレームだけ (以前と同じ)。2 なら、次のフレームを読み終えたら、その次も続けて読む
+    /// (デコードに時間のかかるフレームがあっても、前のフレームの合成の間に追いつける)。環境変数 VIDEO_BUILDER_LOOKAHEAD_DEPTH で変えられる。
+    /// </summary>
+    public static int LookaheadDepth { get; } =
+        int.TryParse(Environment.GetEnvironmentVariable("VIDEO_BUILDER_LOOKAHEAD_DEPTH"), out var d) ? Math.Clamp(d, 1, VideoReader.Slots - 1) : 2;
 
     /// <summary>
     /// この描画で使ったデコーダに、次の描画で要るフレームを裏で読ませておく (デコードと変換を、合成と同時に進める)。
     /// key は、この描画で GetVideoFrame / Prefetch に渡したもの。先読みが終わるまで、そのデコーダには触らない
     /// (次の BeginFrame で終わるのを待つ)。
     /// </summary>
-    public void Lookahead(IReadOnlyList<(string Key, string Path, double Seconds, bool Loop)> next)
+    /// <param name="next">オブジェクトごとに、次の描画 (と、その次の描画) で要る位置。近い順。</param>
+    public void Lookahead(IReadOnlyList<(string Key, string Path, IReadOnlyList<double> Seconds, bool Loop)> next)
     {
-        foreach (var (key, path, seconds, loop) in next)
+        foreach (var (key, path, times, loop) in next)
         {
-            if (!_assigned.TryGetValue(key, out var e) || e.Reader is not { } r || e.Pending != null) continue;
-            double t = Wrap(path, seconds, loop);
-            // 次のフレームが別のファイル (プロキシの次の区切り・プロキシと元の動画の切り替わり) なら、このデコーダでは読まない
-            if (EffectivePath(path, t) != e.Path) continue;
-            // 今のフレームの範囲内なら、読むものがない
-            if (!double.IsNaN(e.Position) && Math.Abs(t - e.Position) < 1e-9) continue;
-            // 今のフレームの画像は、合成が終わるまで読まれる。先読みの変換で上書きしないよう、置き場を押さえておく
-            r.PinCurrentFrame();
-            e.PendingPosition = t;
-            e.Pending = Task.Run(() =>
+            if (!_assigned.TryGetValue(key, out var e) || e.Reader is not { } r) continue;
+            var wanted = new List<double>();
+            foreach (var seconds in times.Take(LookaheadDepth))
             {
-                try { r.GetFramePointer(t); }
-                catch { /* 先読みの失敗は無視する (本番の取り出しで、もう一度試す) */ }
-            });
+                double t = Wrap(path, seconds, loop);
+                // 別のファイル (プロキシの次の区切り・プロキシと元の動画の切り替わり) なら、このデコーダではそこから先を読まない
+                if (EffectivePath(path, t) != e.Path) break;
+                // 今のフレームより前 (ループで先頭に戻るなど) なら、読み進められないのでやめる
+                if (!double.IsNaN(e.Position) && t < e.Position - 1e-9) break;
+                // 今のフレームの範囲内なら、読むものがない
+                if (!double.IsNaN(e.Position) && Math.Abs(t - e.Position) < 1e-9) continue;
+                wanted.Add(t);
+            }
+            if (wanted.Count == 0) continue;
+            lock (e.Gate)
+            {
+                // すでに読んだもの・読む予定のものは足さない。先読みの数は LookaheadDepth まで (置き場の数で決まる)
+                int planned = e.Ready.Count + (double.IsNaN(e.Working) ? 0 : 1) + e.Targets.Count;
+                foreach (var t in wanted)
+                {
+                    if (planned >= LookaheadDepth) break;
+                    if (IsPlanned(e, t)) continue;
+                    // 予定より前の位置を後から足すと、読む順が戻ってシークになるので足さない
+                    double last = e.Targets.Count > 0 ? e.Targets[^1] : !double.IsNaN(e.Working) ? e.Working : e.Ready.Count > 0 ? e.Ready[^1].Seconds : double.NegativeInfinity;
+                    if (t < last) continue;
+                    e.Targets.Add(t);
+                    planned++;
+                }
+                if (e.Targets.Count == 0 || e.Pending != null) continue;
+                // 今のフレームの画像は、合成が終わるまで読まれる。先読みの変換で上書きしないよう、置き場を押さえておく
+                if (e.Current == IntPtr.Zero) { r.PinCurrentFrame(); e.Current = r.CurrentFramePointer; }
+                e.Pending = Task.Run(() => LookaheadLoop(e, r));
+            }
         }
+    }
+
+    private static bool IsPlanned(VideoEntry e, double t) =>
+        e.Ready.Any(a => Math.Abs(a.Seconds - t) < 1e-9) || Math.Abs(e.Working - t) < 1e-9 || e.Targets.Any(x => Math.Abs(x - t) < 1e-9);
+
+    /// <summary>先読みし終えたフレーム。</summary>
+    private readonly record struct Ahead(double Seconds, IntPtr Data, long FrameId, int Width, int Height, int Divisor);
+
+    /// <summary>裏のスレッドで、Targets の位置を順に取り出す。取り出したフレームの置き場は押さえて Ready に並べる。</summary>
+    private static void LookaheadLoop(VideoEntry e, VideoReader r)
+    {
+        while (true)
+        {
+            double t;
+            lock (e.Gate)
+            {
+                if (e.Targets.Count == 0) { e.Pending = null; Monitor.PulseAll(e.Gate); return; }
+                t = e.Targets[0];
+                e.Targets.RemoveAt(0);
+                e.Working = t;
+            }
+            var item = new Ahead(t, IntPtr.Zero, long.MinValue, 0, 0, r.OutputDivisor);
+            try
+            {
+                var p = r.GetFramePointer(t);
+                if (p != IntPtr.Zero) r.PinFrame(p);
+                item = item with { Data = p, FrameId = r.CurrentFrameId, Width = r.FrameWidth, Height = r.FrameHeight };
+            }
+            catch { /* 先読みの失敗は無視する (本番の取り出しで、もう一度試す) */ }
+            lock (e.Gate)
+            {
+                e.Working = double.NaN;
+                // 取り出せなかったものは並べない (本番の取り出しで、もう一度試す)
+                if (item.Data != IntPtr.Zero) e.Ready.Add(item);
+                Monitor.PulseAll(e.Gate);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 先読みしておいた seconds のフレームがあれば (読んでいる途中なら読み終えるのを待って) 受け取る。なければ false。
+    /// 受け取ったフレームより前の先読みは捨て、前のフレームの置き場を放す。
+    /// </summary>
+    private bool TakeAhead(VideoEntry e, double seconds, int divisor, out Ahead found)
+    {
+        found = default;
+        var r = e.Reader!;
+        lock (e.Gate)
+        {
+            if (e.Pending == null && e.Ready.Count == 0) return false;
+            // 読む予定 (または読んでいる途中) なら、読み終えるのを待つ
+            while ((Math.Abs(e.Working - seconds) < 1e-9 || e.Targets.Any(x => Math.Abs(x - seconds) < 1e-9)) && e.Pending != null)
+                Monitor.Wait(e.Gate);
+            int i = e.Ready.FindIndex(a => Math.Abs(a.Seconds - seconds) < 1e-9);
+            if (i < 0 || e.Ready[i].Divisor != divisor) return false;
+            found = e.Ready[i];
+            for (int k = 0; k < i; k++) r.UnpinFrame(e.Ready[k].Data);
+            e.Ready.RemoveRange(0, i + 1);
+            if (e.Current != IntPtr.Zero && e.Current != found.Data && e.Ready.All(a => a.Data != e.Current)) r.UnpinFrame(e.Current);
+            e.Current = found.Data;
+            Interlocked.Increment(ref _lookaheadHits);
+            return true;
+        }
+    }
+
+    /// <summary>先読みをやめて、裏のスレッドが終わるのを待つ。押さえた置き場もすべて放す (デコーダを描画のスレッドで使えるようにする)。</summary>
+    private static void StopLookahead(VideoEntry e)
+    {
+        Task? pending;
+        lock (e.Gate)
+        {
+            e.Targets.Clear();
+            pending = e.Pending;
+        }
+        try { pending?.Wait(); } catch { /* 中で握りつぶしているので来ない */ }
+        lock (e.Gate)
+        {
+            if (e.Ready.Count == 0 && e.Current == IntPtr.Zero) return;
+            e.Ready.Clear();
+            e.Current = IntPtr.Zero;
+        }
+        e.Reader?.UnpinFrame();
+    }
+
+    /// <summary>先読みしていない (裏のスレッドがデコーダを使っていない) か。</summary>
+    private static bool Idle(VideoEntry e)
+    {
+        lock (e.Gate) return e.Pending == null;
     }
 
     // ---------------- これから始まるクリップを先に開く ----------------
@@ -270,17 +422,10 @@ public sealed class MediaCache : IDisposable
         }
     }
 
-    /// <summary>先読みが終わるのを待って、デコーダを使えるように戻す。</summary>
-    private void WaitLookahead()
+    /// <summary>すべての先読みをやめる。</summary>
+    private void StopAllLookahead()
     {
-        foreach (var e in _byPath.Values.SelectMany(l => l))
-        {
-            if (e.Pending == null) continue;
-            try { e.Pending.Wait(); } catch { /* 中で握りつぶしているので来ない */ }
-            e.Pending = null;
-            e.Reader?.UnpinFrame();
-            e.Position = e.PendingPosition;
-        }
+        foreach (var e in _byPath.Values.SelectMany(l => l)) StopLookahead(e);
     }
 
 
@@ -304,7 +449,10 @@ public sealed class MediaCache : IDisposable
             if (e.UsedInFrame == _frame || e.Preloading != null) continue;
             double t = seconds;
             double cost;
-            if (double.IsNaN(e.Position)) cost = 1000;
+            bool planned;
+            lock (e.Gate) planned = IsPlanned(e, t);
+            if (planned) cost = 0;                                                                          // 先読みしてある
+            else if (double.IsNaN(e.Position)) cost = 1000;
             else if (t >= e.Position - 1e-9 && t - e.Position <= SequentialWindow) cost = t - e.Position;   // 読み進めれば届く
             else cost = 100 + Math.Abs(t - e.Position) / 3600;                                             // シークが必要
             if (cost < bestCost || (cost == bestCost && best != null && e.LastUsed > best.LastUsed)) { best = e; bestCost = cost; }
@@ -355,7 +503,7 @@ public sealed class MediaCache : IDisposable
         foreach (var (path, list) in _byPath.ToList())
         {
             if (path == keep.Path) continue;
-            foreach (var e in list.Where(e => e.Original == keep.Original && e.Path != e.Original && e.UsedInFrame != _frame && e.Pending == null && e.Preloading == null && e.PreloadKey == null).ToList())
+            foreach (var e in list.Where(e => e.Original == keep.Original && e.Path != e.Original && e.UsedInFrame != _frame && Idle(e) && e.Preloading == null && e.PreloadKey == null).ToList())
             {
                 e.Reader?.Dispose(); e.Image?.Dispose();
                 list.Remove(e);
@@ -368,14 +516,33 @@ public sealed class MediaCache : IDisposable
     private void Fetch(VideoEntry e, double seconds, float detail = 1, string? original = null)
     {
         var r = e.Reader;
-        // 先読み中のデコーダには触らない (この描画のフレームは、先読みを始める前に取り出してある)
-        if (r == null || e.Pending != null) { e.Data = IntPtr.Zero; e.Lost = false; return; }
+        e.Lost = false;
+        if (r == null) { e.Data = IntPtr.Zero; return; }
+        int divisor = DivisorFor(e, original ?? e.Path, detail);
+        // 前と同じ位置 (Prefetch のあとの GetVideoFrame・止めたまま描き直すとき): 作った画像をそのまま使う
+        // (以前はデコーダに同じフレームを取り出させて、同じフレームだったので画像を使い回していた。先読みの最中は、デコーダに触らない)
+        if (e.Image != null && !double.IsNaN(e.Position) && Math.Abs(seconds - e.Position) < 1e-9 && e.DataDivisor == divisor)
+        {
+            e.Data = IntPtr.Zero;
+            return;
+        }
+        // 先読みしてあれば、それを使う (裏のスレッドは、そのまま次を読み続ける)
+        if (TakeAhead(e, seconds, divisor, out var ahead))
+        {
+            e.Position = seconds;
+            e.Data = ahead.Data;
+            e.DataFrameId = ahead.FrameId; e.DataWidth = ahead.Width; e.DataHeight = ahead.Height; e.DataDivisor = divisor;
+            return;
+        }
+        // 先読みしていない位置 (シーク・コマ飛ばし・細かさが変わった): 先読みをやめて、このスレッドで取り出す
+        StopLookahead(e);
         e.Position = seconds;
-        r.OutputDivisor = DivisorFor(e, original ?? e.Path, detail);
+        r.OutputDivisor = divisor;
         r.PreferYuv = WantsYuv;
         r.AcceptHardwareFrames = WantsYuv ? (HardwareFrameKinds)_hardwareKinds : HardwareFrameKinds.None;
         long before = r.CurrentFrameId;
         e.Data = r.GetFramePointer(seconds);
+        e.DataFrameId = r.CurrentFrameId; e.DataWidth = r.FrameWidth; e.DataHeight = r.FrameHeight; e.DataDivisor = divisor;
         e.Lost = e.Data == IntPtr.Zero && _zeroCopy && r.CurrentFrameId != before;
     }
 
@@ -385,21 +552,24 @@ public sealed class MediaCache : IDisposable
         var r = e.Reader;
         if (r == null) return null;
         if (e.Data == IntPtr.Zero) return e.Lost ? null : e.Image;
-        if (e.Image == null || e.FrameId != r.CurrentFrameId || e.Image.Width != r.FrameWidth || e.Image.Height != r.FrameHeight)
+        // 先読みのスレッドが動いていることがあるので、デコーダの今の状態ではなく、取り出したときに控えた目印と大きさを使う
+        int w = e.DataWidth, h = e.DataHeight;
+        if (e.Image == null || e.FrameId != e.DataFrameId || e.Image.Width != w || e.Image.Height != h || (_zeroCopy && e.ImageData != e.Data))
         {
             // zeroCopy の古い画像は、デコーダの置き場を指しているだけなので、取り出した後に手放してよい
             e.Image?.Dispose();
             // アニメーション WebP・GIF は透明な部分を残す (VideoReader がアルファを掛けて渡す)
-            var info = new SKImageInfo(r.FrameWidth, r.FrameHeight, SKColorType.Bgra8888, r.HasAlpha ? SKAlphaType.Premul : SKAlphaType.Opaque);
-            if (_zeroCopy) e.Image = SKImage.FromPixels(info, e.Data, r.FrameWidth * 4);
-            else if (HardwareImage(r, e.Data) is { } gpuFrame) e.Image = gpuFrame;
+            var info = new SKImageInfo(w, h, SKColorType.Bgra8888, r.HasAlpha ? SKAlphaType.Premul : SKAlphaType.Opaque);
+            if (_zeroCopy) e.Image = SKImage.FromPixels(info, e.Data, w * 4);
+            else if (HardwareImage(r, e.Data, w, h) is { } gpuFrame) e.Image = gpuFrame;
             else if (r.TryGetYuv(e.Data, out var planes))
             {
                 // YUV のまま持っている: GPU で色を変換する。できなければ、ここで BGRA にしてから送る
                 e.Image = YuvImage(planes) ?? Upload(info, r.EnsureBgra(e.Data));
             }
             else e.Image = Upload(info, e.Data);
-            e.FrameId = r.CurrentFrameId;
+            e.FrameId = e.DataFrameId;
+            e.ImageData = e.Data;
         }
         e.Data = IntPtr.Zero;
         LastFrameSize = (e.Image.Width, e.Image.Height);
@@ -410,12 +580,12 @@ public sealed class MediaCache : IDisposable
     /// フレームを GPU 上のまま持っていれば、GPU の中で RGBA にした画像。持っていない・取り込めないときは null
     /// (取り込めなければ、TryGetYuv でメモリへ写して続ける)。描画のスレッドから呼ぶ。
     /// </summary>
-    private SKImage? HardwareImage(VideoReader r, IntPtr data)
+    private SKImage? HardwareImage(VideoReader r, IntPtr data, int width, int height)
     {
         if (_yuv == null || !DrawingOnGpu) return null;
         var frame = r.TryTakeHardwareFrame(data);
         if (frame == null) return null;
-        var image = _yuv.ConvertHardware(frame, r.FrameWidth, r.FrameHeight);
+        var image = _yuv.ConvertHardware(frame, width, height);
         _hardwareKinds = (int)_yuv.HardwareKinds;
         return image;
     }
@@ -486,6 +656,7 @@ public sealed class MediaCache : IDisposable
         {
             var oldest = _byPath.SelectMany(kv => kv.Value.Select(e => (kv.Key, e))).Where(x => x.e.UsedInFrame != _frame && x.e.Preloading == null).MinBy(x => x.e.LastUsed);
             if (oldest.e == null) return;
+            StopLookahead(oldest.e);
             oldest.e.Reader?.Dispose(); oldest.e.Image?.Dispose();
             _byPath[oldest.Key].Remove(oldest.e);
             if (_byPath[oldest.Key].Count == 0) _byPath.Remove(oldest.Key);
@@ -494,7 +665,7 @@ public sealed class MediaCache : IDisposable
 
     public void Dispose()
     {
-        WaitLookahead();
+        StopAllLookahead();
         FinishPreloads(wait: true);
         foreach (var e in _byPath.Values.SelectMany(l => l)) { e.Reader?.Dispose(); e.Image?.Dispose(); }
         foreach (var (img, _) in _images.Values) img?.Dispose();
