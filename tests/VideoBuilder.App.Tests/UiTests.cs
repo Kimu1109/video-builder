@@ -359,6 +359,133 @@ public class UiTests
     }
 
     [AvaloniaFact]
+    public async Task Preview_frame_is_sent_to_the_screen_gpu_only_when_it_changes()
+    {
+        Open();
+        var s = Svc.Session;
+        async Task WaitCenter(uint color)
+        {
+            uint center = 0;
+            for (int i = 0; i < 150 && center != color; i++)
+            {
+                await Task.Delay(20);
+                Pump();
+                Svc.Preview.WithFrame(b => center = (uint)b.GetPixel(b.Width / 2, b.Height / 2));
+            }
+            Assert.Equal(color, center);
+        }
+        s.AddObject(EffectRegistry.Shape, 90, 0, 60, x => { x.Main.Values["color"] = "#FF0000"; x.Main.Tracks["size"] = new AnimatedValue(4000); });
+        await WaitCenter(0xFFFF0000);
+
+        // 画面の GPU の代わりに、ソフトウェアの GL で作った GPU のコンテキストに描く
+        using var gpu = VideoBuilder.Rendering.GpuContext.TryCreate(out var gpuError);
+        if (gpu == null)
+        {
+            Assert.False(Environment.GetEnvironmentVariable("VB_REQUIRE_GPU") == "1", "GPU を作れません: " + gpuError);
+            return;
+        }
+        gpu.MakeCurrent();
+        using var surface = SkiaSharp.SKSurface.Create(gpu.Context, false, new SkiaSharp.SKImageInfo(64, 64, SkiaSharp.SKColorType.Rgba8888, SkiaSharp.SKAlphaType.Premul));
+        uint Draw(SkiaSharp.SKFilterQuality q)
+        {
+            surface.Canvas.Clear(SkiaSharp.SKColors.Black);
+            Assert.True(Svc.Preview.DrawFrame(surface.Canvas, new SkiaSharp.SKRect(0, 0, 64, 64), q, gpu.Context));
+            surface.Flush();
+            using var bmp = new SkiaSharp.SKBitmap(64, 64);
+            Assert.True(surface.ReadPixels(bmp.Info, bmp.GetPixels(), bmp.RowBytes, 0, 0));
+            return (uint)bmp.GetPixel(32, 32);
+        }
+        long uploads = Svc.Preview.FrameUploads;
+        Assert.Equal(0xFFFF0000u, Draw(SkiaSharp.SKFilterQuality.Low));
+        Assert.Equal(uploads + 1, Svc.Preview.FrameUploads);
+        // 同じフレームを描き直しても、送り直さない (ミップマップがなかったときに、ミップマップのある画質で描くときだけ送る)
+        Assert.Equal(0xFFFF0000u, Draw(SkiaSharp.SKFilterQuality.Low));
+        Assert.Equal(0xFFFF0000u, Draw(SkiaSharp.SKFilterQuality.Medium));
+        Assert.Equal(0xFFFF0000u, Draw(SkiaSharp.SKFilterQuality.Medium));
+        Assert.Equal(0xFFFF0000u, Draw(SkiaSharp.SKFilterQuality.Low));
+        Assert.Equal(uploads + 2, Svc.Preview.FrameUploads);
+
+        // フレームが変わったら送り直す
+        s.AddObject(EffectRegistry.Shape, 91, 0, 60, x => { x.Main.Values["color"] = "#00FF00"; x.Main.Tracks["size"] = new AnimatedValue(4000); });
+        await WaitCenter(0xFF00FF00);
+        gpu.MakeCurrent();
+        Assert.Equal(0xFF00FF00u, Draw(SkiaSharp.SKFilterQuality.Low));
+        Assert.Equal(uploads + 3, Svc.Preview.FrameUploads);
+    }
+
+    [Fact]
+    public void Playback_resolution_drops_when_frames_are_late_and_returns_when_they_are_fast()
+    {
+        const double budget = 1000.0 / 30;
+        int slow = 0, fast = 0, div = 1;
+        int Step(double ms) => div = PreviewService.NextPlaybackDivisor(div, ms, budget, ref slow, ref fast);
+        // 1 回や 2 回遅れただけでは縮めない
+        Step(50); Step(50); Step(10);
+        Assert.Equal(1, div);
+        // 続けて遅れたら 1/2、さらに遅れたら 1/4 (それより小さくはしない)
+        for (int i = 0; i < PreviewService.SlowFramesToShrink; i++) Step(50);
+        Assert.Equal(2, div);
+        for (int i = 0; i < PreviewService.SlowFramesToShrink * 3; i++) Step(50);
+        Assert.Equal(PreviewService.MaxPlaybackDivisor, div);
+        // 間に合ってはいるが余裕がない (戻すと間に合わない) ときは、そのまま
+        for (int i = 0; i < 100; i++) Step(budget * 0.5);
+        Assert.Equal(4, div);
+        // 十分に速く描けるのが続いたら 1 段ずつ戻す。途中で遅れたら数え直す
+        for (int i = 0; i < PreviewService.FastFramesToRestore - 1; i++) Step(1);
+        Step(budget * 0.5);
+        for (int i = 0; i < PreviewService.FastFramesToRestore - 1; i++) Step(1);
+        Assert.Equal(4, div);
+        Step(1);
+        Assert.Equal(2, div);
+        for (int i = 0; i < PreviewService.FastFramesToRestore; i++) Step(1);
+        Assert.Equal(1, div);
+        for (int i = 0; i < 100; i++) Step(1);
+        Assert.Equal(1, div);
+    }
+
+    [AvaloniaFact]
+    public async Task Heavy_scene_is_played_at_a_lower_resolution_and_redrawn_in_full_when_stopped()
+    {
+        Open();
+        var s = Svc.Session;
+        var settings = s.Project.Settings;
+        int ow = settings.Width, oh = settings.Height;
+        var added = new List<string>();
+        try
+        {
+            // CPU で 1 フレームに 30fps の間隔より長くかかる絵 (4K に大きなぼかし)
+            settings.Width = 3840; settings.Height = 2160;
+            added.Add(s.AddObject(EffectRegistry.Shape, 92, 0, 600, x => { x.Main.Values["color"] = "#FF8000"; x.Main.Tracks["size"] = new AnimatedValue(3000); })!.Id);
+            added.Add(s.AddObject("filter.blur", 93, 0, 600, x => x.Main.Tracks["radius"] = new AnimatedValue(300))!.Id);
+            added.Add(s.AddObject("filter.sketch", 94, 0, 600)!.Id);
+            s.CurrentFrame = 0;
+            Svc.Preview.Play();
+            for (int i = 0; i < 400 && Svc.Preview.PlaybackDivisor == 1; i++) { await Task.Delay(20); Pump(); }
+            Assert.True(Svc.Preview.PlaybackDivisor > 1, $"縮めていない (描画 {Svc.Preview.LastRenderMs:0} ms)");
+            // 縮めた大きさで描いている
+            var small = Svc.Preview.TargetSize(3840, 2160);
+            for (int i = 0; i < 400 && Svc.Preview.LastRenderSize != small; i++) { await Task.Delay(20); Pump(); small = Svc.Preview.TargetSize(3840, 2160); }
+            Assert.Equal(small, Svc.Preview.LastRenderSize);
+            Svc.Preview.Stop();
+            Assert.Equal(1, Svc.Preview.PlaybackDivisor);
+            // 止めたら元の大きさで描き直す
+            var expected = Svc.Preview.TargetSize(3840, 2160);
+            for (int i = 0; i < 400 && Svc.Preview.LastRenderSize != expected; i++) { await Task.Delay(20); Pump(); }
+            Assert.Equal(expected, Svc.Preview.LastRenderSize);
+            Assert.True(expected.Width > small.Width);
+        }
+        finally
+        {
+            Svc.Preview.Stop();
+            // ほかのテストが重くならないよう、置いたものを消して大きさを戻す
+            s.SelectMany(added);
+            s.DeleteSelected();
+            settings.Width = ow; settings.Height = oh;
+            s.NotifyChanged();
+        }
+    }
+
+    [AvaloniaFact]
     public async Task Playback_is_driven_by_the_screen_updates_of_the_preview_window()
     {
         var w = Open();

@@ -76,6 +76,15 @@ public sealed class PreviewService : IDisposable
     /// <summary>描く大きさ。設定が自動なら、表示される大きさ (プロジェクトより大きくはしない)。</summary>
     internal (int Width, int Height) TargetSize(int projectWidth, int projectHeight)
     {
+        var (w, h) = FullTargetSize(projectWidth, projectHeight);
+        // 再生が間に合わないので、再生中だけ縮めている (自動のときだけ)
+        int play = _playDivisor;
+        if (play > 1 && _settings.PreviewDivisor < 1) return (Math.Max(2, w / play), Math.Max(2, h / play));
+        return (w, h);
+    }
+
+    private (int Width, int Height) FullTargetSize(int projectWidth, int projectHeight)
+    {
         int div = _settings.PreviewDivisor;
         if (div >= 1)
         {
@@ -389,12 +398,14 @@ public sealed class PreviewService : IDisposable
         engine.RenderToBitmap(p, scene, frame, _back);
         LastRenderMs = sw.Elapsed.TotalMilliseconds;
         LastRenderSize = (w, h);
+        AdaptPlayback(LastRenderMs);
         Rendered?.Invoke(LastRenderMs, w, h);
         var quads = engine.LastQuads.ToList();
         bool post;
         lock (_frameLock)
         {
             (_front, _back) = (_back, _front);
+            _frontVersion++;
             _quads = quads;
             post = !_postPending;
             _postPending = true;
@@ -517,6 +528,7 @@ public sealed class PreviewService : IDisposable
     {
         LastRenderMs = ms;
         LastRenderSize = (w, h);
+        AdaptPlayback(LastRenderMs);
         Rendered?.Invoke(LastRenderMs, w, h);
         bool post;
         lock (_frameLock)
@@ -550,6 +562,12 @@ public sealed class PreviewService : IDisposable
     /// </summary>
     public bool DrawFrame(SKCanvas canvas, SKRect dest, SKFilterQuality quality, GRContext? gpu)
     {
+        if (gpu != null && !NoTextureCache && UploadedFrame(gpu, quality >= SKFilterQuality.Medium) is { } texture)
+        {
+            using var texturePaint = new SKPaint { FilterQuality = quality };
+            canvas.DrawImage(texture, dest, texturePaint);
+            return true;
+        }
         lock (_frameLock)
         {
             if (_front == null) return false;
@@ -560,6 +578,48 @@ public sealed class PreviewService : IDisposable
             canvas.DrawImage(image, dest, paint);
             gpu?.Flush();
             return true;
+        }
+    }
+
+    // ---------------- 画面の GPU へ送ったフレーム ----------------
+    //
+    // CPU で描いた (または読み戻した) フレームを、画面の GPU のテクスチャにして持っておく。以前は画面を描き直すたびに
+    // (選択の枠を動かす・マウスを乗せるなど、フレームが変わっていなくても) フレームの画像を作り直していたので、
+    // 毎回 GPU へ送り直し (1080p で 8MB)、縮小表示のミップマップも作り直していた。今はフレームが変わったときだけ送る。
+    // 送るのは画面の描画のスレッドで、フレームの置き場を押さえている間だけ (送り終えたら、置き場を描画のスレッドに返す)。
+    // 環境変数 VIDEO_BUILDER_PREVIEW_TEXTURE_CACHE=0 で、以前どおり毎回送る。
+
+    private static readonly bool NoTextureCache = Environment.GetEnvironmentVariable("VIDEO_BUILDER_PREVIEW_TEXTURE_CACHE") == "0";
+    private long _frontVersion;
+    private SKImage? _uploaded;
+    private long _uploadedVersion = -1;
+    private GRContext? _uploadedContext;
+    private bool _uploadedMipmaps;
+
+    /// <summary>フレームを画面の GPU へ送った回数 (テスト用)。</summary>
+    internal long FrameUploads { get; private set; }
+
+    /// <summary>今のフレームのテクスチャ。フレームが変わっていれば送り直す。作れなければ null (画像のまま描く)。画面の描画のスレッドで呼ぶ。</summary>
+    internal SKImage? UploadedFrame(GRContext gpu, bool mipmaps)
+    {
+        lock (_frameLock)
+        {
+            if (_front == null) return null;
+            if (_uploaded != null && _uploadedVersion == _frontVersion && ReferenceEquals(_uploadedContext, gpu) && (_uploadedMipmaps || !mipmaps))
+                return _uploaded;
+            using var pixmap = _front.PeekPixels();
+            using var raster = pixmap == null ? null : SKImage.FromPixels(pixmap);
+            var texture = raster?.ToTextureImage(gpu, mipmaps);
+            if (texture == null) return null;
+            // 送る命令を GPU に渡してから置き場を返す (このあと描画のスレッドが置き場を書き換えても、送った中身は変わらない)
+            gpu.Flush();
+            if (ReferenceEquals(_uploadedContext, gpu)) _uploaded?.Dispose();
+            _uploaded = texture;
+            _uploadedVersion = _frontVersion;
+            _uploadedContext = gpu;
+            _uploadedMipmaps = mipmaps;
+            FrameUploads++;
+            return texture;
         }
     }
 
@@ -612,12 +672,63 @@ public sealed class PreviewService : IDisposable
         }
         Current();
         _clock.Restart();
+        _frameBudgetMs = 1000.0 * project.Settings.Fps.Den / Math.Max(1, project.Settings.Fps.Num);
+        _slowFrames = 0; _fastFrames = 0;
         IsPlaying = true;
         StartClock();
         PlayStateChanged?.Invoke();
     }
 
     private int _audioRate;
+
+    // ---------------- 再生中の解像度の自動調整 ----------------
+    //
+    // プレビュー品質が自動のとき、再生中に描画がフレームの間隔に間に合わなければ、再生中だけ縦横 1/2 (さらに 1/4) で描く。
+    // 間に合わないまま描くと、描けたフレームだけが飛び飛びに出る (コマ落ち) ため。止めたら元の大きさで描き直す。
+    // 環境設定の「再生が間に合わないときは、再生中だけ解像度を下げる」と、環境変数 VIDEO_BUILDER_ADAPTIVE_PLAYBACK=0 で切れる。
+
+    internal const int MaxPlaybackDivisor = 4;
+    /// <summary>続けてこの回数だけ間に合わなければ縮める。</summary>
+    internal const int SlowFramesToShrink = 3;
+    /// <summary>続けてこの回数だけ、間隔の Restore 倍以内で描ければ戻す (縦横 2 倍で、描く画素は 4 倍になる)。</summary>
+    internal const int FastFramesToRestore = 30;
+    internal const double Restore = 0.2;
+    private static readonly bool NoAdaptivePlayback = Environment.GetEnvironmentVariable("VIDEO_BUILDER_ADAPTIVE_PLAYBACK") == "0";
+    private volatile int _playDivisor = 1;
+    private double _frameBudgetMs = 1000.0 / 30;
+    private int _slowFrames, _fastFrames;
+
+    /// <summary>再生中だけ縮めている分母 (1 なら縮めていない)。</summary>
+    public int PlaybackDivisor => _playDivisor;
+
+    /// <summary>1 フレーム描くたびに (描画のスレッドで)、再生中なら解像度を見直す。</summary>
+    private void AdaptPlayback(double ms)
+    {
+        if (!IsPlaying || NoAdaptivePlayback || !_settings.AdaptivePlaybackResolution || _settings.PreviewDivisor >= 1) return;
+        int next = NextPlaybackDivisor(_playDivisor, ms, _frameBudgetMs, ref _slowFrames, ref _fastFrames);
+        if (next != _playDivisor && IsPlaying) _playDivisor = next;
+    }
+
+    /// <summary>
+    /// 描くのにかかった時間 ms と、フレームの間隔 budget から、次に使う分母を決める。
+    /// 続けて SlowFramesToShrink 回間に合わなければ縦横 1/2 に、続けて FastFramesToRestore 回、間隔の Restore 倍以内で描ければ 2 倍に戻す。
+    /// </summary>
+    internal static int NextPlaybackDivisor(int divisor, double ms, double budget, ref int slow, ref int fast)
+    {
+        if (ms > budget)
+        {
+            fast = 0;
+            if (++slow >= SlowFramesToShrink && divisor < MaxPlaybackDivisor) { slow = 0; return divisor * 2; }
+            return divisor;
+        }
+        slow = 0;
+        if (divisor > 1 && ms < budget * Restore)
+        {
+            if (++fast >= FastFramesToRestore) { fast = 0; return divisor / 2; }
+        }
+        else fast = 0;
+        return divisor;
+    }
 
     // ---------------- 再生の時計 ----------------
     //
@@ -679,6 +790,8 @@ public sealed class PreviewService : IDisposable
         IsPlaying = false;
         _timer.Stop();
         _frameRequestedOn = null;
+        // 再生中だけ縮めていたなら、止めたフレームを元の大きさで描き直す
+        if (_playDivisor > 1) { _playDivisor = 1; Request(); }
         _audio?.Stop();
         PlayStateChanged?.Invoke();
     }

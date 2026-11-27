@@ -373,6 +373,9 @@ public sealed class PreferencesDialog : DialogBase
         {
             s.PreviewDivisor = new[] { 0, 1, 2, 4 }[i]; Svc.Preview.Request();
         })));
+        var adaptive = new CheckBox { Content = "再生が間に合わないときは、再生中だけ解像度を下げる (プレビュー品質が自動のとき)", IsChecked = s.AdaptivePlaybackResolution };
+        adaptive.IsCheckedChanged += (_, _) => { s.AdaptivePlaybackResolution = adaptive.IsChecked == true; s.Save(); };
+        page.Children.Add(adaptive);
         var seconds = new NumberBox { Minimum = 0.1, Maximum = 600, Decimals = 1, Value = s.DefaultObjectSeconds, Width = 80, HorizontalAlignment = HorizontalAlignment.Left };
         seconds.Committed += v => { s.DefaultObjectSeconds = v; s.Save(); };
         page.Children.Add(Row("新規オブジェクトの長さ (秒)", seconds, 180));
