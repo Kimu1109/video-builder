@@ -21,12 +21,12 @@ namespace VideoBuilder.App.Services;
 /// 共有のハンドルで画面の描画に取り込ませる。受け渡しは keyed mutex。描画と画面の描画が同じ GPU (<see cref="DeviceLuid"/>) のときだけ使える。</item>
 /// </list>
 ///
-/// テクスチャは最大 3 枚を順に使う。画面に出しているもの・出す途中のものには描かない。
+/// テクスチャは最大 4 枚を順に使う。画面に出しているもの・出す途中のもの・GPU が描き終えるのを待っているもの (PreviewService) には描かない。
 /// GL を使う処理 (Acquire・テクスチャの破棄) は描画のスレッドで、画面への受け渡し (Present の中身) は UI スレッドで行う。
 /// </summary>
 public sealed class SharedPreviewTarget
 {
-    private const int MaxTextures = 3;
+    private const int MaxTextures = 4;
     private const int GL_RENDERER = 0x1F01, GL_VENDOR = 0x1F00;
 
     private readonly IOpenGlTextureSharingRenderInterfaceContextFeature? _feature;
@@ -135,7 +135,7 @@ public sealed class SharedPreviewTarget
 
     /// <summary>
     /// size の大きさで、今描いてよいテクスチャを返す (描画のスレッドで、描画の GL を有効にしてから呼ぶ)。
-    /// 3 枚とも使用中なら、少し待ってもだめなら null。大きさの違う、使っていないテクスチャはここで捨てる。
+    /// すべて使用中なら、少し待ってもだめなら null。大きさの違う、使っていないテクスチャはここで捨てる。
     /// Direct3D 11 のときは、描くための鍵も取ってから返す。
     /// </summary>
     public Texture? Acquire(PixelSize size, Action<Texture>? disposeTag)

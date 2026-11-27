@@ -1273,7 +1273,7 @@ video-builder/
 |---|---|---|---|---|
 | NVENC | `h264_nvenc` `hevc_nvenc` `av1_nvenc` | NVIDIA | メモリ上のフレームをそのまま渡す | 品質一定 (`rc=vbr`, `cq`)、速度は `p1`〜`p7` |
 | Quick Sync | `h264_qsv` `hevc_qsv` `av1_qsv` | Intel | 同上 | 品質一定 (ICQ, `global_quality`) |
-| VAAPI | `h264_vaapi` `hevc_vaapi` `av1_vaapi` | Linux の Intel / AMD | GPU 上のフレームへ転送してから渡す | 量子化値を固定 (`rc_mode=CQP`, `qp`) |
+| VAAPI | `h264_vaapi` `hevc_vaapi` `av1_vaapi` | Linux の Intel / AMD | GPU 上のフレームへ転送してから渡す。デバイスは描画に選んだ GPU のレンダーノードから開く ([22.55](#2255-linux-の高速化-画面と共有するプレビューvaapi-のエンコードreadytorun)) | 量子化値を固定 (`rc_mode=CQP`, `qp`) |
 | AMF | `h264_amf` `hevc_amf` `av1_amf` | Windows の AMD | メモリ上のフレームをそのまま渡す | 量子化値を固定 (`rc=cqp`) |
 | VideoToolbox | `h264_videotoolbox` `hevc_videotoolbox` | macOS | 同上 | ビットレート (品質の値から目安を計算) |
 | V4L2 | `h264_v4l2m2m` | ARM ボードなど | 同上 | ビットレート (同上) |
@@ -2068,7 +2068,7 @@ AviUtl 風の詳細編集とは別に、動画・写真を並べるだけで作�
 | 項目 | 内容 |
 |---|---|
 | 仕組み | Avalonia の画面の描画 (コンポジタ) が OpenGL でテクスチャの共有に対応していれば (`IOpenGlTextureSharingRenderInterfaceContextFeature`)、それと共有する GL コンテキストを作り (`SharedPreviewTarget`)、描画のスレッドの Skia をそのコンテキストで動かす (`GpuContext.FromExternal`)。共有のテクスチャ (最大 3 枚を順に使う) に直接描き (`RenderEngine.RenderToGpuSurface`)、`CompositionDrawingSurface` に渡して、`PreviewView` の子のビジュアルとしてフレームの位置に出す。読み戻しも、メモリ上の複製も、送り直しもない |
-| 同期 | 描き終えたら GPU の処理が終わるのを待ってから (`Flush(submit, synchronous)`) 画面に渡す。画面に出ている・出す途中のテクスチャには描かない (次の絵に切り替わったら空く) |
+| 同期 | 画面に渡す前に、GPU の処理が終わったことを確かめる。GL (Linux) ではフェンスを置いて待たずに次のフレームを組み立て、GPU に渡す直前に前のフレームのフェンスを待って画面に渡す ([22.55](#2255-linux-の高速化-画面と共有するプレビューvaapi-のエンコードreadytorun))。Direct3D 11 (Windows) は描き終えたら待つ (`Flush(submit, synchronous)`)。画面に出ている・出す途中・GPU を待っているテクスチャには描かない (次の絵に切り替わったら空く。最大 4 枚) |
 | 選択の枠 | 子のビジュアルはコントロール自身の描画より上に出るので、選択の枠は別の層 (`PreviewView.Selection`) に描いて上に重ねる |
 | 使う条件 | Linux (Windows は Direct3D 11 の共有テクスチャで。[22.35](#2235-windows-の-gpu-描画-angle))・描画方式が GPU (自動を含む)・画面の GPU と描画に選んだ GPU が同じ (`GL_RENDERER` で比べる。違う GPU の間では共有できないので、これまでどおり読み戻す)・自動のときは画面の GPU がソフトウェアでない。`--screenshot` のときは使わない (ウィンドウを画像に描く方法では写らないため)。環境変数 `VIDEO_BUILDER_SHARED_PREVIEW=0` で使わない、`=1` で条件を問わず使う |
 | 表示 | 使っているときは、描画方式の説明に「画面と共有」と出る。使える環境なのに使わないときは理由を添える |
@@ -2769,7 +2769,7 @@ GPU 描画のときに、フレームが GPU と CPU の間を往復する回数
 | デコーダ側 | `VideoReader.PreferYuv` のとき、BGRA に変換するかわりに YUV のフレームを置き場ごとに持つ。先読み中も前のフレームを描けるよう、置き場を 2 つ使う決まり (`PinCurrentFrame`) は BGRA と同じ。縮めるとき (`OutputDivisor`) は YUV のまま縮める。V4L2 のデコーダは受け取り用の置き場が少ないので、参照を持たずに複製する。`TryGetYuv` で面を、`EnsureBgra` で BGRA を受け取る (GPU へ送れなかったとき) |
 | GPU 側 | `YuvTextures`。SkiaSharp 2.88 には YUV の画像を作る API (`SKYuvaPixmaps`) がなく、SkSL も描画時に落ちるので、OpenGL ES 3 を直接使う。Y・U・V の面を R8 / RG8 のテクスチャに送り (`GL_UNPACK_ROW_LENGTH` で行の余白を飛ばす)、自前のシェーダで RGBA8 のテクスチャに描いて、`SKImage.FromTexture` で包む。使い終えたテクスチャは戻ってきて使い回す。GL を使ったあとは `GRContext.ResetContext` で Skia に知らせる |
 | 色 | CPU 描画と同じ絵になるように、sws の既定に合わせる。係数は BT.601 (J 形式はフルレンジ、ほかはリミテッド)。U・V は補間せずに 2x2 画素で同じ値 (sws の拡大縮小しない変換と同じ)。NV12 は sws の振る舞いが CPU の種類で違う (x64 は縦だけ補間し、U・V の行 k が Y の行 2k+1 の位置にあるとみなす。arm64 の NEON 版は補間しない)。初めて使うときに小さな NV12 を sws で変換して調べ (`VideoReader.SwsInterpolatesNv12ChromaVertically`)、同じ読み方にする |
-| 使わないとき | OpenGL ES 3 でない (画面と共有するデスクトップの OpenGL など)・シェーダを作れない・U・V を間引いた形式で幅か高さが奇数 (sws が別の変換を使うので絵が合わない)・行の長さが画素の大きさで割り切れない。これまでどおり BGRA で送る。環境変数 `VIDEO_BUILDER_GPU_YUV=0` で使わない |
+| 使わないとき | OpenGL ES 3 でも OpenGL 3 でもない (画面と共有するデスクトップの OpenGL も使う。[22.55](#2255-linux-の高速化-画面と共有するプレビューvaapi-のエンコードreadytorun))・シェーダを作れない・U・V を間引いた形式で幅か高さが奇数 (sws が別の変換を使うので絵が合わない)・行の長さが画素の大きさで割り切れない。これまでどおり BGRA で送る。環境変数 `VIDEO_BUILDER_GPU_YUV=0` で使わない |
 
 #### 読み戻しを待たない仕組み
 
@@ -2899,3 +2899,35 @@ SkSL は CPU 描画では高速化されていない (22.53) ので、CPU 描画
 | 速さ | 開発環境の GPU はソフトウェア (llvmpipe) で、読み戻しがメモリのコピーにすぎず、GPU の処理も CPU で動くので、速さの差はほとんど出ない (シャープは GPU のぼかしの分だけ遅い)。実際の GPU では、読み戻しの待ちがなくなるぶん速くなるはず (未計測) |
 
 まだ読み戻すもの: プラグインのピクセル効果 (`IPixelEffect`。C# の処理なので GPU では動かせない)。
+
+### 22.55 Linux の高速化 (画面と共有するプレビュー・VAAPI のエンコード・ReadyToRun)
+
+Linux でのパフォーマンスの見直しで挙げた改善のうち、変更の範囲が狭い 4 つを入れた。
+
+| 手法 | 内容 |
+|---|---|
+| 画面と共有するプレビューでも YUV のまま GPU へ | Linux の画面の描画 (Avalonia の GLX) と共有するコンテキストはデスクトップの OpenGL なので、OpenGL ES 3 だけに限っていた YUV の変換 ([22.52](#2252-gpu-と-cpu-の間の受け渡しを減らす-linux-の-gpu-描画)) が使われず、いちばん速いはずの共有のプレビューで、毎フレーム CPU で YUV → BGRA に変換していた。`GlFunctions` がデスクトップの OpenGL 3.0 以上も受け付け、シェーダの先頭の版の指定だけを付け替える (OpenGL ES 3 は `#version 300 es`、OpenGL 3.3 以上は `#version 330 core`、3.0〜3.2 は `#version 130`。本文はどれでも同じ意味になる書き方) |
+| 共有のプレビューで毎フレーム GPU を待たない | 以前は描き終えるたびに GPU の処理が全部終わるまで待っていた (`Flush(submit, synchronous)`。実質 `glFinish`)。GL ではフェンス (`glFenceSync`) を置いて待たずに次のフレームを組み立て、GPU に渡す直前か、次に描くものがなくなったときに前のフレームのフェンスを待って画面に渡す (`PreviewService.PresentPending`)。GPU がフレーム N を描く間に CPU がフレーム N+1 を組み立てられる。画面の描画が読む前に GPU の処理が終わっていることは同じ。待てなかったとき (1 秒) は以前どおり全部待つ。テクスチャは最大 4 枚 (画面に出ている・出す途中・GPU を待っている・描いている)。描画の時間 (パフォーマンスチェック) は、組み立てと GPU に渡す時間に、フェンスを待った時間を足したもの。環境変数 `VIDEO_BUILDER_SHARED_PREVIEW_FENCE=0` で以前どおり。Windows (Direct3D 11 の共有テクスチャ) は変えていない |
+| VAAPI のエンコードを、選んだ GPU で | 以前は既定のデバイス → `renderD128` → `renderD129` の順に決め打ちで開いていたので、外付けの AMD の GPU を選んでいても CPU 内蔵の GPU でエンコードすることがあった。デコードと同じく、描画に選んだ GPU のレンダーノード (`HardwareDecoding.DevicePath`) を先に試す (`VideoEncoderSetup.VaapiDeviceCandidates`)。NVIDIA を選んだときは指定なし (NVENC を使う) |
+| Flatpak・tar.gz も ReadyToRun | AppImage (`packaging/appimage/build.sh`) だけ ReadyToRun で発行していた。Flatpak と tar.gz が使う `packaging/publish-all.sh` でも、Linux 向け (`linux-*`) は ReadyToRun にする。Windows・macOS 向けは変えていない |
+
+#### 確かめたこと
+
+Mesa のソフトウェアの GL (llvmpipe) と Xvfb で確かめた。
+
+- デスクトップの OpenGL での YUV の変換: テストでは GLX の代わりに、EGL でデスクトップの OpenGL のコンテキスト (コア プロファイル 3.3 と互換プロファイル) を作って `GpuContext.FromExternal` で包む (`DesktopGlContext`)。面を直接作って sws と比べると、YUV420P・YUVJ420P・NV12・YUV422P・YUV444P (37x23) で最大 3 (OpenGL ES 3 と同じ)。x264 の動画を CPU 描画と比べて平均の差 0.95・最大 3 (`GpuTransferTests`)。GL_VERSION の読み方 (`GlFunctions.ParseVersion`) もテストする
+- 実際のアプリ: Xvfb の上で Avalonia の画面の描画を GLX (llvmpipe) にして (検証用に llvmpipe の除外を外して起動)、`VIDEO_BUILDER_SHARED_PREVIEW=1` で 1080p の動画を再生し、画面と共有したまま YUV のまま GPU へ送っていること (CPU での変換が 0 回) を確かめた。止めたときの画面は、フェンスありとなしで同じ (差 0)、読み戻して出したものとは RMSE 0.0002 (拡大縮小の補間の分)
+- フェンスの速さ: llvmpipe では効果が出ない。重いシーン (1080p の動画にレンズブラー・グロー、ぼかした図形 6 つ) を 15 秒再生して描けたフレームは、フェンスありで 120・119、なしで 122・119 (差は誤差の範囲)。llvmpipe では、組み立てを終えたあとの GPU の処理が 1 フレーム約 128 ms のうち約 4 ms しかなく、重ねて縮む分がほとんどないため。実際の GPU では、組み立ての間に GPU が描くので、GPU の処理の時間の分だけ縮むはず (未計測)
+- VAAPI のデバイスの順番 (`GpuSelectionTests.Vaapi_encoding_opens_the_chosen_gpu_first`)。この環境には VAAPI の GPU がないので、実際のエンコードは確かめていない
+- ReadyToRun: `publish-all.sh linux-x64` で発行したアセンブリが ReadyToRun になっていること (PE の ManagedNativeHeader)。起動の時間は下の表
+- テストすべて (Xvfb の上で、CI と同じ流し方): VideoBuilder.Tests 518 件・VideoBuilder.App.Tests 104 件が通った
+
+起動の時間 (`--startup-time`。プロセスの開始からウィンドウが出るまで。Xvfb、4 コアの VM で 4 回ずつ):
+
+| 発行のしかた | 起動 | ランタイムと Avalonia の起動 | ウィンドウ作成 | 表示まで |
+|---|---|---|---|---|
+| ReadyToRun なし (以前の Flatpak・tar.gz) | 1127〜1173 ms | 371〜387 ms | 263〜303 ms | 428〜437 ms |
+| ReadyToRun (今の Flatpak・tar.gz・AppImage) | 639〜660 ms | 228〜251 ms | 129〜132 ms | 212〜216 ms |
+
+**実際の GPU での速さは測れていない** (開発環境に GPU がない)。
+

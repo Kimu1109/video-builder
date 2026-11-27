@@ -367,7 +367,7 @@ public sealed unsafe class GpuContext : IDisposable
     private bool _glLoaded;
 
     /// <summary>
-    /// Skia を通さずに使う OpenGL ES 3 の関数。OpenGL ES 3 でないなど、使えなければ null (GlError に理由)。
+    /// Skia を通さずに使う OpenGL の関数 (OpenGL ES 3 か、画面と共有するデスクトップの OpenGL 3)。それより古いなど、使えなければ null (GlError に理由)。
     /// 初めて使うときに探すので、このコンテキストを有効にしたスレッドから呼ぶこと。
     /// </summary>
     internal GlFunctions? Gl
@@ -385,6 +385,35 @@ public sealed unsafe class GpuContext : IDisposable
     }
 
     internal string? GlError => _glError;
+
+    /// <summary>
+    /// ここまでに出した GL の命令が GPU で終わったかを知るためのフェンスを置き、命令を GPU に渡す (待たない)。
+    /// Skia の命令は先に <c>Context.Flush(true, false)</c> で GL に出しておくこと。置けなければ IntPtr.Zero
+    /// (OpenGL ES 3 / OpenGL 3 でないなど)。このコンテキストを有効にしたスレッドで呼ぶ。
+    /// </summary>
+    public IntPtr InsertFence()
+    {
+        var gl = Gl;
+        if (gl == null) return IntPtr.Zero;
+        var fence = gl.FenceSync(GlFunctions.SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (fence != IntPtr.Zero) gl.Flush();   // 渡しておかないと、待つときまで GPU が始めないことがある
+        return fence;
+    }
+
+    /// <summary>フェンスまでの GPU の処理が終わるのを、最長 timeoutNs ナノ秒待つ。終わっていれば true。フェンスは消さない。</summary>
+    public bool WaitFence(IntPtr fence, ulong timeoutNs)
+    {
+        var gl = Gl;
+        if (gl == null || fence == IntPtr.Zero) return false;
+        uint result = gl.ClientWaitSync(fence, GlFunctions.SYNC_FLUSH_COMMANDS_BIT, timeoutNs);
+        return result is GlFunctions.ALREADY_SIGNALED or GlFunctions.CONDITION_SATISFIED;
+    }
+
+    /// <summary>InsertFence で置いたフェンスを消す。</summary>
+    public void DeleteFence(IntPtr fence)
+    {
+        if (fence != IntPtr.Zero) Gl?.DeleteSync(fence);
+    }
     // Windows: このコンテキストだけの Direct3D 11 のデバイスと、それを包む ANGLE のデバイス (Dispose で手放す)
     private IntPtr _d3dDevice, _angleDevice;
     private IntPtr _config;

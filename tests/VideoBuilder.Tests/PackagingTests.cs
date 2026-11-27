@@ -40,6 +40,17 @@ public class PackagingTests
     }
 
     [Fact]
+    public void Linux_packages_are_published_ready_to_run()
+    {
+        // AppImage と、Flatpak・tar.gz (publish-all.sh で発行する) のどちらも ReadyToRun にして、起動時の JIT を減らす
+        var appImage = File.ReadAllText(Path.Combine(Root(), "packaging", "appimage", "build.sh"));
+        var publishAll = File.ReadAllText(Path.Combine(Root(), "packaging", "publish-all.sh"));
+        Assert.Contains("-p:PublishReadyToRun=true", appImage);
+        Assert.Matches(@"linux-\*\) r2r=\(-p:PublishReadyToRun=true\)", publishAll);
+        Assert.Contains("${r2r[@]+\"${r2r[@]}\"}", publishAll);
+    }
+
+    [Fact]
     public void Flatpak_and_the_build_script_use_the_same_ffmpeg_source()
     {
         var version = Regex.Match(Script, "FFMPEG_VERSION=\"([^\"]+)\"").Groups[1].Value;

@@ -57,6 +57,25 @@ public class GpuSelectionTests
         finally { HardwareDecoding.DeviceHint = null; HardwareDecoding.ResetDevices(); }
     }
 
+    [Fact]
+    public void Vaapi_encoding_opens_the_chosen_gpu_first()
+    {
+        // 選んだ GPU (2 枚目の GPU の renderD129 など) を先に試し、開けなければこれまでどおり既定 → よくあるレンダーノード
+        Assert.Equal(new string?[] { "/dev/dri/renderD129", null, "/dev/dri/renderD128" }, VideoEncoderSetup.VaapiDeviceCandidates("/dev/dri/renderD129"));
+        Assert.Equal(new string?[] { null, "/dev/dri/renderD128", "/dev/dri/renderD129" }, VideoEncoderSetup.VaapiDeviceCandidates(null));
+        Assert.Equal(new string?[] { null, "/dev/dri/renderD128", "/dev/dri/renderD129" }, VideoEncoderSetup.VaapiDeviceCandidates(""));
+        // 選んだ GPU は、デコードと同じく描画の GPU のレンダーノード (NVIDIA を選んだときは指定なし)
+        if (!OperatingSystem.IsLinux() || !FFmpegLoader.EnsureLoaded()) return;
+        try
+        {
+            HardwareDecoding.DeviceHint = () => ("vaapi", "/dev/dri/renderD129");
+            Assert.Equal("/dev/dri/renderD129", HardwareDecoding.DevicePath(FFmpeg.AutoGen.AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI));
+            HardwareDecoding.DeviceHint = () => ("cuda", "");
+            Assert.Null(HardwareDecoding.DevicePath(FFmpeg.AutoGen.AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI));
+        }
+        finally { HardwareDecoding.DeviceHint = null; HardwareDecoding.ResetDevices(); }
+    }
+
     // Windows (DXGI) のアダプタ: 名前は DXGI のもの、ID は PCI の ID
     private static readonly GpuAdapter WinIntel = new(0, "Intel(R) UHD Graphics", "Intel", "", "", false, 0x0000_0000_0001_2345, "8086:A788:3FC817AA");
     private static readonly GpuAdapter WinNvidia = new(1, "NVIDIA GeForce RTX 4070 Laptop GPU", "NVIDIA", "", "", false, 0x0000_0000_0001_6789, "10DE:2860:3FC817AA");
