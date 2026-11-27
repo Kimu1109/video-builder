@@ -45,6 +45,8 @@ public sealed class ExportDialog : DialogBase
         _formats = AllFormats.Where(f => f.Sequence ||
             (f.VideoCodec == "" || MediaWriter.IsEncoderAvailable(f.VideoCodec)) && (f.AudioCodec == "" || MediaWriter.IsEncoderAvailable(f.AudioCodec))).ToList();
         _format = new ComboBox { ItemsSource = _formats.Select(f => f.Name).ToList(), SelectedIndex = 0, HorizontalAlignment = HorizontalAlignment.Stretch };
+        // おすすめの構成のエンコーダ (ソフトウェアのもの) なら、はじめからそれを選ぶ。ハードウェアのものは見つかってから (AddHardwareFormatsAsync)
+        if (PreferredIndex() is var pre and >= 0) _format.SelectedIndex = _initialFormat = pre;
         _format.SelectionChanged += (_, _) => { if (_format.SelectedIndex >= 0) { FixExtension(); UpdateOptions(); } };
         // このマシンで使えるハードウェアエンコーダを裏で調べて、見つかったら選択肢に足す
         _ = AddHardwareFormatsAsync();
@@ -90,19 +92,36 @@ public sealed class ExportDialog : DialogBase
 
     private Format Current => _formats[Math.Clamp(_format.SelectedIndex, 0, _formats.Count - 1)];
 
+    /// <summary>今選んでいる形式の名前 (テスト用)。</summary>
+    internal string SelectedFormatName => Current.Name;
+
     private async Task AddHardwareFormatsAsync()
     {
         List<HardwareEncoder> found;
         try { found = await Task.Run(HardwareEncoders.FindAvailable); }
         catch { return; }
         if (found.Count == 0 || !MediaWriter.IsEncoderAvailable("aac")) return;
+        // まだ形式を選び直していなければ、おすすめの構成のエンコーダ (設計書 22.63) を選ぶ
+        bool untouched = _format.SelectedIndex == _initialFormat;
         var selected = Current;
         // ソフトウェアの映像形式のすぐ後ろ (連番 PNG・音声のみの前) に並べる
         int at = _formats.FindIndex(f => f.Sequence || f.VideoCodec == "");
         if (at < 0) at = _formats.Count;
         _formats.InsertRange(at, found.Select(h => new Format($"MP4 ({h.Codec} + AAC) - ハードウェア ({h.Api})", "mp4", h.Encoder, "aac")));
         _format.ItemsSource = _formats.Select(f => f.Name).ToList();
-        _format.SelectedIndex = _formats.IndexOf(selected);
+        int preferred = untouched ? PreferredIndex() : -1;
+        _format.SelectedIndex = preferred >= 0 ? preferred : _formats.IndexOf(selected);
+        if (preferred >= 0) _initialFormat = preferred;
+    }
+
+    // 開いたときに選んでいた形式 (利用者が選び直したかを見分ける)
+    private int _initialFormat;
+
+    /// <summary>環境設定の「書き出しで最初に選ぶエンコーダ」の形式の番号 (なければ -1)。</summary>
+    private int PreferredIndex()
+    {
+        var want = Svc.Settings.PreferredVideoEncoder;
+        return want.Length == 0 ? -1 : _formats.FindIndex(f => !f.Sequence && f.VideoCodec == want);
     }
 
     private void UpdateOptions()

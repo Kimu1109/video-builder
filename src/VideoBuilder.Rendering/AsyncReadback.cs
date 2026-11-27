@@ -36,9 +36,14 @@ internal sealed unsafe class AsyncReadback : IDisposable
     public string? YuvError { get; private set; }
     private long BufferBytes => Yuv?.Bytes ?? (long)RowBytes * Height;
 
-    // ---- VAAPI のエンコーダのフレームへ直接描く (読み戻さない。設計書 22.58) ----
+    // ---- エンコーダのフレームへ直接描く (読み戻さない) ----
+    // VAAPI: フレームを DMA-BUF として取り込んで直接描く (設計書 22.58)。
+    // CUDA (NVENC): NV12 にした面を、CUDA と GL の相互運用で GPU の中でフレームへ写す (設計書 22.62)
     private Func<(VideoBuilder.Media.HardwareFrame? Frame, string? Error)>? _allocate;
     private EglDmaBuf? _dmaBuf;
+    private CudaGl? _cudaOut;
+    /// <summary>直接描くフレームの種類 (VAAPI か CUDA)。</summary>
+    public VideoBuilder.Media.HardwareFrameKinds DirectKind { get; private set; }
     private readonly DirectTarget?[] _direct = new DirectTarget?[Depth];
 
     /// <summary>エンコーダのフレームへ直接描いているか。</summary>
@@ -56,15 +61,22 @@ internal sealed unsafe class AsyncReadback : IDisposable
     }
 
     /// <summary>
-    /// これからのフレームを、allocate で取った VAAPI のフレーム (エンコーダのもの) に DMA-BUF として直接描く。
-    /// Yuv が NV12 で、EGL で DMA-BUF を取り込めるときだけ。使えなければ false (DirectError に理由。これまでどおり読み戻す)。
+    /// これからのフレームを、allocate で取ったエンコーダのフレームに直接描く。
+    /// VAAPI: DMA-BUF として取り込んで描く (EGL で DMA-BUF を取り込めるとき)。
+    /// CUDA (NVENC): NV12 に変換した面を、GPU の中で CUDA のフレームへ写す (GL のコンテキストが NVIDIA の GPU のとき)。
+    /// どちらも Yuv が NV12 のときだけ。使えなければ false (DirectError に理由。これまでどおり読み戻す)。
     /// </summary>
-    public bool EnableDirect(Func<(VideoBuilder.Media.HardwareFrame? Frame, string? Error)> allocate)
+    public bool EnableDirect(Func<(VideoBuilder.Media.HardwareFrame? Frame, string? Error)> allocate,
+        VideoBuilder.Media.HardwareFrameKinds kind = VideoBuilder.Media.HardwareFrameKinds.Vaapi)
     {
-        if (Environment.GetEnvironmentVariable("VIDEO_BUILDER_VAAPI_DIRECT") == "0") { DirectError = "VIDEO_BUILDER_VAAPI_DIRECT=0"; return false; }
+        bool cuda = kind == VideoBuilder.Media.HardwareFrameKinds.Cuda;
+        string env = cuda ? "VIDEO_BUILDER_NVENC_DIRECT" : "VIDEO_BUILDER_VAAPI_DIRECT";
+        if (Environment.GetEnvironmentVariable(env) == "0") { DirectError = env + "=0"; return false; }
         if (Yuv == null || Yuv.Layout != VideoBuilder.Media.YuvLayout.Nv12) { DirectError = YuvError ?? "GPU で NV12 に変換できません"; return false; }
-        _dmaBuf = EglDmaBuf.Create(_gpu, out var error);
-        if (_dmaBuf == null) { DirectError = error; return false; }
+        string? error;
+        if (cuda) { _cudaOut = CudaGl.Create(_gpu, out error, toFrame: true); if (_cudaOut == null) { DirectError = error; return false; } }
+        else { _dmaBuf = EglDmaBuf.Create(_gpu, out error); if (_dmaBuf == null) { DirectError = error; return false; } }
+        DirectKind = kind;
         _allocate = allocate;
         return true;
     }
@@ -78,6 +90,18 @@ internal sealed unsafe class AsyncReadback : IDisposable
         var gl = _gl;
         try
         {
+            if (_cudaOut != null)
+            {
+                // NV12 にした面を描き、GPU の中で CUDA のフレームへ写す (GL の描画が終わってから写り、
+                // 写し終えるまで GL は次の描画で面を書き換えない。cuGraphicsMapResources / Unmap が保証する)
+                if (frame.Kind != VideoBuilder.Media.HardwareFrameKinds.Cuda) { DisableDirect("エンコーダのフレームが CUDA ではありません"); return null; }
+                Yuv!.Convert(_texture);
+                int r = _cudaOut.Copy(frame, Yuv.PlaneTextures);
+                if (r != 0) { DisableDirect($"GL のテクスチャから CUDA のフレームへ写せません (CUDA のエラー {r})"); return null; }
+                var copied = d;
+                d = null;
+                return copied;
+            }
             if (!frame.TryMapDmaBuf(out var layers, out error, write: true)) { DisableDirect(error!); return null; }
             if (layers.Length != 2 || layers[0].DrmFormat != VideoBuilder.Media.HardwareFrame.DrmR8 || layers[1].DrmFormat != VideoBuilder.Media.HardwareFrame.DrmGR88)
             {
@@ -275,6 +299,8 @@ internal sealed unsafe class AsyncReadback : IDisposable
             {
                 // GPU が描き終えた。取り込みを外して、フレームをエンコーダへ
                 if (useDirect == null) return false;
+                // CUDA: フレームへ写す命令が終わるまで待つ (NVENC は別のスレッドで、同じフレームを読む)
+                if (_cudaOut != null && _cudaOut.Wait(direct.Frame) is var cr and not 0) { DisableDirect($"CUDA の処理が終わりません (CUDA のエラー {cr})"); return false; }
                 ReleaseDirect(direct, disposeFrame: false);
                 var frame = direct.Frame;
                 direct = null;
@@ -309,6 +335,8 @@ internal sealed unsafe class AsyncReadback : IDisposable
         for (int i = 0; i < Depth; i++)
             if (_direct[i] is { } d) { ReleaseDirect(d, disposeFrame: true); _direct[i] = null; }
         _pending.Clear();
+        _cudaOut?.Dispose();
+        _cudaOut = null;
         Yuv?.Dispose();
         Surface.Dispose();
         fixed (uint* b = _buffers) gl.DeleteBuffers(Depth, b);

@@ -135,12 +135,22 @@ public static unsafe class HardwareDecoding
     private static readonly HashSet<string> M2mOpened = new();
 
     /// <summary>
-    /// 種類ごとに共有するデバイスを返す (呼び出し側は av_buffer_ref して使う)。作れなければ null。
+    /// 種類ごとに共有するデバイスの参照を、新しく 1 つ返す (呼び出し側が av_buffer_unref する)。作れなければ null。
     /// 作れなかった種類は覚えておき、2 回目からは試さない (開くたびに時間がかからないように)。
+    /// 参照はロックの中で増やす: 以前は共有のものをそのまま返し、呼び出し側が av_buffer_ref していたので、
+    /// その間に別のスレッドが ResetDevices で手放すと、解放済みのものを参照して落ちた (設計書 22.63)。
     /// </summary>
     internal static AVBufferRef* SharedDevice(AVHWDeviceType type, out string? error)
     {
         lock (Gate)
+        {
+            var shared = SharedDeviceLocked(type, out error);
+            return shared == null ? null : ffmpeg.av_buffer_ref(shared);
+        }
+    }
+
+    private static AVBufferRef* SharedDeviceLocked(AVHWDeviceType type, out string? error)
+    {
         {
             error = null;
             if (Devices.TryGetValue(type, out var known)) return (AVBufferRef*)known;
@@ -188,7 +198,9 @@ public static unsafe class HardwareDecoding
             try
             {
                 if (ffmpeg.avcodec_parameters_to_context(ctx, st->codecpar) < 0) { reasons.Add("デコーダの設定に失敗"); continue; }
-                ctx->hw_device_ctx = ffmpeg.av_buffer_ref(device);
+                // SharedDevice が返した参照を、そのままデコーダに渡す
+                ctx->hw_device_ctx = device;
+                device = null;
                 ctx->get_format = GetFormatPointer;
                 ctx->opaque = (void*)(nint)(int)wanted.Value;     // GetFormat で読む
                 // GPU がデコードするので、CPU のスレッドは少なくてよい
@@ -206,6 +218,7 @@ public static unsafe class HardwareDecoding
             {
                 ffmpeg.av_log_set_level(level);
                 if (ctx != null) ffmpeg.avcodec_free_context(&ctx);
+                if (device != null) ffmpeg.av_buffer_unref(&device);
             }
         }
         if (TriesV4l2M2m)
@@ -345,7 +358,9 @@ public static unsafe class HardwareDecoding
         var lines = new List<string>();
         foreach (var type in DeviceOrder())
         {
-            bool ok = SharedDevice(type, out var error) != null;
+            var device = SharedDevice(type, out var error);
+            bool ok = device != null;
+            if (device != null) ffmpeg.av_buffer_unref(&device);
             string where = DevicePath(type) is { } path ? type is AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA or AVHWDeviceType.AV_HWDEVICE_TYPE_D3D12VA ? $" (GPU {path})" : $" ({path})" : "";
             lines.Add(ok ? $"{NameOf(type)}{where}: 使用可能" : error ?? $"{NameOf(type)}: 使用不可");
         }

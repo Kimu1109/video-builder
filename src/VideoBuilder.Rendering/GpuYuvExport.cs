@@ -181,6 +181,34 @@ internal sealed unsafe class GpuYuvExport : IDisposable
     }
 
     /// <summary>
+    /// source を変換して、面ごとの変換先 (<see cref="PlaneTextures"/>) に描くだけ (読み戻さない)。
+    /// NVENC の CUDA のフレームへ、GPU の中で写すときに使う (設計書 22.62)。
+    /// </summary>
+    public void Convert(uint source)
+    {
+        var gl = _gl;
+        Begin(source);
+        foreach (var t in _targets)
+        {
+            gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, t.Fbo);
+            gl.Viewport(0, 0, t.W, t.H);
+            gl.Uniform1i(_locPass, t.Pass);
+            gl.DrawArrays(GlFunctions.TRIANGLE_STRIP, 0, 4);
+        }
+        gl.BindVertexArray(0);
+        gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, 0);
+    }
+
+    /// <summary>
+    /// 面ごとの変換先のテクスチャ (RGBA8 に 4 バイトずつ詰めたもの) と、1 行の中身のバイト数・行数。
+    /// NV12 なら Y (Width バイト x Height 行) と U・V (Width バイト x Height/2 行)。
+    /// </summary>
+    public (uint Texture, int WidthBytes, int Height)[] PlaneTextures =>
+        Layout == YuvLayout.Nv12
+            ? new[] { (_targets[0].Texture, Width, Height), (_targets[1].Texture, Width, Height / 2) }
+            : new[] { (_targets[0].Texture, Width, Height), (_targets[1].Texture, Width / 2, Height / 2), (_targets[2].Texture, Width / 2, Height / 2) };
+
+    /// <summary>
     /// source を NV12 に変換して、Y の面 (R8、Width x Height) と U・V の面 (GR88、半分の大きさ) の FBO に直接描く
     /// (VAAPI のフレームを DMA-BUF として取り込んだもの)。
     /// </summary>

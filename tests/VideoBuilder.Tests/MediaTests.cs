@@ -443,6 +443,31 @@ public class HardwareDecodingTests : IDisposable
         Assert.Equal(nv12, HardwareDecoding.ChooseFormat(new[] { cuda, nv12 }, FFmpeg.AutoGen.AVPixelFormat.AV_PIX_FMT_NONE));
     }
 
+    /// <summary>
+    /// 使う GPU を変えたとき (ResetDevices) に、別のスレッドで動画を開いていても落ちない (設計書 22.63)。
+    /// 以前は共有のデバイスを参照を増やさずに返していたので、その間に手放されると解放済みのものを使って落ちた。
+    /// </summary>
+    [Fact]
+    public void Devices_can_be_reset_while_another_thread_opens_videos()
+    {
+        if (!_ready) return;
+        HardwareDecoding.Mode = HardwareDecodeMode.Auto;
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(1.5));
+        int opened = 0;
+        var readers = Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                using var r = new VideoReader(_clip);
+                Assert.NotNull(r.GetFrame(0.2));
+                Interlocked.Increment(ref opened);
+            }
+        })).ToArray();
+        while (!stop.IsCancellationRequested) { HardwareDecoding.ResetDevices(); Thread.Sleep(1); }
+        Task.WaitAll(readers);
+        Assert.True(opened > 0);
+    }
+
     [Fact]
     public unsafe void Device_failures_are_remembered_and_unknown_devices_are_skipped()
     {
@@ -452,9 +477,13 @@ public class HardwareDecodingTests : IDisposable
             var first = HardwareDecoding.SharedDevice(type, out var e1);
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var second = HardwareDecoding.SharedDevice(type, out var e2);
-            Assert.True(first == second);
+            // 参照は別々に返るが、指すデバイスは同じ
+            Assert.True((first == null) == (second == null));
+            if (first != null) Assert.True(first->data == second->data);
             Assert.Equal(e1, e2);
             Assert.True(sw.ElapsedMilliseconds < 50, "2 回目は覚えている結果を返す");
+            if (first != null) FFmpeg.AutoGen.ffmpeg.av_buffer_unref(&first);
+            if (second != null) FFmpeg.AutoGen.ffmpeg.av_buffer_unref(&second);
         }
         HardwareDecoding.PreferredDevice = "no-such-device";
         Assert.Empty(HardwareDecoding.DeviceOrder());

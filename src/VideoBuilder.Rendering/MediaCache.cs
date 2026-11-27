@@ -101,8 +101,15 @@ public sealed class MediaCache : IDisposable
     /// <summary>ハードウェアデコードしたフレームを、メモリへ写さずに GPU 上のまま変換した数 (計測・テスト用。設計書 22.58)。</summary>
     public long GpuHardwareFrames => _yuv?.HardwareConverted ?? 0;
 
+    /// <summary>そのうち 10 ビット (P010) のもの (計測・テスト用。設計書 22.62)。</summary>
+    public long GpuHardwareFrames10Bit => _yuv?.HardwareConverted10Bit ?? 0;
+
     /// <summary>ハードウェアデコードしたフレームを GPU 上のまま使えないとき、その理由。</summary>
     public string? GpuHardwareError => _yuv?.HardwareError;
+
+    /// <summary>開いている動画のデコーダ (確認用。描画のスレッドから読む)。例: "VAAPI x1, ソフトウェア x1"。</summary>
+    public string DecoderSummary => string.Join(", ", _byPath.Values.SelectMany(l => l).Where(e => e.Reader != null)
+        .GroupBy(e => e.Reader!.DecoderName).Select(g => $"{g.Key} x{g.Count()} (GPU 上のまま {g.Sum(e => e.Reader!.HardwareFramesKept)})"));
 
     // GPU 上のまま受け取るフレームの種類 (YuvTextures を作ってから決まる。取り込めなくなった種類は外れる)
     private volatile int _hardwareKinds;
@@ -115,6 +122,12 @@ public sealed class MediaCache : IDisposable
 
     /// <summary>プレビュー用: プロキシがあれば元の動画の代わりに使う。</summary>
     public bool UseProxies { get; set; }
+
+    /// <summary>
+    /// 動画をハードウェアでデコードしてよいか (既定 true。設定の「動画のデコード」に従う)。
+    /// false なら、このキャッシュで開く動画はソフトウェアでデコードする (おすすめの構成の計測で比べるため。設計書 22.63)。
+    /// </summary>
+    public bool AllowHardwareDecoding { get; set; } = true;
 
     /// <summary>今開いているデコーダの数 (計測・テスト用)。</summary>
     public int ReaderCount => _byPath.Values.Sum(l => l.Count);
@@ -285,7 +298,7 @@ public sealed class MediaCache : IDisposable
     private readonly record struct Ahead(double Seconds, IntPtr Data, long FrameId, int Width, int Height, int Divisor);
 
     /// <summary>裏のスレッドで、Targets の位置を順に取り出す。取り出したフレームの置き場は押さえて Ready に並べる。</summary>
-    private static void LookaheadLoop(VideoEntry e, VideoReader r)
+    private void LookaheadLoop(VideoEntry e, VideoReader r)
     {
         while (true)
         {
@@ -300,6 +313,9 @@ public sealed class MediaCache : IDisposable
             var item = new Ahead(t, IntPtr.Zero, long.MinValue, 0, 0, r.OutputDivisor);
             try
             {
+                // GPU 上のまま受け取れる種類は、最初のフレームを変換したあと (YuvTextures を作ったとき) に決まり、取り込めなくなると減る。
+                // 先読みが続くと描画のスレッドはデコーダに触らないので、ここで今の値にする (設計書 22.62)
+                if (r.PreferYuv) r.AcceptHardwareFrames = (HardwareFrameKinds)_hardwareKinds;
                 var p = r.GetFramePointer(t);
                 if (p != IntPtr.Zero) r.PinFrame(p);
                 item = item with { Data = p, FrameId = r.CurrentFrameId, Width = r.FrameWidth, Height = r.FrameHeight };
@@ -476,17 +492,18 @@ public sealed class MediaCache : IDisposable
     }
 
     /// <param name="sourceWidth">元の動画の幅 (path がプロキシのとき、縮小率を求めるのに使う)。</param>
-    private static VideoEntry Open(string path, string original, int sourceWidth)
+    private VideoEntry Open(string path, string original, int sourceWidth)
     {
         var e = new VideoEntry { Path = path, Original = original };
+        bool hw = AllowHardwareDecoding;
         // プロキシの区切りは、元の動画と同じ時刻で書いてあるので、時刻をそのまま使って読む
-        try { e.Reader = File.Exists(path) ? new VideoReader(path, absoluteTime: path != original) : null; }
+        try { e.Reader = File.Exists(path) ? new VideoReader(path, absoluteTime: path != original, allowHardware: hw) : null; }
         catch { e.Reader = null; }
         if (e.Reader == null && original != path)
         {
             // プロキシが壊れていて開けなければ、元の動画を読む
             e.Path = original;
-            try { e.Reader = File.Exists(original) ? new VideoReader(original) : null; }
+            try { e.Reader = File.Exists(original) ? new VideoReader(original, false, allowHardware: hw) : null; }
             catch { e.Reader = null; }
         }
         else if (original != path)
@@ -538,6 +555,9 @@ public sealed class MediaCache : IDisposable
         StopLookahead(e);
         e.Position = seconds;
         r.OutputDivisor = divisor;
+        // GPU 上のまま受け取れる種類は、YUV の変換 (YuvTextures) を作ると決まる。ハードウェアデコードなら先に作っておく
+        // (10 ビットの動画は、メモリ上の 8 ビットの YUV にならないので、作るきっかけがない。設計書 22.62)
+        if (r.IsHardware && WantsYuv) EnsureYuv();
         r.PreferYuv = WantsYuv;
         r.AcceptHardwareFrames = WantsYuv ? (HardwareFrameKinds)_hardwareKinds : HardwareFrameKinds.None;
         long before = r.CurrentFrameId;
@@ -594,14 +614,20 @@ public sealed class MediaCache : IDisposable
     private SKImage? YuvImage(in VideoBuilder.Media.YuvPlanes planes)
     {
         if (_gpuContext == null || !DrawingOnGpu || _yuvState < 0) return null;
-        if (_yuv == null)
-        {
-            _yuv = YuvTextures.Create(_gpuContext, out var error);
-            if (_yuv == null) { GpuYuvError = error; _yuvState = -1; return null; }
-            _yuvState = 1;
-            _hardwareKinds = (int)_yuv.HardwareKinds;
-        }
-        return _yuv.Convert(planes);
+        if (!EnsureYuv()) return null;
+        return _yuv!.Convert(planes);
+    }
+
+    /// <summary>YUV の変換 (GPU) を用意する。作れなければ false (このあと YUV のまま送らない)。描画のスレッドから呼ぶ。</summary>
+    private bool EnsureYuv()
+    {
+        if (_yuv != null) return true;
+        if (_gpuContext == null || _yuvState < 0) return false;
+        _yuv = YuvTextures.Create(_gpuContext, out var error);
+        if (_yuv == null) { GpuYuvError = error; _yuvState = -1; return false; }
+        _yuvState = 1;
+        _hardwareKinds = (int)_yuv.HardwareKinds;
+        return true;
     }
 
     /// <summary>GPU へ送った回数 (メモリ上で複製せずに直接送ったもの。計測・テスト用)。</summary>

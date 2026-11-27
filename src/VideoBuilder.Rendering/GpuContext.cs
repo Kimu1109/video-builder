@@ -80,6 +80,8 @@ internal static unsafe class EglApi
     public static readonly delegate* unmanaged<IntPtr, int, IntPtr> QueryString;
     public static readonly delegate* unmanaged<IntPtr, int> Terminate;
     public static readonly delegate* unmanaged<int> GetError;
+    /// <summary>このスレッドで有効な EGL のディスプレイ (なければ 0)。GLX のコンテキストが有効なときも 0。</summary>
+    public static readonly delegate* unmanaged<IntPtr> GetCurrentDisplay;
     private static readonly delegate* unmanaged<byte*, IntPtr> GetProcAddressPtr;
 
     public static bool Available => LoadError == null;
@@ -137,6 +139,7 @@ internal static unsafe class EglApi
             GetError = (delegate* unmanaged<int>)Need("eglGetError");
             Terminate = (delegate* unmanaged<IntPtr, int>)Need("eglTerminate");
             GetPlatformDisplay = (delegate* unmanaged<int, IntPtr, IntPtr*, IntPtr>)Export(lib, "eglGetPlatformDisplay", GetProcAddressPtr);
+            GetCurrentDisplay = (delegate* unmanaged<IntPtr>)Export(lib, "eglGetCurrentDisplay", GetProcAddressPtr);
             if (missing.Count > 0) LoadError = "EGL の関数がありません: " + string.Join(", ", missing);
         }
         catch (Exception ex)
@@ -419,6 +422,15 @@ public sealed unsafe class GpuContext : IDisposable
     private IntPtr _config;
 
     internal IntPtr Display => _display;
+
+    /// <summary>
+    /// GL のコンテキストの EGL のディスプレイ。自分で作ったものはそのディスプレイ、画面と共有するもの (FromExternal) は、
+    /// 画面の描画が EGL のときだけそのディスプレイ (GLX なら 0)。DMA-BUF の取り込み (EglDmaBuf) に使う。
+    /// </summary>
+    internal IntPtr EglDisplay => _display != IntPtr.Zero ? _display : _externalEglDisplay;
+    private IntPtr _externalEglDisplay;
+    /// <summary>画面と共有するコンテキストが EGL のものか (Avalonia が EGL で画面を描いているか)。</summary>
+    public bool IsExternalEgl => IsExternal && _externalEglDisplay != IntPtr.Zero;
     internal IntPtr Config => _config;
     internal IntPtr D3DDevice => _d3dDevice;
 
@@ -676,7 +688,13 @@ public sealed unsafe class GpuContext : IDisposable
     public static GpuAdapter? SelectedAdapter() => ChooseAdapter(Adapters(), PreferredAdapter);
 
     /// <summary>GPU コンテキストを作る。使えない環境では null を返し、error に理由を入れる。</summary>
-    public static GpuContext? TryCreate(out string? error)
+    public static GpuContext? TryCreate(out string? error) => TryCreate(PreferredAdapter, out error);
+
+    /// <summary>
+    /// preferred (GpuAdapter.Id。null なら自動) の GPU でコンテキストを作る。<see cref="PreferredAdapter"/> は変えない
+    /// (おすすめの構成を調べるときに、GPU を 1 つずつ試すため)。開けなければ、ほかの GPU で開くことがある (Adapter で確かめる)。
+    /// </summary>
+    public static GpuContext? TryCreate(string? preferred, out string? error)
     {
         error = null;
         if (!OperatingSystem.IsLinux() && !OperatingSystem.IsWindows()) { error = "この OS では GPU 描画にまだ対応していません"; return null; }
@@ -685,9 +703,9 @@ public sealed unsafe class GpuContext : IDisposable
 
         // 1. 選んだ GPU (自動なら外付けを優先) を開く
         var devices = EnumerateDevices();
-        var chosen = ChooseAdapter(devices.Select(x => x.Adapter).ToList(), PreferredAdapter);
+        var chosen = ChooseAdapter(devices.Select(x => x.Adapter).ToList(), preferred);
         // ソフトウェアしか見つからず、選んでもいなければ、これまでどおりデスクトップの GPU から試す
-        if (chosen is { IsSoftware: true } && string.IsNullOrEmpty(PreferredAdapter)) chosen = null;
+        if (chosen is { IsSoftware: true } && string.IsNullOrEmpty(preferred)) chosen = null;
         if (chosen != null)
         {
             try
@@ -811,11 +829,13 @@ public sealed unsafe class GpuContext : IDisposable
             return null;
         }
         gr.SetResourceCacheLimit(384L * 1024 * 1024);
+        // 画面の描画が EGL なら (Avalonia の X11RenderingMode.Egl)、そのディスプレイで DMA-BUF を取り込める。GLX なら 0 が返る
+        var eglDisplay = OperatingSystem.IsLinux() && EglApi.Available && EglApi.GetCurrentDisplay != null ? EglApi.GetCurrentDisplay() : IntPtr.Zero;
         return new GpuContext
         {
             Context = gr, _interface = gi, Renderer = renderer, Vendor = vendor, _getProc = getProcAddress,
             IsSoftware = IsSoftwareRenderer(renderer),
-            _externalMakeCurrent = makeCurrent, _externalRelease = release,
+            _externalMakeCurrent = makeCurrent, _externalRelease = release, _externalEglDisplay = eglDisplay,
         };
     }
 

@@ -186,10 +186,10 @@ public class GpuTransferTests
     // ---- 4a: 動画のフレームを YUV のまま GPU へ送り、GPU で色を変換する ----
 
     /// <summary>色の変化 (横・縦のグラデーションと色の帯) のある動画を書き出す。</summary>
-    private static string WriteVideo(string dir, string name, string codec, int w, int h)
+    private static string WriteVideo(string dir, string name, string codec, int w, int h, string pixelFormat = "")
     {
         var path = Path.Combine(dir, name);
-        var s = new ExportSettings { Path = path, Width = w, Height = h, Fps = new Rational(30, 1), VideoCodec = codec, AudioCodec = "", Crf = 8 };
+        var s = new ExportSettings { Path = path, Width = w, Height = h, Fps = new Rational(30, 1), VideoCodec = codec, AudioCodec = "", Crf = 8, PixelFormat = pixelFormat };
         using var writer = new MediaWriter(s);
         var frame = new byte[w * h * 4];
         for (int f = 0; f < 6; f++)
@@ -272,13 +272,25 @@ public class GpuTransferTests
     /// CPU 描画 (メモリへ写して sws で変換) と同じ色になる (設計書 22.58)。
     /// ハードウェアデコードが使えない環境では何もしない (VB_REQUIRE_GPU_FRAMES=1 なら、GPU 上のまま変換できなければ失敗にする)。
     /// VAAPI は VIDEO_BUILDER_GPU=Intel VIDEO_BUILDER_HWDEC=vaapi のように、描画とデコードを同じ GPU にして確かめる。
+    /// 動画の形式: H.264 (8 ビット。VAAPI の置き場は NV12 か I420)、MJPEG (フルレンジの yuvj420p。プロキシと同じ。VAAPI では I420)、
+    /// HEVC の 10 ビット (P010。設計書 22.62)。
     /// </summary>
     [Theory]
-    [InlineData(1)]
-    [InlineData(2)]
-    public void Hardware_decoded_frames_are_converted_without_copying_to_memory(int divisor)
+    [InlineData("h264", 1)]
+    [InlineData("h264", 2)]
+    [InlineData("mjpeg", 1)]
+    [InlineData("mjpeg", 2)]
+    [InlineData("hevc10", 1)]
+    [InlineData("hevc10", 2)]
+    public void Hardware_decoded_frames_are_converted_without_copying_to_memory(string source, int divisor)
     {
-        if (!FFmpegLoader.EnsureLoaded() || !MediaWriter.IsEncoderAvailable("libx264")) return;
+        var (file, codec, pixelFormat) = source switch
+        {
+            "mjpeg" => ("src.mkv", "mjpeg", "yuvj420p"),
+            "hevc10" => ("src.mp4", "libx265", "yuv420p10le"),
+            _ => ("src.mp4", "libx264", ""),
+        };
+        if (!FFmpegLoader.EnsureLoaded() || !MediaWriter.IsEncoderAvailable(codec)) return;
         using var gpu = Gpu();
         if (gpu == null) return;
         var dir = Path.Combine(Path.GetTempPath(), $"vb-hwframe-{Guid.NewGuid():N}");
@@ -286,12 +298,12 @@ public class GpuTransferTests
         try
         {
             const int w = 640, h = 360;
-            var video = WriteVideo(dir, "src.mp4", "libx264", w, h);
+            var video = WriteVideo(dir, file, codec, w, h, pixelFormat);
             using (var probe = new VideoReader(video))
                 if (!probe.IsHardware)
                 {
-                    Console.WriteLine($"BENCH hwframe skipped: {probe.HardwareError}");
-                    Assert.False(Environment.GetEnvironmentVariable("VB_REQUIRE_GPU_FRAMES") == "1", "ハードウェアデコードできません: " + probe.HardwareError);
+                    Console.WriteLine($"BENCH hwframe {source} skipped: {probe.HardwareError}");
+                    Assert.False(Environment.GetEnvironmentVariable("VB_REQUIRE_GPU_FRAMES") == "1" && source == "h264", "ハードウェアデコードできません: " + probe.HardwareError);
                     return;
                 }
             // 縮めてデコードするとき (プレビュー) は、出力の大きさ自体を小さくする
@@ -305,11 +317,14 @@ public class GpuTransferTests
                 using var a = Render(cpu, p, f);
                 using var b = Render(engine, p, f);
                 var (mean, max) = Compare(a, b);
-                Console.WriteLine($"BENCH hwframe divisor={divisor} frame={f} mean={mean:0.000} max={max} gpuFrames={engine.Media.GpuHardwareFrames} error={engine.Media.GpuHardwareError}");
+                Console.WriteLine($"BENCH hwframe {source} divisor={divisor} frame={f} mean={mean:0.000} max={max} gpuFrames={engine.Media.GpuHardwareFrames} tenBit={engine.Media.GpuHardwareFrames10Bit} error={engine.Media.GpuHardwareError}");
                 Assert.True(mean < (divisor == 1 ? 1.0 : 3.0), $"GPU 上のまま変換した色が違う (frame {f}): mean={mean} max={max}");
             }
             if (Environment.GetEnvironmentVariable("VB_REQUIRE_GPU_FRAMES") == "1")
+            {
                 Assert.True(engine.Media.GpuHardwareFrames >= 4, $"GPU 上のまま変換していない: {engine.Media.GpuHardwareFrames} {engine.Media.GpuHardwareError}");
+                if (source == "hevc10") Assert.True(engine.Media.GpuHardwareFrames10Bit >= 4, $"10 ビットを GPU 上のまま変換していない: {engine.Media.GpuHardwareError}");
+            }
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
@@ -567,17 +582,35 @@ public class GpuTransferTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void Gpu_export_to_vaapi_matches_cpu(bool direct)
+    public void Gpu_export_to_vaapi_matches_cpu(bool direct) =>
+        ExportToHardwareEncoderMatchesCpu("h264_vaapi", "VIDEO_BUILDER_VAAPI_DIRECT", direct, "VB_REQUIRE_VAAPI_ENCODE", "VB_REQUIRE_VAAPI_DIRECT",
+            s => s.VaapiDirectFrames, s => s.VaapiDirectError);
+
+    /// <summary>
+    /// NVENC でエンコードするとき、GPU で NV12 に変換した面を、CUDA と GL の相互運用で NVENC の CUDA のフレームへ GPU の中で写して渡しても
+    /// (読み戻さない)、CPU で描いて sws で変換したものと同じ絵になる (設計書 22.62)。direct が false なら、NV12 で読み戻す経路を確かめる。
+    /// NVENC がない環境では何もしない (VB_REQUIRE_NVENC=1 なら失敗にする)。
+    /// 直接渡すのは、描画の GPU が NVIDIA のとき (VIDEO_BUILDER_GPU=NVIDIA)。ほかの GPU なら読み戻しに戻ることも確かめる。
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Gpu_export_to_nvenc_matches_cpu(bool direct) =>
+        ExportToHardwareEncoderMatchesCpu("h264_nvenc", "VIDEO_BUILDER_NVENC_DIRECT", direct, "VB_REQUIRE_NVENC", "VB_REQUIRE_NVENC_DIRECT",
+            s => s.CudaDirectFrames, s => s.CudaDirectError);
+
+    private void ExportToHardwareEncoderMatchesCpu(string codec, string directEnv, bool direct, string requireEnv, string requireDirectEnv,
+        Func<ExportStats, long> directFrames, Func<ExportStats, string?> directError)
     {
-        if (!FFmpegLoader.EnsureLoaded() || !MediaWriter.IsEncoderAvailable("h264_vaapi")) return;
+        if (!FFmpegLoader.EnsureLoaded() || !MediaWriter.IsEncoderAvailable(codec)) return;
         using (var probe = Gpu()) if (probe == null) return;
-        bool required = Environment.GetEnvironmentVariable("VB_REQUIRE_VAAPI_ENCODE") == "1";
+        bool required = Environment.GetEnvironmentVariable(requireEnv) == "1";
         var p = Moving();
         p.Settings.Width = 640; p.Settings.Height = 360;
         const int Frames = 12;
-        var dir = Path.Combine(Path.GetTempPath(), $"vb-vaapi-{Guid.NewGuid():N}");
+        var dir = Path.Combine(Path.GetTempPath(), $"vb-hwenc-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
-        var old = Environment.GetEnvironmentVariable("VIDEO_BUILDER_VAAPI_DIRECT");
+        var old = Environment.GetEnvironmentVariable(directEnv);
         try
         {
             ExportStats Export(string name, bool useGpu)
@@ -586,25 +619,25 @@ public class GpuTransferTests
                 Task.Run(() => Exporter.Run(new ExportRequest
                 {
                     Project = p, SceneId = "root", StartFrame = 0, EndFrame = Frames - 1, UseGpu = useGpu, Stats = stats,
-                    Settings = new ExportSettings { Path = Path.Combine(dir, name), VideoCodec = "h264_vaapi", Crf = 10, AudioCodec = "" },
+                    Settings = new ExportSettings { Path = Path.Combine(dir, name), VideoCodec = codec, Crf = 10, AudioCodec = "" },
                 }, null, CancellationToken.None)).Wait();
                 return stats;
             }
             try { Export("cpu.mp4", false); }
             catch (AggregateException ex) when (!required)
             {
-                Console.WriteLine($"BENCH vaapi-export skipped: {ex.InnerException?.Message}");
+                Console.WriteLine($"BENCH {codec}-export skipped: {ex.InnerException?.Message}");
                 return;
             }
-            Environment.SetEnvironmentVariable("VIDEO_BUILDER_VAAPI_DIRECT", direct ? null : "0");
+            Environment.SetEnvironmentVariable(directEnv, direct ? null : "0");
             var stats = Export("gpu.mp4", true);
-            Console.WriteLine($"BENCH vaapi-export direct={direct} async={stats.AsyncReadbackFrames} gpuYuv={stats.GpuYuvFrames} vaapiDirect={stats.VaapiDirectFrames} " +
-                $"directError={stats.VaapiDirectError} yuvError={stats.GpuYuvError}");
+            Console.WriteLine($"BENCH {codec}-export direct={direct} async={stats.AsyncReadbackFrames} gpuYuv={stats.GpuYuvFrames} directFrames={directFrames(stats)} " +
+                $"directError={directError(stats)} yuvError={stats.GpuYuvError}");
             Assert.Equal(Frames, stats.Frames);
             Assert.Equal(stats.AsyncReadbackFrames, stats.GpuYuvFrames);
-            if (!direct) Assert.Equal(0, stats.VaapiDirectFrames);
-            else if (Environment.GetEnvironmentVariable("VB_REQUIRE_VAAPI_DIRECT") == "1")
-                Assert.True(stats.VaapiDirectFrames == Frames, $"直接描いていない: {stats.VaapiDirectFrames} {stats.VaapiDirectError}");
+            if (!direct) Assert.Equal(0, directFrames(stats));
+            else if (Environment.GetEnvironmentVariable(requireDirectEnv) == "1")
+                Assert.True(directFrames(stats) == Frames, $"直接渡していない: {directFrames(stats)} {directError(stats)}");
             var fps = p.Settings.Fps.Value;
             var a = AllFrames(Path.Combine(dir, "cpu.mp4"), Frames, fps);
             var b = AllFrames(Path.Combine(dir, "gpu.mp4"), Frames, fps);
@@ -613,13 +646,13 @@ public class GpuTransferTests
                 long total = 0; int max = 0;
                 for (int i = 0; i < a[f].Length; i++) { int d = Math.Abs(a[f][i] - b[f][i]); total += d; max = Math.Max(max, d); }
                 double mean = (double)total / a[f].Length;
-                Console.WriteLine($"BENCH vaapi-export direct={direct} frame={f} mean={mean:0.000} max={max}");
+                Console.WriteLine($"BENCH {codec}-export direct={direct} frame={f} mean={mean:0.000} max={max}");
                 Assert.True(mean < 2.0, $"frame {f} が違う: mean={mean} max={max}");
             }
         }
         finally
         {
-            Environment.SetEnvironmentVariable("VIDEO_BUILDER_VAAPI_DIRECT", old);
+            Environment.SetEnvironmentVariable(directEnv, old);
             try { Directory.Delete(dir, true); } catch { }
         }
     }
@@ -678,7 +711,7 @@ public class GpuTransferTests
             }, null, CancellationToken.None)).Wait();
             double Ms(TimeSpan t) => t.TotalMilliseconds / stats.Frames;
             Console.WriteLine($"BENCH gpu-export 1080p fps={stats.FramesPerSecond:0.0} render={Ms(stats.Render):0.0}ms convert={Ms(stats.Convert):0.0}ms " +
-                $"encode={Ms(stats.Encode):0.0}ms wait={Ms(stats.WaitForEncoder):0.0}ms async={stats.AsyncReadbackFrames} gpuYuv={stats.GpuYuvFrames} direct={stats.VaapiDirectFrames} codec={Environment.GetEnvironmentVariable("VB_BENCH_CODEC")} " +
+                $"encode={Ms(stats.Encode):0.0}ms wait={Ms(stats.WaitForEncoder):0.0}ms async={stats.AsyncReadbackFrames} gpuYuv={stats.GpuYuvFrames} direct={stats.VaapiDirectFrames} cudaDirect={stats.CudaDirectFrames} cudaError={stats.CudaDirectError} codec={Environment.GetEnvironmentVariable("VB_BENCH_CODEC")} " +
                 $"yuv={Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_YUV") ?? "on"} readback={Environment.GetEnvironmentVariable("VIDEO_BUILDER_ASYNC_READBACK") ?? "on"}");
         }
         finally { try { Directory.Delete(dir, true); } catch { } }

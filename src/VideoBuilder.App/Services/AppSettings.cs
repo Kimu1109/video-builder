@@ -13,6 +13,8 @@ public enum WindowMode { Auto, Separate, Docked }
 public enum EditorMode { Advanced, Simple }
 /// <summary>Auto: 本物の GPU があれば GPU、なければ CPU。</summary>
 public enum RenderBackend { Auto, Gpu, Cpu }
+/// <summary>Linux (X11) の画面の描画の仕組み (設計書 22.62)。</summary>
+public enum ScreenGlMode { Egl, Glx }
 
 /// <summary>環境設定。XDG_CONFIG_HOME/video-builder/settings.json に保存する。</summary>
 public sealed class AppSettings
@@ -38,6 +40,18 @@ public sealed class AppSettings
     /// 出力 (書き出し) と動画のデコードは、これまでどおり <see cref="GpuAdapter"/> の GPU を使う。
     /// </summary>
     public bool PreviewOnScreenGpu { get; set; }
+    /// <summary>
+    /// Linux (X11) の画面の描画を EGL と GLX のどちらで行うか (起動し直すと反映)。EGL なら、画面と共有するプレビューでも
+    /// VAAPI でデコードしたフレームを CPU へ写さずに出せる (GLX には DMA-BUF を取り込む方法がない)。設計書 22.62。
+    /// </summary>
+    public ScreenGlMode ScreenGl { get; set; } = ScreenGlMode.Egl;
+    /// <summary>
+    /// 書き出しの画面で最初に選ぶ映像のエンコーダ (FFmpeg の名前。"h264_nvenc" など)。空なら最初の形式 (MP4・H.264 (x264))。
+    /// おすすめの構成 (設計書 22.63) で、いちばん速いものにする。この PC で使えなければ無視する。
+    /// </summary>
+    public string PreferredVideoEncoder { get; set; } = "";
+    /// <summary>おすすめの構成を一度出したか (初めて起動したときに出す。設計書 22.63)。</summary>
+    public bool SetupSuggested { get; set; }
     /// <summary>動画のデコードに GPU を使うか (Auto: 使えれば使う)。</summary>
     public VideoBuilder.Media.HardwareDecodeMode HardwareDecode { get; set; } = VideoBuilder.Media.HardwareDecodeMode.Auto;
     /// <summary>プレビューでプロキシを使う。</summary>

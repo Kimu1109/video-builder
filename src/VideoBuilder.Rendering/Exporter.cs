@@ -132,6 +132,13 @@ public static class Exporter
 
         var s = req.Settings;
         s.Width = w; s.Height = h; s.Fps = project.Settings.Fps; s.SampleRate = project.Settings.SampleRate;
+        // NVENC で、NVIDIA の GPU で描くなら、描いた絵を GPU の中で NVENC の CUDA のフレームへ写して渡す (設計書 22.62)
+        bool nvenc = HardwareEncoders.FamilyOf(s.VideoCodec) == "nvenc";
+        s.CudaFrames = nvenc && gpu != null && OperatingSystem.IsLinux() && gpu.Renderer.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase)
+            && Environment.GetEnvironmentVariable("VIDEO_BUILDER_NVENC_DIRECT") != "0";
+        if (stats != null && nvenc && gpu != null && !s.CudaFrames)
+            stats.CudaDirectError = !OperatingSystem.IsLinux() ? "Linux でだけ使う" : Environment.GetEnvironmentVariable("VIDEO_BUILDER_NVENC_DIRECT") == "0"
+                ? "VIDEO_BUILDER_NVENC_DIRECT=0" : $"描画の GPU が NVIDIA ではありません ({gpu.Renderer})";
         using var mixer = new AudioMixer();
         using var writer = new MediaWriter(s);
         bool hasVideo = writer.HasVideo, hasAudio = writer.HasAudio;
@@ -180,12 +187,18 @@ public static class Exporter
             readback = AsyncReadback.Create(gpu, w, h, out var readbackError, writer.GpuConversionTarget);
             if (readback == null && stats != null) stats.AsyncReadbackError = readbackError;
             if (stats != null) stats.GpuYuvError = readback == null ? readbackError : readback.YuvError;
-            // VAAPI のエンコードなら、エンコーダのフレームへ直接描く (読み戻さない)
-            if (readback != null && writer.AcceptsHardwareFrames)
+            // VAAPI・NVENC (CUDA) のエンコードなら、エンコーダのフレームへ直接描く (読み戻さない)
+            var kind = writer.HardwareFrameKind;
+            if (readback != null && kind != HardwareFrameKinds.None)
             {
-                readback.EnableDirect(() => (writer.AllocateHardwareFrame(out var e), e));
-                if (stats != null) stats.VaapiDirectError = readback.DirectError;
+                readback.EnableDirect(() => (writer.AllocateHardwareFrame(out var e), e), kind);
+                if (stats != null)
+                {
+                    if (kind == HardwareFrameKinds.Cuda) stats.CudaDirectError = readback.DirectError;
+                    else stats.VaapiDirectError = readback.DirectError;
+                }
             }
+            else if (stats != null && s.CudaFrames) stats.CudaDirectError = writer.HardwareInputError ?? readback?.YuvError ?? "読み戻しを使えません";
         }
         // 読み戻しの途中のフレーム (描いた順)
         var inFlight = new Queue<int>();
@@ -241,7 +254,11 @@ public static class Exporter
                 if (yuv != null) { prepared = writer.PrepareVideoFrame(yuv.PlanesAt(pixels)); return; }
                 unsafe { prepared = writer.PrepareVideoFrame(new ReadOnlySpan<byte>((void*)pixels, rowBytes * h), rowBytes, rgba: true); }
             }, hw => { prepared = writer.PrepareHardwareFrame(hw); direct = true; });
-            if (stats != null && readback.DirectError != null) stats.VaapiDirectError = readback.DirectError;
+            if (stats != null && readback.DirectError != null)
+            {
+                if (readback.DirectKind == HardwareFrameKinds.Cuda) stats.CudaDirectError = readback.DirectError;
+                else stats.VaapiDirectError = readback.DirectError;
+            }
             stats?.AddConvert(watch.Elapsed);
             if (!done)
             {
@@ -257,7 +274,8 @@ public static class Exporter
             }
             stats?.AddAsyncReadback();
             if (yuv != null) stats?.AddGpuYuv();
-            if (direct) stats?.AddVaapiDirect();
+            if (direct && readback.DirectKind == HardwareFrameKinds.Cuda) stats?.AddCudaDirect();
+            else if (direct) stats?.AddVaapiDirect();
             Enqueue(frame, prepared);
         }
 

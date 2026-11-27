@@ -24,5 +24,8 @@ internal static class Program
             })
             // Windows: 画面の描画も、描画に選んだ GPU で行う (プレビューを読み戻さずに出すため。Platform/ScreenGpu.cs)
             .With(new Win32PlatformOptions { GraphicsAdapterSelectionCallback = Platform.ScreenGpu.Choose })
+            // Linux (X11): 画面の描画を EGL で行う (画面と共有するプレビューでも、VAAPI のフレームを DMA-BUF で取り込めるようにする。
+            // 設計書 22.62)。使えなければ GLX、それもだめならソフトウェア
+            .With(new X11PlatformOptions { RenderingMode = Platform.ScreenGl.RenderingModes() })
             .LogToTrace();
 }

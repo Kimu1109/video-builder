@@ -36,9 +36,10 @@ internal sealed unsafe class YuvTextures : IDisposable
         uniform vec3 off;
         uniform vec2 chroma;
         uniform ivec2 csize;
+        uniform float scale;
         void main() {
             vec2 c = uv * chroma;
-            float y = texture(ty, uv).r;
+            float y = texture(ty, uv).r * scale;
             vec2 uvc;
             if (nv12 == 2) {
                 // sws の NV12 の変換 (x64) と同じ読み方: 横は 2 画素で同じ値、縦は補間する。
@@ -55,6 +56,8 @@ internal sealed unsafe class YuvTextures : IDisposable
             } else {
                 uvc = vec2(texture(tu, c).r, texture(tv, c).r);
             }
+            // scale: 10 ビット (P010) の 16 ビットの値を、8 ビットと同じ目盛り (リミテッドの 16〜235 が 64〜940 に当たる) にする
+            uvc *= scale;
             color = vec4(clamp(m * (vec3(y, uvc) - off), 0.0, 1.0), 1.0);
         }
         """;
@@ -62,7 +65,7 @@ internal sealed unsafe class YuvTextures : IDisposable
     private readonly GpuContext _gpu;
     private readonly GlFunctions _gl;
     private readonly uint _program, _vao, _fbo;
-    private readonly int _locNv12, _locM, _locOff, _locChroma, _locCsize;
+    private readonly int _locNv12, _locM, _locOff, _locChroma, _locCsize, _locScale;
     // Y・U (NV12 なら UV)・V の面のテクスチャ。大きさ・形式が変わったときだけ作り直す
     private readonly uint[] _planes = new uint[3];
     private readonly (int W, int H, uint Format)[] _planeShape = new (int, int, uint)[3];
@@ -74,7 +77,7 @@ internal sealed unsafe class YuvTextures : IDisposable
     // GPU 上のフレームを取り込むもの (使えなければ null。理由は HardwareError)
     private readonly EglDmaBuf? _dmaBuf;
     private CudaGl? _cuda;
-    private readonly uint[] _imported = new uint[2];   // DMA-BUF を取り込むテクスチャ (Y・UV)
+    private readonly uint[] _imported = new uint[3];   // DMA-BUF を取り込むテクスチャ (Y・UV、I420 なら Y・U・V)
     // GPU が読み終えるまで手放さないもの (DMA-BUF の元のフレームはデコーダが使い回すので、描き終えてから返す)
     private readonly Queue<(IntPtr Fence, HardwareFrame Frame, IntPtr[] Images)> _inUse = new();
 
@@ -104,6 +107,7 @@ internal sealed unsafe class YuvTextures : IDisposable
         _locOff = gl.Uniform(program, "off");
         _locChroma = gl.Uniform(program, "chroma");
         _locCsize = gl.Uniform(program, "csize");
+        _locScale = gl.Uniform(program, "scale");
         _release = ctx => { if (ctx is (uint t, int w, int h)) _returned.Enqueue((t, w, h)); };
         var errors = new List<string>();
         if (Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_FRAMES") == "0") errors.Add("VIDEO_BUILDER_GPU_FRAMES=0");
@@ -113,6 +117,10 @@ internal sealed unsafe class YuvTextures : IDisposable
             if (_dmaBuf != null) HardwareKinds |= HardwareFrameKinds.Vaapi; else errors.Add("VAAPI: " + dmaError);
             _cuda = CudaGl.Create(gpu, out var cudaError);
             if (_cuda != null) HardwareKinds |= HardwareFrameKinds.Cuda; else errors.Add("CUDA: " + cudaError);
+            // 10 ビット (P010) は 16 ビットのテクスチャ (R16・RG16) で読む (設計書 22.62)
+            if (Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_FRAMES_10BIT") == "0") errors.Add("10 ビット: VIDEO_BUILDER_GPU_FRAMES_10BIT=0");
+            else if (!gl.Norm16) errors.Add("10 ビット: 16 ビットのテクスチャ (GL_EXT_texture_norm16) がありません");
+            else if (HardwareKinds != HardwareFrameKinds.None) HardwareKinds |= HardwareFrameKinds.TenBit;
         }
         HardwareError = errors.Count == 0 ? null : string.Join(" / ", errors);
     }
@@ -160,7 +168,7 @@ internal sealed unsafe class YuvTextures : IDisposable
             }
             gl.PixelStorei(GlFunctions.UNPACK_ROW_LENGTH, 0);
             int mode = !nv12 ? 0 : VideoReader.SwsInterpolatesNv12ChromaVertically ? 2 : 1;
-            if (!Draw(output, w, h, w, h, cw, ch, p.ChromaShiftX, p.ChromaShiftY, p.FullRange, mode, _planes[0], _planes[1], nv12 ? _planes[1] : _planes[2]))
+            if (!Draw(output, w, h, w, h, cw, ch, p.ChromaShiftX, p.ChromaShiftY, p.FullRange, mode, 1f, _planes[0], _planes[1], nv12 ? _planes[1] : _planes[2]))
             {
                 ReturnOutput(output, w, h);
                 return null;
@@ -189,7 +197,7 @@ internal sealed unsafe class YuvTextures : IDisposable
     /// Y・U・V のテクスチャから、output (ow x oh の RGBA8) に描く。w・h は元のフレームの大きさ、cw・ch は U・V の面の大きさ。
     /// mode は NV12 の U・V の読み方 (0: NV12 でない, 1: 補間しない/テクスチャの補間に任せる, 2: sws の x64 と同じく縦に補間)。
     /// </summary>
-    private bool Draw(uint output, int w, int h, int ow, int oh, int cw, int ch, int shiftX, int shiftY, bool fullRange, int mode, uint ty, uint tu, uint tv)
+    private bool Draw(uint output, int w, int h, int ow, int oh, int cw, int ch, int shiftX, int shiftY, bool fullRange, int mode, float scale, uint ty, uint tu, uint tv)
     {
         var gl = _gl;
         {
@@ -213,6 +221,7 @@ internal sealed unsafe class YuvTextures : IDisposable
             // U・V の面は、Y の面と同じ範囲を指すように (奇数の幅・高さでは、U・V の面の方が少し広い)
             gl.Uniform2f(_locChroma, (float)w / (cw << shiftX), (float)h / (ch << shiftY));
             gl.Uniform2i(_locCsize, cw, ch);
+            gl.Uniform1f(_locScale, scale);
             var textures = new[] { ty, tu, tv };
             for (int i = 0; i < 3; i++)
             {
@@ -229,40 +238,50 @@ internal sealed unsafe class YuvTextures : IDisposable
     }
 
     /// <summary>
-    /// GPU 上の NV12 のフレーム (メモリへ写していないもの) を、GPU の中で RGBA に変換した画像を返す (設計書 22.58)。
-    /// ow・oh は作る画像の大きさ (縮めてデコードするときは元より小さい)。frame はここで引き取る (GPU が読み終えたら手放す)。
-    /// 取り込めなければ null (frame は手放す。その種類はこのあと使わない)。
+    /// GPU 上のフレーム (メモリへ写していないもの。8 ビットの NV12・I420、10 ビットの P010) を、GPU の中で RGBA に変換した画像を返す
+    /// (設計書 22.58・22.62)。ow・oh は作る画像の大きさ (縮めてデコードするときは元より小さい)。frame はここで引き取る (GPU が読み終えたら手放す)。
+    /// 取り込めなければ null (frame は手放す。その種類 (10 ビットのときは 10 ビット) はこのあと使わない)。
     /// </summary>
     public SKImage? ConvertHardware(HardwareFrame frame, int ow, int oh)
     {
         ReleaseFinished(wait: false);
-        if (_disposed || (HardwareKinds & frame.Kind) == 0) { frame.Dispose(); return null; }
+        bool tenBit = frame.Surface == HardwareSurface.P010;
+        if (_disposed || (HardwareKinds & frame.Kind) == 0 || tenBit && (HardwareKinds & HardwareFrameKinds.TenBit) == 0) { frame.Dispose(); return null; }
         var gl = _gl;
         int w = frame.Width, h = frame.Height, cw = (w + 1) / 2, ch = (h + 1) / 2;
+        bool planar = frame.Surface == HardwareSurface.I420;
         // 元の大きさなら、メモリへ写したときと同じ読み方 (CPU 描画と同じ絵)。縮めるときはテクスチャの補間で縮める
         bool scaled = ow != w || oh != h;
         int filter = scaled ? GlFunctions.LINEAR : GlFunctions.NEAREST;
-        int mode = scaled ? 1 : VideoReader.SwsInterpolatesNv12ChromaVertically ? 2 : 1;
+        int mode = planar ? 0 : scaled ? 1 : VideoReader.SwsInterpolatesNv12ChromaVertically ? 2 : 1;
+        // 16 ビットの値 (上位 10 ビット) を 8 ビットと同じ目盛りに: リミテッドは X/1020 (64〜940 が 16/255〜235/255)、フルは X/1023
+        float scale = !tenBit ? 1f : 65535f / (64f * (frame.FullRange ? 1023f : 1020f));
         uint output = TakeOutput(ow, oh);
         IntPtr[] images = Array.Empty<IntPtr>();
         string? error = null;
         bool keep = false;
         try
         {
-            uint ty, tuv;
+            uint ty, tu, tv;
             if (frame.Kind == HardwareFrameKinds.Vaapi)
             {
                 if (!frame.TryMapDmaBuf(out var layers, out error)) return Fail();
-                if (layers.Length != 2 || layers[0].DrmFormat != HardwareFrame.DrmR8 || layers[1].DrmFormat != HardwareFrame.DrmGR88)
+                var expected = frame.Surface switch
                 {
-                    error = "DMA-BUF の形式が NV12 (R8 + GR88) ではありません";
+                    HardwareSurface.P010 => new[] { HardwareFrame.DrmR16, HardwareFrame.DrmGR1616 },
+                    HardwareSurface.I420 => new[] { HardwareFrame.DrmR8, HardwareFrame.DrmR8, HardwareFrame.DrmR8 },
+                    _ => new[] { HardwareFrame.DrmR8, HardwareFrame.DrmGR88 },
+                };
+                if (!layers.Select(l => l.DrmFormat).SequenceEqual(expected))
+                {
+                    error = $"DMA-BUF の形式が {frame.Surface} の並びではありません: " + string.Join(", ", layers.Select(l => $"0x{l.DrmFormat:X8}"));
                     return Fail();
                 }
-                images = new IntPtr[2];
-                for (int i = 0; i < 2; i++)
+                images = new IntPtr[layers.Length];
+                for (int i = 0; i < layers.Length; i++)
                 {
                     images[i] = _dmaBuf!.Import(layers[i]);
-                    if (images[i] == IntPtr.Zero) { error = $"DMA-BUF を EGL に取り込めません (0x{EglApi.GetError():X4}, modifier 0x{layers[i].Modifier:X})"; return Fail(); }
+                    if (images[i] == IntPtr.Zero) { error = $"DMA-BUF を EGL に取り込めません (0x{EglApi.GetError():X4}, 0x{layers[i].DrmFormat:X8}, modifier 0x{layers[i].Modifier:X})"; return Fail(); }
                     if (_imported[i] == 0) _imported[i] = gl.GenTexture();
                     gl.GetError();
                     gl.BindTexture(GlFunctions.TEXTURE_2D, _imported[i]);
@@ -270,18 +289,23 @@ internal sealed unsafe class YuvTextures : IDisposable
                     if (gl.GetError() is var e and not 0) { error = $"DMA-BUF をテクスチャにできません (0x{e:X4})"; return Fail(); }
                     SetFilter(filter);
                 }
-                ty = _imported[0]; tuv = _imported[1];
+                ty = _imported[0]; tu = _imported[1]; tv = planar ? _imported[2] : _imported[1];
             }
             else
             {
-                EnsurePlane(0, w, h, GlFunctions.R8, GlFunctions.RED);
-                EnsurePlane(1, cw, ch, GlFunctions.RG8, GlFunctions.RG);
+                // CUDA (NVDEC) は NV12 か P010
+                if (planar) { error = "CUDA のフレームが I420 です"; return Fail(); }
+                uint fy = tenBit ? GlFunctions.R16 : GlFunctions.R8, fuv = tenBit ? GlFunctions.RG16 : GlFunctions.RG8;
+                uint type = tenBit ? GlFunctions.UNSIGNED_SHORT : GlFunctions.UNSIGNED_BYTE;
+                int bytes = tenBit ? 2 : 1;
+                EnsurePlane(0, w, h, fy, GlFunctions.RED, type);
+                EnsurePlane(1, cw, ch, fuv, GlFunctions.RG, type);
                 for (int i = 0; i < 2; i++) { gl.BindTexture(GlFunctions.TEXTURE_2D, _planes[i]); SetFilter(filter); }
-                int r = _cuda!.Copy(frame, new[] { (_planes[0], w, h), (_planes[1], cw * 2, ch) });
+                int r = _cuda!.Copy(frame, new[] { (_planes[0], w * bytes, h), (_planes[1], cw * 2 * bytes, ch) });
                 if (r != 0) { error = $"CUDA から GL のテクスチャへ写せません (CUDA のエラー {r})"; return Fail(); }
-                ty = _planes[0]; tuv = _planes[1];
+                ty = _planes[0]; tu = tv = _planes[1];
             }
-            if (!Draw(output, w, h, ow, oh, cw, ch, 1, 1, false, mode, ty, tuv, tuv)) { error = "変換の描画先を作れません"; return Fail(); }
+            if (!Draw(output, w, h, ow, oh, cw, ch, 1, 1, frame.FullRange, mode, scale, ty, tu, tv)) { error = "変換の描画先を作れません"; return Fail(); }
             if (frame.Kind == HardwareFrameKinds.Vaapi)
             {
                 // デコーダの置き場を GPU が読み終えるまで持っておく
@@ -304,16 +328,22 @@ internal sealed unsafe class YuvTextures : IDisposable
             _gpu.Context.ResetContext();
         }
         HardwareConverted++;
+        if (tenBit) HardwareConverted10Bit++;
         return Wrap(output, ow, oh);
 
         SKImage? Fail()
         {
             ReturnOutput(output, ow, oh);
-            HardwareKinds &= ~frame.Kind;
-            HardwareError = error;
+            // 10 ビットだけの失敗 (16 ビットの形式を取り込めないなど) なら、8 ビットはこれまでどおり使う
+            HardwareKinds &= tenBit ? ~HardwareFrameKinds.TenBit : ~(frame.Kind);
+            if ((HardwareKinds & (HardwareFrameKinds.Vaapi | HardwareFrameKinds.Cuda)) == 0) HardwareKinds = HardwareFrameKinds.None;
+            HardwareError = (tenBit ? "10 ビット: " : "") + error;
             return null;
         }
     }
+
+    /// <summary>GPU 上のまま変換した 10 ビット (P010) のフレームの数 (計測・テスト用)。</summary>
+    public long HardwareConverted10Bit { get; private set; }
 
     private void SetFilter(int filter)
     {
@@ -355,7 +385,7 @@ internal sealed unsafe class YuvTextures : IDisposable
     }
 
     /// <summary>面のテクスチャを、この大きさ・形式で用意して結び付ける (違うときだけ作り直す)。</summary>
-    private void EnsurePlane(int i, int w, int h, uint internalFormat, uint format)
+    private void EnsurePlane(int i, int w, int h, uint internalFormat, uint format, uint type = GlFunctions.UNSIGNED_BYTE)
     {
         var gl = _gl;
         if (_planes[i] == 0) _planes[i] = gl.GenTexture();
@@ -363,7 +393,7 @@ internal sealed unsafe class YuvTextures : IDisposable
         if (_planeShape[i] != (w, h, internalFormat))
         {
             _cuda?.Forget(_planes[i]);   // 中身の置き場が変わるので、CUDA への登録をやめる
-            gl.TexImage2D(GlFunctions.TEXTURE_2D, 0, (int)internalFormat, w, h, 0, format, GlFunctions.UNSIGNED_BYTE, null);
+            gl.TexImage2D(GlFunctions.TEXTURE_2D, 0, (int)internalFormat, w, h, 0, format, type, null);
             SetFilter(GlFunctions.NEAREST);
             _planeShape[i] = (w, h, internalFormat);
         }

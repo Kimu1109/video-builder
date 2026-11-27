@@ -46,6 +46,54 @@ public partial class App : Application
                     desktop.Shutdown();
                 }, DispatcherPriority.Background);
             }
+            // 初めて起動したとき: このパソコンでいちばん速い構成を調べて出す (設計書 22.63。一度出したら出さない)
+            if (Views.SetupDialog.ShouldSuggestOnStartup(Svc.Settings, args))
+                main.Opened += (_, _) => DispatcherTimer.RunOnce(async () =>
+                {
+                    var dialog = new Views.SetupDialog(firstRun: true);
+                    await dialog.ShowDialog(main);
+                    Svc.Settings.SetupSuggested = true;
+                    Svc.Settings.Save();
+                }, TimeSpan.FromSeconds(0.5));
+            if (args.Contains("--report-setup"))
+            {
+                // 動作確認用: おすすめの構成を調べて出力して終了する (設定は変えない。設計書 22.63)
+                main.Opened += (_, _) => DispatcherTimer.RunOnce(async () =>
+                {
+                    var options = new VideoBuilder.Rendering.SetupBenchmark.Options { ExportOnGpu = Svc.Settings.RenderBackend != RenderBackend.Cpu };
+                    var result = await Task.Run(() => VideoBuilder.Rendering.SetupBenchmark.Run(options));
+                    var env = await Task.Run(Views.SetupDialog.CurrentEnvironment);
+                    Console.WriteLine($"setup: {result.Elapsed.TotalSeconds:0.0} s, screen={env.ScreenRenderer}");
+                    foreach (var t in result.Render) Console.WriteLine($"setup: render {t.Renderer}: readback={t.WithReadbackMs:0.0} ms renderOnly={t.RenderOnlyMs:0.0} ms {t.Error}");
+                    if (result.Decode is { } d) Console.WriteLine($"setup: decode {d.HardwareName}={d.HardwareMs:0.0} ms software={d.SoftwareMs:0.0} ms {d.HardwareError}");
+                    foreach (var e in result.Encoders) Console.WriteLine($"setup: export {e.Label}: {e.Fps:0.0} fps {e.Error}");
+                    foreach (var i in SetupAdvisor.Recommend(result, Svc.Settings, env))
+                        Console.WriteLine($"setup: {(i.Changes ? "*" : " ")} {i.Name}: {i.Current} -> {i.Recommended} | {i.Reason.Replace('\n', ' ')}");
+                    Svc.Session.History.MarkSaved();
+                    desktop.Shutdown();
+                }, TimeSpan.FromSeconds(0.5));
+            }
+            int report = Array.IndexOf(args, "--report-preview");
+            if (report >= 0 && report + 1 < args.Length)
+            {
+                // 動作確認用: 動画を読み込んで 3 秒再生し、描画方式と GPU 上のまま変換したフレームの数を出力して終了する (設計書 22.62)
+                string media = Path.GetFullPath(args[report + 1]);
+                main.Opened += (_, _) => DispatcherTimer.RunOnce(() =>
+                {
+                    var error = MediaImport.AddFile(media, 0, 0);
+                    if (error != null) Console.WriteLine("report: " + error);
+                    Svc.Preview.Play();
+                    DispatcherTimer.RunOnce(() =>
+                    {
+                        Svc.Preview.Stop();
+                        var (frames, hwError, decoders) = Svc.Preview.HardwareFrameStatus;
+                        Console.WriteLine($"report: backend={Svc.Preview.BackendDescription}");
+                        Console.WriteLine($"report: hardwareFrames={frames} hardwareError={hwError} decoders={decoders}");
+                        Svc.Session.History.MarkSaved();
+                        desktop.Shutdown();
+                    }, TimeSpan.FromSeconds(3));
+                }, TimeSpan.FromSeconds(1));
+            }
             int shot = Array.IndexOf(args, "--screenshot");
             if (shot >= 0 && shot + 1 < args.Length)
             {
