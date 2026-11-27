@@ -93,6 +93,68 @@ public class PreviewSpeedTests : IDisposable
         r.UnpinFrame();
     }
 
+    [Fact]
+    public unsafe void Two_pinned_frames_survive_and_the_third_slot_is_made_only_when_needed()
+    {
+        if (!_ready) return;
+        using var r = new VideoReader(_clip);
+        // 押さえなければ、置き場は 2 つで足りる (先読みしないときのメモリは以前と同じ)
+        for (double t = 0; t < 0.5; t += 1 / 30.0) r.GetFramePointer(t);
+        Assert.Equal(2, r.AllocatedSlots);
+        var p0 = r.GetFramePointer(0.6);
+        var f0 = new ReadOnlySpan<byte>((void*)p0, 640 * 360 * 4).ToArray();
+        r.PinFrame(p0);
+        var p1 = r.GetFramePointer(0.7);
+        var f1 = new ReadOnlySpan<byte>((void*)p1, 640 * 360 * 4).ToArray();
+        r.PinFrame(p1);
+        Assert.NotEqual(p0, p1);
+        Assert.NotEqual(f0, f1);
+        // 2 つ押さえたまま先へ進めても、どちらも書き換わらない (3 つ目の置き場に変換する)
+        for (double t = 0.75; t < 1.5; t += 0.1)
+        {
+            var p = r.GetFramePointer(t);
+            Assert.NotEqual(p0, p); Assert.NotEqual(p1, p);
+        }
+        Assert.Equal(3, r.AllocatedSlots);
+        Assert.Equal(f0, new ReadOnlySpan<byte>((void*)p0, f0.Length).ToArray());
+        Assert.Equal(f1, new ReadOnlySpan<byte>((void*)p1, f1.Length).ToArray());
+        // 1 つ放すと、そこにも書く
+        r.UnpinFrame(p0);
+        bool reused = false;
+        for (double t = 1.5; t < 2.0; t += 0.1) reused |= r.GetFramePointer(t) == p0;
+        Assert.True(reused);
+        Assert.Equal(f1, new ReadOnlySpan<byte>((void*)p1, f1.Length).ToArray());
+        r.UnpinFrame();
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void Lookahead_reads_two_frames_ahead_and_uses_them_even_when_frames_are_skipped(int videos)
+    {
+        if (!_ready || MediaCache.LookaheadDepth < 2) return;
+        var p = videos == 1 ? WithVideo((0, 0, 0)) : WithVideo((0, 0, -160), (1, 45, 160));
+        using var plain = new RenderEngine();
+        using var ahead = new RenderEngine { Lookahead = true };
+        Assert.Equal(Frame(plain, p, 0), Frame(ahead, p, 0));
+        ahead.Media.WaitForLookahead();
+        // 次のフレームと、その次のフレームまで読んである
+        Assert.Equal(2 * videos, ahead.Media.AheadFrames);
+        // 描画が遅れてコマを飛ばしたとき (0 → 2 → 4 ...) も、2 つ先に読んだフレームを使い、シークし直さない
+        int seeks = ahead.Media.TotalSeeks;
+        for (int f = 2; f < 40; f += 2)
+        {
+            long hits = ahead.Media.LookaheadHits;
+            ahead.Media.WaitForLookahead();
+            Assert.Equal(Frame(plain, p, f), Frame(ahead, p, f));
+            Assert.Equal(hits + videos, ahead.Media.LookaheadHits);
+        }
+        Assert.Equal(seeks, ahead.Media.TotalSeeks);
+        // 先読みしていない位置へ飛んでも、正しいフレームになる (先読みをやめて取り出し直す)
+        foreach (int f in new[] { 70, 71, 5, 6, 7 })
+            Assert.Equal(Frame(plain, p, f), Frame(ahead, p, f));
+    }
+
     // ---------------- 縮めたデコード ----------------
 
     [Fact]
