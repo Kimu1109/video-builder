@@ -29,6 +29,20 @@ public class PackagingTests
     }
 
     [Fact]
+    public void Flatpak_enables_the_same_linux_hardware_codecs_as_the_build_script()
+    {
+        // GPU でのデコード・エンコードは、自動検出に任せずに明示する (足りなければ configure が失敗する)
+        var block = Regex.Match(Script, @"LINUX_FLAGS=\((.*?)\)", RegexOptions.Singleline).Groups[1].Value;
+        var scriptFlags = Regex.Matches(block, @"--[a-z0-9-]+").Select(m => m.Value).ToList();
+        var section = Regex.Match(Manifest, @"build\.sh の LINUX_FLAGS と同じにする.*?----(.*?)# ---- ここまで \(Linux\)", RegexOptions.Singleline).Groups[1].Value;
+        var manifestFlags = Regex.Matches(section, @"- (--[a-z0-9-]+)").Select(m => m.Groups[1].Value).ToList();
+        Assert.Equal(scriptFlags, manifestFlags);
+        foreach (var flag in new[] { "--enable-vaapi", "--enable-libdrm", "--enable-v4l2-m2m", "--enable-nvdec", "--enable-nvenc" })
+            Assert.Contains(flag, scriptFlags);
+        Assert.Contains("[ \"$os\" = linux ] && extra=(\"${LINUX_FLAGS[@]}\")", Script);
+    }
+
+    [Fact]
     public void Flatpak_takes_the_app_from_where_its_build_script_puts_it()
     {
         // マニフェストは決まった場所から入れ、build.sh がそこに x64 か arm64 向けに発行したものを写す (設計書 22.36)

@@ -141,8 +141,11 @@ public sealed class PreviewService : IDisposable
     public bool PresentsToShared => _presentsToShared;
     private volatile bool _presentsToShared;
 
-    /// <summary>共有のテクスチャを使ってよいか。画面の GPU が、描画に選んだ GPU と同じときだけ (違う GPU の間では共有できない)。</summary>
-    private static bool SharedAllowed(SharedPreviewTarget shared, RenderBackend mode, out string reason)
+    /// <summary>
+    /// 共有のテクスチャを使ってよいか。画面の GPU が、描画に選んだ GPU と同じときだけ (違う GPU の間では共有できない)。
+    /// onScreenGpu (環境設定の「プレビューを描く GPU: 画面の表示と同じ GPU」) なら、選んだ GPU と違っても、画面の GPU で描いて共有する。
+    /// </summary>
+    internal static bool SharedAllowed(SharedPreviewTarget shared, RenderBackend mode, bool onScreenGpu, out string reason)
     {
         reason = "";
         var env = Environment.GetEnvironmentVariable("VIDEO_BUILDER_SHARED_PREVIEW");
@@ -152,12 +155,22 @@ public sealed class PreviewService : IDisposable
         if (shared.IsD3D) return OperatingSystem.IsWindows();
         // GL での共有は Linux でだけ確かめている
         if (!OperatingSystem.IsLinux()) { reason = "この OS ではまだ使わない"; return false; }
-        bool force = env == "1";
-        bool software = GpuContext.IsSoftwareRenderer(shared.Renderer);
-        if (software && mode == RenderBackend.Auto && !force) { reason = "画面の描画がソフトウェアの GPU"; return false; }
-        if (!force && SafeSelectedAdapter() is { IsSoftware: false } adapter && !SameGpu(adapter.Name, shared.Renderer))
+        return GlSharingAllowed(shared.Renderer, SafeSelectedAdapter(), mode, onScreenGpu, force: env == "1", out reason);
+    }
+
+    /// <summary>
+    /// GL (Linux) で、画面の GPU (screenRenderer。画面と共有するコンテキストの GL_RENDERER) と共有して描いてよいか。
+    /// selected は描画に選んだ GPU (分からなければ null)。
+    /// </summary>
+    internal static bool GlSharingAllowed(string screenRenderer, GpuAdapter? selected, RenderBackend mode, bool onScreenGpu, bool force, out string reason)
+    {
+        reason = "";
+        if (force) return true;
+        if (GpuContext.IsSoftwareRenderer(screenRenderer) && mode == RenderBackend.Auto) { reason = "画面の描画がソフトウェアの GPU"; return false; }
+        // 違う GPU の間では共有できない。画面の表示と同じ GPU で描く設定なら、選んだ GPU と違っても画面の GPU で描く
+        if (!onScreenGpu && selected is { IsSoftware: false } adapter && !SameGpu(adapter.Name, screenRenderer))
         {
-            reason = $"画面の GPU ({shared.Renderer}) と描画の GPU ({adapter.Name}) が違う";
+            reason = $"画面の GPU ({screenRenderer}) と描画の GPU ({adapter.Name}) が違う。環境設定の「プレビューを描く GPU」で、画面の表示と同じ GPU にすると共有できる";
             return false;
         }
         return true;
@@ -220,7 +233,7 @@ public sealed class PreviewService : IDisposable
         var mode = _settings.RenderBackend;
         if (mode == RenderBackend.Cpu) description = "CPU";
         else if (!_allowShared) notShared = "画面の保存中";
-        else if (_shared is { IsD3D: true } d3dShared && SharedAllowed(d3dShared, mode, out notShared))
+        else if (_shared is { IsD3D: true } d3dShared && SharedAllowed(d3dShared, mode, false, out notShared))
         {
             // Windows: 描画の GPU コンテキスト (自分の Direct3D 11 のデバイス) で共有のテクスチャを作って描く。
             // 画面の描画と同じ GPU でなければ、テクスチャを開けないので使わない
@@ -244,7 +257,7 @@ public sealed class PreviewService : IDisposable
                 }
             }
         }
-        else if (_shared is { IsD3D: false } shared && SharedAllowed(shared, mode, out notShared))
+        else if (_shared is { IsD3D: false } shared && SharedAllowed(shared, mode, _settings.PreviewOnScreenGpu, out notShared))
         {
             // 画面と共有する GL コンテキストで描く (描いた絵を読み戻さずに、そのまま画面に出す)
             var gl = shared.Gl!;

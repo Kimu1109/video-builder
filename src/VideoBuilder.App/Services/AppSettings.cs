@@ -31,6 +31,13 @@ public sealed class AppSettings
     /// 描画・出力のほか、動画のデコード (VAAPI のデバイス・NVDEC を先に試すか) もこれに合わせる。
     /// </summary>
     public string GpuAdapter { get; set; } = "";
+    /// <summary>
+    /// プレビューを、画面の表示と同じ GPU で描く (Linux)。CPU 内蔵の GPU で画面を出し、外付けの GPU で描く PC (ハイブリッドの GPU のノート PC など) では、
+    /// 違う GPU の間では画面とテクスチャを共有できないので、プレビューを毎フレーム読み戻して画面の GPU へ送り直している (設計書 22.28)。
+    /// true にすると、画面と共有するコンテキスト (画面の GPU) で描いて、読み戻しをなくす。外付けの GPU より遅いことがあるので、既定は false。
+    /// 出力 (書き出し) と動画のデコードは、これまでどおり <see cref="GpuAdapter"/> の GPU を使う。
+    /// </summary>
+    public bool PreviewOnScreenGpu { get; set; }
     /// <summary>動画のデコードに GPU を使うか (Auto: 使えれば使う)。</summary>
     public VideoBuilder.Media.HardwareDecodeMode HardwareDecode { get; set; } = VideoBuilder.Media.HardwareDecodeMode.Auto;
     /// <summary>プレビューでプロキシを使う。</summary>

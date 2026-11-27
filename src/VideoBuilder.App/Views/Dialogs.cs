@@ -313,6 +313,17 @@ public sealed class PreferencesDialog : DialogBase
         page.Children.Add(Row("使う GPU", gpu));
         page.Children.Add(gpuNote);
         _ = FillGpuListAsync(gpu, gpuNote, ShowDecodeLater);
+        if (OperatingSystem.IsLinux())
+        {
+            // ハイブリッドの GPU の PC: 画面は CPU 内蔵の GPU、描画は外付けの GPU だと、プレビューを毎フレーム読み戻して送り直す (設計書 22.57)
+            page.Children.Add(Row("プレビューを描く GPU", Combo(new[] { "使う GPU と同じ", "画面の表示と同じ GPU (読み戻さない)" }, s.PreviewOnScreenGpu ? 1 : 0, i =>
+            {
+                s.PreviewOnScreenGpu = i == 1; Svc.Preview.ReloadBackend();
+            })));
+            var previewGpuNote = new TextBlock { TextWrapping = TextWrapping.Wrap, Text = "画面の表示と描画で GPU が違うとき (CPU 内蔵の GPU で画面を出すノート PC など) に効きます。画面の表示と同じ GPU で描くと、プレビューを読み戻して送り直す手間がなくなりますが、外付けの GPU より遅いことがあります。出力と動画のデコードは「使う GPU」で行います。" };
+            previewGpuNote.Classes.Add("secondary");
+            page.Children.Add(previewGpuNote);
+        }
         var decodeInfo = new TextBlock { TextWrapping = TextWrapping.Wrap, Text = "確認中..." };
         decodeInfo.Classes.Add("secondary");
         async void ShowDecode()

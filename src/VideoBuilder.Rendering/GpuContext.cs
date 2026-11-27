@@ -538,8 +538,8 @@ public sealed unsafe class GpuContext : IDisposable
             string drm = devExt.Contains("EGL_EXT_device_drm") ? Str(device, EGL_DRM_DEVICE_FILE_EXT) : "";
             string render = devExt.Contains("EGL_EXT_device_drm_render_node") ? Str(device, EGL_DRM_RENDER_NODE_FILE_EXT) : "";
             if (render.Length == 0) render = RenderNodeFor(drm);   // 古いドライバ: sysfs から探す
-            // 名前 (GL_RENDERER) は、実際にコンテキストを作って調べる
-            using var ctx = OpenDisplay(PlatformDisplayExt(EGL_PLATFORM_DEVICE_EXT, device, null), out _);
+            // 名前 (GL_RENDERER) は、実際にコンテキストを作って調べる。名前を読むだけなので、Skia の GPU コンテキストは作らない
+            using var ctx = OpenDisplay(PlatformDisplayExt(EGL_PLATFORM_DEVICE_EXT, device, null), out _, nameOnly: true);
             if (ctx == null) continue;
             bool software = ctx.IsSoftware || devExt.Contains("EGL_MESA_device_software");
             result.Add((new GpuAdapter(result.Count, ctx.Renderer, ctx.Vendor, drm, File.Exists(render) ? render : "", software), device));
@@ -590,14 +590,15 @@ public sealed unsafe class GpuContext : IDisposable
     }
 
     /// <summary>EGL のディスプレイを初期化して、その上にコンテキストを作る。</summary>
-    private static GpuContext? OpenDisplay(IntPtr display, out string reason)
+    /// <param name="nameOnly">GPU の名前 (Renderer・Vendor) を調べるだけ。Skia の GPU コンテキストは作らない (描画には使えない)。</param>
+    private static GpuContext? OpenDisplay(IntPtr display, out string reason, bool nameOnly = false)
     {
         reason = "";
         if (display == IntPtr.Zero) { reason = "ディスプレイなし"; return null; }
         int major, minor;
         if (EglApi.Initialize(display, &major, &minor) == 0) { reason = $"初期化に失敗 (0x{EglApi.GetError():X4})"; return null; }
         var ctx = new GpuContext { _display = display };
-        if (ctx.Setup(out reason)) return ctx;
+        if (ctx.Setup(out reason, nameOnly)) return ctx;
         ctx.Dispose();
         return null;
     }
@@ -733,7 +734,7 @@ public sealed unsafe class GpuContext : IDisposable
         return null;
     }
 
-    private bool Setup(out string reason)
+    private bool Setup(out string reason, bool nameOnly = false)
     {
         reason = "";
         EglApi.BindApi(EGL_OPENGL_ES_API);
@@ -771,6 +772,7 @@ public sealed unsafe class GpuContext : IDisposable
                 Vendor = Marshal.PtrToStringAnsi(getString(GL_VENDOR)) ?? "";
             }
             IsSoftware = IsSoftwareRenderer(Renderer);
+            if (nameOnly) return true;
             _interface = GRGlInterface.CreateGles(name => EglApi.Proc(name));
             var gr = _interface == null ? null : GRContext.CreateGl(_interface);
             if (gr == null) { reason = "Skia の GPU コンテキストを作れません"; return false; }
