@@ -17,6 +17,11 @@ public enum HardwareFrameKinds
     /// 10 ビットの P010 のフレームも受け取る (VAAPI・CUDA と組み合わせて指定する)。GL で 16 ビットのテクスチャを使えるときだけ (設計書 22.62)。
     /// </summary>
     TenBit = 4,
+    /// <summary>
+    /// Direct3D 11 (D3D11VA のデコード・Windows のエンコーダ) のフレーム。デコードしたものは、描画の Direct3D 11 のデバイスと共有するテクスチャへ
+    /// GPU の中で写して ANGLE で取り込み、エンコーダのものは ANGLE で面へ直接描く (設計書 22.65)。
+    /// </summary>
+    D3D11 = 8,
 }
 
 /// <summary>GPU 上のフレームの面の並び (設計書 22.58・22.62)。</summary>
@@ -41,6 +46,16 @@ public sealed unsafe class HardwareDeviceRef : IDisposable
         _ref = null;
         if (r != null) ffmpeg.av_buffer_unref(&r);
     }
+}
+
+/// <summary>
+/// FFmpeg の Direct3D 11 のデバイス (AVD3D11VADeviceContext) の中身。Device・Context は COM のポインタで、参照は増やしていない
+/// (フレームを持っている間は消えない)。Context を使う間は <see cref="Enter"/> と <see cref="Leave"/> で排他する。
+/// </summary>
+public readonly unsafe record struct D3D11DeviceAccess(IntPtr Device, IntPtr Context, IntPtr LockFn, IntPtr UnlockFn, IntPtr LockCtx)
+{
+    public void Enter() { if (LockFn != IntPtr.Zero) ((delegate* unmanaged<IntPtr, void>)LockFn)(LockCtx); }
+    public void Leave() { if (UnlockFn != IntPtr.Zero) ((delegate* unmanaged<IntPtr, void>)UnlockFn)(LockCtx); }
 }
 
 /// <summary>DMA-BUF の 1 つの層 (1 つの面)。</summary>
@@ -105,8 +120,40 @@ public sealed unsafe class HardwareFrame : IDisposable
         {
             AVPixelFormat.AV_PIX_FMT_VAAPI => HardwareFrameKinds.Vaapi,
             AVPixelFormat.AV_PIX_FMT_CUDA => HardwareFrameKinds.Cuda,
+            AVPixelFormat.AV_PIX_FMT_D3D11 => HardwareFrameKinds.D3D11,
             _ => HardwareFrameKinds.None,
         };
+    }
+
+    // ---------------- Direct3D 11 ----------------
+
+    /// <summary>
+    /// Direct3D 11 のフレームのテクスチャ (ID3D11Texture2D) と、その中の番号 (テクスチャの配列のときの位置。1 枚ずつなら 0)。
+    /// テクスチャは、このフレームを Dispose するまで使える。
+    /// </summary>
+    public (IntPtr Texture, int Slice) D3D11Texture =>
+        Kind == HardwareFrameKinds.D3D11 && _frame != null ? ((IntPtr)_frame->data[0], (int)(nint)_frame->data[1]) : default;
+
+    /// <summary>
+    /// Direct3D 11 のフレームのデバイス (AVD3D11VADeviceContext の device・device_context と、その排他の lock・unlock)。
+    /// device_context は FFmpeg (デコーダ・エンコーダ) も別のスレッドで使うので、使う間は Lock で排他する。
+    /// </summary>
+    public D3D11DeviceAccess? D3D11Device
+    {
+        get
+        {
+            if (Kind != HardwareFrameKinds.D3D11 || _frame == null || _frame->hw_frames_ctx == null) return null;
+            var fc = (AVHWFramesContext*)_frame->hw_frames_ctx->data;
+            var d = (AVD3D11VADeviceContextLayout*)fc->device_ctx->hwctx;
+            return new D3D11DeviceAccess(d->Device, d->DeviceContext, d->Lock, d->Unlock, d->LockCtx);
+        }
+    }
+
+    // libavutil/hwcontext_d3d11va.h の AVD3D11VADeviceContext (FFmpeg.AutoGen にはない)
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct AVD3D11VADeviceContextLayout
+    {
+        public IntPtr Device, DeviceContext, VideoDevice, VideoContext, Lock, Unlock, LockCtx;
     }
 
     // ---------------- VAAPI: DMA-BUF として取り出す ----------------

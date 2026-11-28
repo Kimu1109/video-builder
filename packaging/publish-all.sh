@@ -22,10 +22,10 @@ for rid in "${rids[@]}"; do
   out="$root/artifacts/publish/$rid"
   rm -rf "$out"
   echo "== $rid"
-  # Linux は ReadyToRun (前もって機械語にしておく) で発行し、起動時の JIT の時間を減らす。AppImage (appimage/build.sh) と同じ。
-  # Flatpak と tar.gz はこのスクリプトで発行したものを使う
+  # Linux・Windows は ReadyToRun (前もって機械語にしておく) で発行し、起動時の JIT の時間を減らす。AppImage (appimage/build.sh) と同じ。
+  # Flatpak と tar.gz はこのスクリプトで発行したものを使う。Windows は x64・arm64 とも (crossgen2 はほかの OS・CPU 向けにも作れる)
   r2r=()
-  case "$rid" in linux-*) r2r=(-p:PublishReadyToRun=true) ;; esac
+  case "$rid" in linux-*|win-*) r2r=(-p:PublishReadyToRun=true) ;; esac
   if ! dotnet publish "$root/src/VideoBuilder.App" -c Release -r "$rid" --self-contained true \
        -p:DebugType=none -p:PublishSingleFile=false ${r2r[@]+"${r2r[@]}"} -o "$out" -v q -nologo; then
     echo "!! $rid: 発行に失敗しました" >&2; failed=1; continue

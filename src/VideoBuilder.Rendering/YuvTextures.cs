@@ -77,6 +77,7 @@ internal sealed unsafe class YuvTextures : IDisposable
     // GPU 上のフレームを取り込むもの (使えなければ null。理由は HardwareError)
     private readonly EglDmaBuf? _dmaBuf;
     private CudaGl? _cuda;
+    private D3D11FrameImport? _d3d11;   // Windows: D3D11VA のフレーム (設計書 22.65)
     private readonly uint[] _imported = new uint[3];   // DMA-BUF を取り込むテクスチャ (Y・UV、I420 なら Y・U・V)
     // GPU が読み終えるまで手放さないもの (DMA-BUF の元のフレームはデコーダが使い回すので、描き終えてから返す)
     private readonly Queue<(IntPtr Fence, HardwareFrame Frame, IntPtr[] Images)> _inUse = new();
@@ -117,6 +118,11 @@ internal sealed unsafe class YuvTextures : IDisposable
             if (_dmaBuf != null) HardwareKinds |= HardwareFrameKinds.Vaapi; else errors.Add("VAAPI: " + dmaError);
             _cuda = CudaGl.Create(gpu, out var cudaError);
             if (_cuda != null) HardwareKinds |= HardwareFrameKinds.Cuda; else errors.Add("CUDA: " + cudaError);
+            if (OperatingSystem.IsWindows())
+            {
+                _d3d11 = D3D11FrameImport.Create(gpu, out var d3dError);
+                if (_d3d11 != null) HardwareKinds |= HardwareFrameKinds.D3D11; else errors.Add("D3D11VA: " + d3dError);
+            }
             // 10 ビット (P010) は 16 ビットのテクスチャ (R16・RG16) で読む (設計書 22.62)
             if (Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_FRAMES_10BIT") == "0") errors.Add("10 ビット: VIDEO_BUILDER_GPU_FRAMES_10BIT=0");
             else if (!gl.Norm16) errors.Add("10 ビット: 16 ビットのテクスチャ (GL_EXT_texture_norm16) がありません");
@@ -239,7 +245,7 @@ internal sealed unsafe class YuvTextures : IDisposable
 
     /// <summary>
     /// GPU 上のフレーム (メモリへ写していないもの。8 ビットの NV12・I420、10 ビットの P010) を、GPU の中で RGBA に変換した画像を返す
-    /// (設計書 22.58・22.62)。ow・oh は作る画像の大きさ (縮めてデコードするときは元より小さい)。frame はここで引き取る (GPU が読み終えたら手放す)。
+    /// (設計書 22.58・22.62。Windows の D3D11VA は 22.65)。ow・oh は作る画像の大きさ (縮めてデコードするときは元より小さい)。frame はここで引き取る (GPU が読み終えたら手放す)。
     /// 取り込めなければ null (frame は手放す。その種類 (10 ビットのときは 10 ビット) はこのあと使わない)。
     /// </summary>
     public SKImage? ConvertHardware(HardwareFrame frame, int ow, int oh)
@@ -260,10 +266,22 @@ internal sealed unsafe class YuvTextures : IDisposable
         IntPtr[] images = Array.Empty<IntPtr>();
         string? error = null;
         bool keep = false;
+        D3D11FrameImport.Slot? d3dSlot = null;
         try
         {
             uint ty, tu, tv;
-            if (frame.Kind == HardwareFrameKinds.Vaapi)
+            if (frame.Kind == HardwareFrameKinds.D3D11)
+            {
+                // D3D11VA: 描画のデバイスと共有するテクスチャへ GPU の中で写して、面ごとに取り込む (NV12 か P010)
+                if (planar) { error = "D3D11VA のフレームが I420 です"; return Fail(); }
+                var (texture, slice) = frame.D3D11Texture;
+                if (frame.D3D11Device is not { } device) { error = "D3D11VA のデバイスが分かりません"; return Fail(); }
+                d3dSlot = _d3d11!.Import(device, texture, slice, w, h, tenBit, out error);
+                if (d3dSlot == null) return Fail();
+                for (int i = 0; i < 2; i++) { gl.BindTexture(GlFunctions.TEXTURE_2D, d3dSlot.Textures[i]); SetFilter(filter); }
+                ty = d3dSlot.Textures[0]; tu = tv = d3dSlot.Textures[1];
+            }
+            else if (frame.Kind == HardwareFrameKinds.Vaapi)
             {
                 if (!frame.TryMapDmaBuf(out var layers, out error)) return Fail();
                 var expected = frame.Surface switch
@@ -320,6 +338,8 @@ internal sealed unsafe class YuvTextures : IDisposable
         }
         finally
         {
+            // D3D11VA: 描く命令を GPU に渡してから、共有のテクスチャの鍵をデコーダ側に返す (写したあとなので、フレームはすぐ手放してよい)
+            if (d3dSlot != null) _d3d11!.Done(d3dSlot);
             if (!keep)
             {
                 foreach (var img in images) _dmaBuf?.Destroy(img);
@@ -336,7 +356,7 @@ internal sealed unsafe class YuvTextures : IDisposable
             ReturnOutput(output, ow, oh);
             // 10 ビットだけの失敗 (16 ビットの形式を取り込めないなど) なら、8 ビットはこれまでどおり使う
             HardwareKinds &= tenBit ? ~HardwareFrameKinds.TenBit : ~(frame.Kind);
-            if ((HardwareKinds & (HardwareFrameKinds.Vaapi | HardwareFrameKinds.Cuda)) == 0) HardwareKinds = HardwareFrameKinds.None;
+            if ((HardwareKinds & (HardwareFrameKinds.Vaapi | HardwareFrameKinds.Cuda | HardwareFrameKinds.D3D11)) == 0) HardwareKinds = HardwareFrameKinds.None;
             HardwareError = (tenBit ? "10 ビット: " : "") + error;
             return null;
         }
@@ -438,6 +458,8 @@ internal sealed unsafe class YuvTextures : IDisposable
         ReleaseFinished(wait: true);
         _cuda?.Dispose();
         _cuda = null;
+        _d3d11?.Dispose();
+        _d3d11 = null;
         foreach (var t in _imported) gl.DeleteTexture(t);
         while (_returned.TryDequeue(out var r)) _free.Add(r);
         foreach (var f in _free) gl.DeleteTexture(f.Texture);

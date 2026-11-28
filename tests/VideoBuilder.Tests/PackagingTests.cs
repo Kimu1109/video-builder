@@ -54,13 +54,13 @@ public class PackagingTests
     }
 
     [Fact]
-    public void Linux_packages_are_published_ready_to_run()
+    public void Linux_and_windows_packages_are_published_ready_to_run()
     {
-        // AppImage と、Flatpak・tar.gz (publish-all.sh で発行する) のどちらも ReadyToRun にして、起動時の JIT を減らす
+        // AppImage と、Flatpak・tar.gz・Windows (publish-all.sh で発行する) のどれも ReadyToRun にして、起動時の JIT を減らす
         var appImage = File.ReadAllText(Path.Combine(Root(), "packaging", "appimage", "build.sh"));
         var publishAll = File.ReadAllText(Path.Combine(Root(), "packaging", "publish-all.sh"));
         Assert.Contains("-p:PublishReadyToRun=true", appImage);
-        Assert.Matches(@"linux-\*\) r2r=\(-p:PublishReadyToRun=true\)", publishAll);
+        Assert.Matches(@"linux-\*\|win-\*\) r2r=\(-p:PublishReadyToRun=true\)", publishAll);
         Assert.Contains("${r2r[@]+\"${r2r[@]}\"}", publishAll);
     }
 

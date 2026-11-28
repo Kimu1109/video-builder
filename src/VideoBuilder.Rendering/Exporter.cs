@@ -119,6 +119,8 @@ public static class Exporter
             add(watch.Elapsed);
         }
 
+        // Windows: 書き出しの間は、前面になくても省電力 (EcoQoS・E コア) で動かさない (設計書 22.65)
+        using var power = WindowsScheduling.NoPowerThrottling();
         // GPU コンテキストは作ったスレッドでしか使えないので、この関数の中で作って捨てる
         using var gpu = req.UseGpu ? GpuContext.TryCreate(out _) : null;
         // フレームを順に描くので、動画の次のフレームを裏でデコードしておく
@@ -139,6 +141,14 @@ public static class Exporter
         if (stats != null && nvenc && gpu != null && !s.CudaFrames)
             stats.CudaDirectError = !OperatingSystem.IsLinux() ? "Linux でだけ使う" : Environment.GetEnvironmentVariable("VIDEO_BUILDER_NVENC_DIRECT") == "0"
                 ? "VIDEO_BUILDER_NVENC_DIRECT=0" : $"描画の GPU が NVIDIA ではありません ({gpu.Renderer})";
+        // Windows: GPU のエンコーダ (NVENC・AMF・Quick Sync・Media Foundation) に、描画の Direct3D 11 のデバイスのフレームを渡し、
+        // そのフレームの面へ直接描く (設計書 22.65)
+        string family = HardwareEncoders.FamilyOf(s.VideoCodec);
+        bool d3dFamily = family is "nvenc" or "amf" or "qsv" or "mf";
+        s.D3D11Device = d3dFamily && gpu != null && OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("VIDEO_BUILDER_D3D11_DIRECT") != "0"
+            ? gpu.D3DDevice : IntPtr.Zero;
+        if (stats != null && d3dFamily && gpu != null && OperatingSystem.IsWindows() && s.D3D11Device == IntPtr.Zero)
+            stats.D3D11DirectError = Environment.GetEnvironmentVariable("VIDEO_BUILDER_D3D11_DIRECT") == "0" ? "VIDEO_BUILDER_D3D11_DIRECT=0" : "描画が Direct3D 11 (ANGLE) ではありません";
         using var mixer = new AudioMixer();
         using var writer = new MediaWriter(s);
         bool hasVideo = writer.HasVideo, hasAudio = writer.HasAudio;
@@ -192,13 +202,10 @@ public static class Exporter
             if (readback != null && kind != HardwareFrameKinds.None)
             {
                 readback.EnableDirect(() => (writer.AllocateHardwareFrame(out var e), e), kind);
-                if (stats != null)
-                {
-                    if (kind == HardwareFrameKinds.Cuda) stats.CudaDirectError = readback.DirectError;
-                    else stats.VaapiDirectError = readback.DirectError;
-                }
+                if (stats != null) SetDirectError(kind, readback.DirectError);
             }
             else if (stats != null && s.CudaFrames) stats.CudaDirectError = writer.HardwareInputError ?? readback?.YuvError ?? "読み戻しを使えません";
+            else if (stats != null && s.D3D11Device != IntPtr.Zero) stats.D3D11DirectError = writer.HardwareInputError ?? readback?.YuvError ?? "読み戻しを使えません";
         }
         // 読み戻しの途中のフレーム (描いた順)
         var inFlight = new Queue<int>();
@@ -241,6 +248,15 @@ public static class Exporter
             stats?.AddWait(watch.Elapsed);
         }
 
+        // エンコーダのフレームへ直接描けなかった理由を、種類ごとの欄に入れる
+        void SetDirectError(HardwareFrameKinds kind, string? error)
+        {
+            if (stats == null) return;
+            if (kind == HardwareFrameKinds.Cuda) stats.CudaDirectError = error;
+            else if (kind == HardwareFrameKinds.D3D11) stats.D3D11DirectError = error;
+            else stats.VaapiDirectError = error;
+        }
+
         // いちばん古い読み戻しを受け取って、待ち行列に入れる。読み戻せなければ、読み戻しをやめて描き直す
         void FinishOldest()
         {
@@ -254,11 +270,7 @@ public static class Exporter
                 if (yuv != null) { prepared = writer.PrepareVideoFrame(yuv.PlanesAt(pixels)); return; }
                 unsafe { prepared = writer.PrepareVideoFrame(new ReadOnlySpan<byte>((void*)pixels, rowBytes * h), rowBytes, rgba: true); }
             }, hw => { prepared = writer.PrepareHardwareFrame(hw); direct = true; });
-            if (stats != null && readback.DirectError != null)
-            {
-                if (readback.DirectKind == HardwareFrameKinds.Cuda) stats.CudaDirectError = readback.DirectError;
-                else stats.VaapiDirectError = readback.DirectError;
-            }
+            if (stats != null && readback.DirectError != null) SetDirectError(readback.DirectKind, readback.DirectError);
             stats?.AddConvert(watch.Elapsed);
             if (!done)
             {
@@ -275,6 +287,7 @@ public static class Exporter
             stats?.AddAsyncReadback();
             if (yuv != null) stats?.AddGpuYuv();
             if (direct && readback.DirectKind == HardwareFrameKinds.Cuda) stats?.AddCudaDirect();
+            else if (direct && readback.DirectKind == HardwareFrameKinds.D3D11) stats?.AddD3D11Direct();
             else if (direct) stats?.AddVaapiDirect();
             Enqueue(frame, prepared);
         }

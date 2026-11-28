@@ -459,7 +459,9 @@ public sealed class PreviewService : IDisposable
         var quads = engine.LastQuads.ToList();
         // 前のフレームは、ここまで (このフレームの組み立て) の間に GPU で描き終えているはず。画面に出す
         PresentPending();
-        if (!shared.IsD3D && UsesFences)
+        // GL (Linux) も Direct3D 11 の共有テクスチャ (Windows。ANGLE の OpenGL ES 3 にも glFenceSync がある) も、
+        // フェンスを置いて待たずに次のフレームを組み立てる。Direct3D 11 の鍵 (keyed mutex) は、フェンスを待ってから画面の描画に渡す
+        if (UsesFences)
         {
             var waitClock = Stopwatch.StartNew();
             g.Context.Flush(true, false);   // GPU に渡す (待たない)
@@ -480,7 +482,7 @@ public sealed class PreviewService : IDisposable
     private sealed record PendingFrame(SharedPreviewTarget.Texture Texture, IntPtr Fence, double SubmitMs, int Width, int Height, List<(string Id, SKPoint[] Quad)> Quads);
     private PendingFrame? _pending;
 
-    /// <summary>フェンスを使って、GPU の処理を待たずに次のフレームを組み立てるか (GL のときだけ)。</summary>
+    /// <summary>フェンスを使って、GPU の処理を待たずに次のフレームを組み立てるか (GL・Direct3D 11 の共有テクスチャのどちらも)。</summary>
     private static readonly bool UsesFences = Environment.GetEnvironmentVariable("VIDEO_BUILDER_SHARED_PREVIEW_FENCE") != "0";
 
     /// <summary>フェンスを待つ上限 (ナノ秒)。GPU が止まったときに、描画のスレッドがいつまでも待たないように。</summary>
@@ -682,6 +684,8 @@ public sealed class PreviewService : IDisposable
         _frameBudgetMs = 1000.0 * project.Settings.Fps.Den / Math.Max(1, project.Settings.Fps.Num);
         _slowFrames = 0; _fastFrames = 0;
         IsPlaying = true;
+        // Windows: 再生中だけタイマーの精度を 1ms にする (音声のバッファを積む間隔・再生の時計が 15.6ms 刻みにならないように。設計書 22.65)
+        _fineTimer ??= WindowsScheduling.FineTimer();
         StartClock();
         PlayStateChanged?.Invoke();
     }
@@ -800,8 +804,12 @@ public sealed class PreviewService : IDisposable
         // 再生中だけ縮めていたなら、止めたフレームを元の大きさで描き直す
         if (_playDivisor > 1) { _playDivisor = 1; Request(); }
         _audio?.Stop();
+        _fineTimer?.Dispose();
+        _fineTimer = null;
         PlayStateChanged?.Invoke();
     }
+
+    private IDisposable? _fineTimer;
 
     private void Tick()
     {

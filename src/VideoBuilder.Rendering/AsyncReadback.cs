@@ -42,7 +42,8 @@ internal sealed unsafe class AsyncReadback : IDisposable
     private Func<(VideoBuilder.Media.HardwareFrame? Frame, string? Error)>? _allocate;
     private EglDmaBuf? _dmaBuf;
     private CudaGl? _cudaOut;
-    /// <summary>直接描くフレームの種類 (VAAPI か CUDA)。</summary>
+    private D3D11Egl? _d3dOut;   // Windows: エンコーダの Direct3D 11 のフレームの面を取り込む (設計書 22.65)
+    /// <summary>直接描くフレームの種類 (VAAPI・CUDA・Direct3D 11)。</summary>
     public VideoBuilder.Media.HardwareFrameKinds DirectKind { get; private set; }
     private readonly DirectTarget?[] _direct = new DirectTarget?[Depth];
 
@@ -64,17 +65,19 @@ internal sealed unsafe class AsyncReadback : IDisposable
     /// これからのフレームを、allocate で取ったエンコーダのフレームに直接描く。
     /// VAAPI: DMA-BUF として取り込んで描く (EGL で DMA-BUF を取り込めるとき)。
     /// CUDA (NVENC): NV12 に変換した面を、GPU の中で CUDA のフレームへ写す (GL のコンテキストが NVIDIA の GPU のとき)。
-    /// どちらも Yuv が NV12 のときだけ。使えなければ false (DirectError に理由。これまでどおり読み戻す)。
+    /// Direct3D 11 (Windows の NVENC・AMF・Quick Sync・Media Foundation): エンコーダのフレームの面を ANGLE で取り込んで描く (設計書 22.65)。
+    /// どれも Yuv が NV12 のときだけ。使えなければ false (DirectError に理由。これまでどおり読み戻す)。
     /// </summary>
     public bool EnableDirect(Func<(VideoBuilder.Media.HardwareFrame? Frame, string? Error)> allocate,
         VideoBuilder.Media.HardwareFrameKinds kind = VideoBuilder.Media.HardwareFrameKinds.Vaapi)
     {
-        bool cuda = kind == VideoBuilder.Media.HardwareFrameKinds.Cuda;
-        string env = cuda ? "VIDEO_BUILDER_NVENC_DIRECT" : "VIDEO_BUILDER_VAAPI_DIRECT";
+        bool cuda = kind == VideoBuilder.Media.HardwareFrameKinds.Cuda, d3d11 = kind == VideoBuilder.Media.HardwareFrameKinds.D3D11;
+        string env = cuda ? "VIDEO_BUILDER_NVENC_DIRECT" : d3d11 ? "VIDEO_BUILDER_D3D11_DIRECT" : "VIDEO_BUILDER_VAAPI_DIRECT";
         if (Environment.GetEnvironmentVariable(env) == "0") { DirectError = env + "=0"; return false; }
         if (Yuv == null || Yuv.Layout != VideoBuilder.Media.YuvLayout.Nv12) { DirectError = YuvError ?? "GPU で NV12 に変換できません"; return false; }
         string? error;
         if (cuda) { _cudaOut = CudaGl.Create(_gpu, out error, toFrame: true); if (_cudaOut == null) { DirectError = error; return false; } }
+        else if (d3d11) { _d3dOut = D3D11Egl.Create(_gpu, out error); if (_d3dOut == null) { DirectError = error; return false; } }
         else { _dmaBuf = EglDmaBuf.Create(_gpu, out error); if (_dmaBuf == null) { DirectError = error; return false; } }
         DirectKind = kind;
         _allocate = allocate;
@@ -102,6 +105,23 @@ internal sealed unsafe class AsyncReadback : IDisposable
                 d = null;
                 return copied;
             }
+            if (_d3dOut != null)
+            {
+                // Direct3D 11: エンコーダのフレームのテクスチャ (同じデバイス) の Y と U・V の面を取り込み、そこへ直接描く
+                if (frame.Kind != VideoBuilder.Media.HardwareFrameKinds.D3D11) { DisableDirect("エンコーダのフレームが Direct3D 11 ではありません"); return null; }
+                var (texture, slice) = frame.D3D11Texture;
+                gl.GetError();
+                for (int i = 0; i < 2; i++)
+                {
+                    d.Images[i] = _d3dOut.Import(texture, i, slice);
+                    if (d.Images[i] == IntPtr.Zero) { DisableDirect($"エンコーダのフレームを EGL に取り込めません (面 {i}, 0x{EglApi.GetError():X4})"); return null; }
+                    if (!AttachPlane(d, i, image => _d3dOut.BindToTexture(image))) { DisableDirect("エンコーダのフレームに描けません (NV12 の面を描画先にできない?)"); return null; }
+                }
+                Yuv!.ConvertTo(_texture, d.Fbos[0], d.Fbos[1]);
+                var drawn = d;
+                d = null;
+                return drawn;
+            }
             if (!frame.TryMapDmaBuf(out var layers, out error, write: true)) { DisableDirect(error!); return null; }
             if (layers.Length != 2 || layers[0].DrmFormat != VideoBuilder.Media.HardwareFrame.DrmR8 || layers[1].DrmFormat != VideoBuilder.Media.HardwareFrame.DrmGR88)
             {
@@ -113,17 +133,7 @@ internal sealed unsafe class AsyncReadback : IDisposable
             {
                 d.Images[i] = _dmaBuf!.Import(layers[i]);
                 if (d.Images[i] == IntPtr.Zero) { DisableDirect($"DMA-BUF を EGL に取り込めません (0x{EglApi.GetError():X4}, modifier 0x{layers[i].Modifier:X})"); return null; }
-                d.Textures[i] = gl.GenTexture();
-                gl.BindTexture(GlFunctions.TEXTURE_2D, d.Textures[i]);
-                _dmaBuf.BindToTexture(d.Images[i]);
-                uint fbo;
-                gl.GenFramebuffers(1, &fbo);
-                d.Fbos[i] = fbo;
-                gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, fbo);
-                gl.FramebufferTexture2D(GlFunctions.FRAMEBUFFER, GlFunctions.COLOR_ATTACHMENT0, GlFunctions.TEXTURE_2D, d.Textures[i], 0);
-                bool complete = gl.CheckFramebufferStatus(GlFunctions.FRAMEBUFFER) == GlFunctions.FRAMEBUFFER_COMPLETE;
-                gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, 0);
-                if (!complete || gl.GetError() != 0) { DisableDirect("DMA-BUF に描けません"); return null; }
+                if (!AttachPlane(d, i, image => _dmaBuf.BindToTexture(image))) { DisableDirect("DMA-BUF に描けません"); return null; }
             }
             Yuv!.ConvertTo(_texture, d.Fbos[0], d.Fbos[1]);
             var result = d;
@@ -131,6 +141,23 @@ internal sealed unsafe class AsyncReadback : IDisposable
             return result;
         }
         finally { if (d != null) ReleaseDirect(d, disposeFrame: true); }
+    }
+
+    /// <summary>取り込んだ面 (d.Images[i]) を GL のテクスチャにして、描画先の FBO に付ける。描けなければ false。</summary>
+    private bool AttachPlane(DirectTarget d, int i, Action<IntPtr> bind)
+    {
+        var gl = _gl;
+        d.Textures[i] = gl.GenTexture();
+        gl.BindTexture(GlFunctions.TEXTURE_2D, d.Textures[i]);
+        bind(d.Images[i]);
+        uint fbo;
+        gl.GenFramebuffers(1, &fbo);
+        d.Fbos[i] = fbo;
+        gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, fbo);
+        gl.FramebufferTexture2D(GlFunctions.FRAMEBUFFER, GlFunctions.COLOR_ATTACHMENT0, GlFunctions.TEXTURE_2D, d.Textures[i], 0);
+        bool complete = gl.CheckFramebufferStatus(GlFunctions.FRAMEBUFFER) == GlFunctions.FRAMEBUFFER_COMPLETE;
+        gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, 0);
+        return complete && gl.GetError() == 0;
     }
 
     private void DisableDirect(string reason)
@@ -148,6 +175,7 @@ internal sealed unsafe class AsyncReadback : IDisposable
             if (fbo != 0) gl.DeleteFramebuffers(1, &fbo);
             gl.DeleteTexture(d.Textures[i]);
             _dmaBuf?.Destroy(d.Images[i]);
+            _d3dOut?.Destroy(d.Images[i]);
         }
         Array.Clear(d.Fbos); Array.Clear(d.Textures); Array.Clear(d.Images);
         d.Frame.Unmap();

@@ -314,6 +314,7 @@ internal static unsafe class DxgiAdapters
         IntPtr* device, int* featureLevel, IntPtr* immediateContext);
 
     private const int D3D_DRIVER_TYPE_UNKNOWN = 0, D3D_DRIVER_TYPE_HARDWARE = 1, D3D_DRIVER_TYPE_WARP = 5;
+    private const uint D3D11_CREATE_DEVICE_VIDEO_SUPPORT = 0x800;
     private const int E_INVALIDARG = unchecked((int)0x80070057);
 
     /// <summary>
@@ -327,12 +328,24 @@ internal static unsafe class DxgiAdapters
         int driver = adapter == IntPtr.Zero ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_UNKNOWN;
         IntPtr device;
         int got;
-        int hr = D3D11CreateDevice(adapter, driver, IntPtr.Zero, 0, levels, 4, 7, &device, &got, null);
+        // 動画の機能 (D3D11_CREATE_DEVICE_VIDEO_SUPPORT) 付きで作る: 書き出しで、このデバイスのテクスチャを
+        // エンコーダ (FFmpeg の D3D11VA のデバイス) に渡すため (設計書 22.65)。作れなければ付けずに作る
+        uint flags = Environment.GetEnvironmentVariable("VIDEO_BUILDER_D3D11_DIRECT") == "0" ? 0u : D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+        int hr = D3D11CreateDevice(adapter, driver, IntPtr.Zero, flags, levels, 4, 7, &device, &got, null);
         // 古い Windows (D3D 11.0 のランタイム) は 11_1 を知らないので、外して試し直す
-        if (hr == E_INVALIDARG) hr = D3D11CreateDevice(adapter, driver, IntPtr.Zero, 0, levels + 1, 3, 7, &device, &got, null);
+        if (hr == E_INVALIDARG) hr = D3D11CreateDevice(adapter, driver, IntPtr.Zero, flags, levels + 1, 3, 7, &device, &got, null);
+        if ((hr < 0 || device == IntPtr.Zero) && flags != 0)
+        {
+            hr = D3D11CreateDevice(adapter, driver, IntPtr.Zero, 0, levels, 4, 7, &device, &got, null);
+            if (hr == E_INVALIDARG) hr = D3D11CreateDevice(adapter, driver, IntPtr.Zero, 0, levels + 1, 3, 7, &device, &got, null);
+        }
         // GPU を指定していなくて、ハードウェアで作れなければ (GPU のない環境)、ソフトウェア (WARP) で作る
         if ((hr < 0 || device == IntPtr.Zero) && adapter == IntPtr.Zero)
-            hr = D3D11CreateDevice(IntPtr.Zero, D3D_DRIVER_TYPE_WARP, IntPtr.Zero, 0, levels + 1, 3, 7, &device, &got, null);
+        {
+            hr = D3D11CreateDevice(IntPtr.Zero, D3D_DRIVER_TYPE_WARP, IntPtr.Zero, flags, levels + 1, 3, 7, &device, &got, null);
+            if ((hr < 0 || device == IntPtr.Zero) && flags != 0)
+                hr = D3D11CreateDevice(IntPtr.Zero, D3D_DRIVER_TYPE_WARP, IntPtr.Zero, 0, levels + 1, 3, 7, &device, &got, null);
+        }
         if (hr < 0 || device == IntPtr.Zero) { error = $"Direct3D 11 のデバイスを作れません (0x{hr:X8})"; return IntPtr.Zero; }
         return device;
     }
