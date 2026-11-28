@@ -81,6 +81,34 @@ public unsafe class PixelBlendTests
         Assert.True(mean < 0.6 && max <= 2, $"減算: mean={mean} max={max}");
     }
 
+    /// <summary>
+    /// 整数で計算する合成は、SIMD の幅 (256 = AVX2・128 = ARM64 の NEON・0 = SIMD なし) によらず同じ結果になる。
+    /// x64 の上でも、ARM64 で使う 128 ビットの計算を確かめられる。
+    /// </summary>
+    [Theory]
+    [InlineData(1)] [InlineData(2)] [InlineData(3)] [InlineData(4)] [InlineData(6)] [InlineData(7)] [InlineData(12)]
+    [InlineData(20)] [InlineData(21)] [InlineData(22)] [InlineData(23)]
+    public void Integer_blends_give_the_same_result_for_every_vector_width(int blend)
+    {
+        foreach (bool opaqueBack in new[] { true, false })
+        {
+            // 幅 67: 8 画素ずつ・4 画素ずつの計算の余り (端数) も通る
+            using var src = Random(67, 41, 5, false);
+            using var back = Random(67, 41, 6, opaqueBack);
+            SKBitmap Blend(int bits)
+            {
+                var r = back.Copy();
+                PixelBlend.Composite((byte*)src.GetPixels(), src.RowBytes, (byte*)r.GetPixels(), r.RowBytes, src.Width, src.Height, blend, bits);
+                return r;
+            }
+            using var scalar = Blend(0);
+            using var v128 = Blend(128);
+            using var v256 = Blend(256);
+            Assert.Equal((0.0, 0), Compare(scalar, v128));
+            Assert.Equal((0.0, 0), Compare(scalar, v256));
+        }
+    }
+
     /// <summary>合成モードのオブジェクト (回転・拡大・半透明) を、自前の合成と Skia の合成で描いて比べる。</summary>
     [Theory]
     [InlineData(1)] [InlineData(2)] [InlineData(3)] [InlineData(4)] [InlineData(5)] [InlineData(6)]

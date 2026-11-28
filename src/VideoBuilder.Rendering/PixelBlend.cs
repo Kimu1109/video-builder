@@ -218,8 +218,18 @@ public static unsafe class PixelBlend
         finally { PixelPool.Return(layer, bytes); }
     }
 
+    /// <summary>
+    /// 整数の合成に使う SIMD の幅 (ビット)。256 (x64 の AVX2)・128 (ARM64 の NEON や AVX2 のない x64)・0 (SIMD なし)。
+    /// ARM64 では Vector256 が高速化されない (IsHardwareAccelerated が false で、ソフトウェアの実装になる) ので、128 ビットで計算する。
+    /// </summary>
+    internal static readonly int VectorBits = Vector256.IsHardwareAccelerated ? 256 : Vector128.IsHardwareAccelerated ? 128 : 0;
+
     /// <summary>src (作業用の画像) を dst に合成の種類 op で重ねる。どちらも BGRA (乗算済みアルファ)。</summary>
-    public static void Composite(byte* src, int srcRowBytes, byte* dst, int dstRowBytes, int width, int height, int blend)
+    public static void Composite(byte* src, int srcRowBytes, byte* dst, int dstRowBytes, int width, int height, int blend) =>
+        Composite(src, srcRowBytes, dst, dstRowBytes, width, height, blend, VectorBits);
+
+    /// <summary>テスト用: SIMD の幅 (256・128・0) を指定して合成する (x64 の上でも ARM64 と同じ 128 ビットの計算を確かめるため)。</summary>
+    internal static void Composite(byte* src, int srcRowBytes, byte* dst, int dstRowBytes, int width, int height, int blend, int vectorBits)
     {
         PixelOps.ForBands(width, height, (y0, y1) =>
         {
@@ -228,22 +238,25 @@ public static unsafe class PixelBlend
                 byte* s = src + (long)y * srcRowBytes, d = dst + (long)y * dstRowBytes;
                 switch (blend)
                 {
-                    case 1: RowPlus(s, d, width); break;
-                    case 2: RowSubtract(s, d, width); break;
-                    case 3 or 4 or 6 or 7 or 12 or OpDstIn or OpDstOut or OpSrcATop or OpSrcOver: RowSeparable(s, d, width, blend); break;
+                    case 1: RowPlus(s, d, width, vectorBits); break;
+                    case 2: RowSubtract(s, d, width, vectorBits); break;
+                    case 3 or 4 or 6 or 7 or 12 or OpDstIn or OpDstOut or OpSrcATop or OpSrcOver: RowSeparable(s, d, width, blend, vectorBits); break;
                     default: RowFloat(s, d, width, blend); break;
                 }
             }
         });
     }
 
-    // ---------------- 整数で計算するもの (8 画素ずつ) ----------------
+    // ---------------- 整数で計算するもの (256 ビットで 8 画素ずつ、128 ビットで 4 画素ずつ) ----------------
 
     /// <summary>加算 (Plus): min(s + d, 1)。アルファも同じ。</summary>
-    private static void RowPlus(byte* s, byte* d, int width)
+    private static void RowPlus(byte* s, byte* d, int width, int vectorBits)
     {
         int n = width * 4, i = 0;
-        for (; i + 32 <= n; i += 32) Vector256.Store(Vector256.AddSaturate(Vector256.Load(s + i), Vector256.Load(d + i)), d + i);
+        if (vectorBits == 256)
+            for (; i + 32 <= n; i += 32) Vector256.Store(Vector256.AddSaturate(Vector256.Load(s + i), Vector256.Load(d + i)), d + i);
+        else if (vectorBits == 128)
+            for (; i + 16 <= n; i += 16) Vector128.Store(Vector128.AddSaturate(Vector128.Load(s + i), Vector128.Load(d + i)), d + i);
         for (; i < n; i++) d[i] = (byte)Math.Min(255, s[i] + d[i]);
     }
 
@@ -251,12 +264,21 @@ public static unsafe class PixelBlend
     /// 減算: 以前の描き方 (背景を Difference で反転 → 加算 → もう一度反転) と同じ結果。
     /// 色は max(d - s, 0)、アルファは 1 (反転で不透明になる)。
     /// </summary>
-    private static void RowSubtract(byte* s, byte* d, int width)
+    private static void RowSubtract(byte* s, byte* d, int width, int vectorBits)
     {
-        var alpha = Vector256.Create(0xFF000000u).AsByte();
         int n = width * 4, i = 0;
-        for (; i + 32 <= n; i += 32)
-            Vector256.Store(Vector256.SubtractSaturate(Vector256.Load(d + i), Vector256.Load(s + i)) | alpha, d + i);
+        if (vectorBits == 256)
+        {
+            var alpha = Vector256.Create(0xFF000000u).AsByte();
+            for (; i + 32 <= n; i += 32)
+                Vector256.Store(Vector256.SubtractSaturate(Vector256.Load(d + i), Vector256.Load(s + i)) | alpha, d + i);
+        }
+        else if (vectorBits == 128)
+        {
+            var alpha = Vector128.Create(0xFF000000u).AsByte();
+            for (; i + 16 <= n; i += 16)
+                Vector128.Store(Vector128.SubtractSaturate(Vector128.Load(d + i), Vector128.Load(s + i)) | alpha, d + i);
+        }
         for (; i < n; i += 4)
         {
             d[i] = (byte)Math.Max(0, d[i] - s[i]); d[i + 1] = (byte)Math.Max(0, d[i + 1] - s[i + 1]); d[i + 2] = (byte)Math.Max(0, d[i + 2] - s[i + 2]);
@@ -280,15 +302,23 @@ public static unsafe class PixelBlend
     private static Vector256<ushort> Alpha(Vector256<ushort> v) => Vector256.Shuffle(v, AlphaIndex);
 
     /// <summary>乗算・スクリーン・比較 (明)・比較 (暗)・差の絶対値・マスク (DstIn・DstOut・SrcATop)・SrcOver。どれも成分ごとに独立して計算できる。</summary>
-    private static void RowSeparable(byte* s, byte* d, int width, int blend)
+    private static void RowSeparable(byte* s, byte* d, int width, int blend, int vectorBits)
     {
         int n = width * 4, i = 0;
-        for (; i + 32 <= n; i += 32)
-        {
-            var (sl, sh) = Vector256.Widen(Vector256.Load(s + i));
-            var (dl, dh) = Vector256.Widen(Vector256.Load(d + i));
-            Vector256.Store(Vector256.Narrow(Separable(sl, dl, blend), Separable(sh, dh, blend)), d + i);
-        }
+        if (vectorBits == 256)
+            for (; i + 32 <= n; i += 32)
+            {
+                var (sl, sh) = Vector256.Widen(Vector256.Load(s + i));
+                var (dl, dh) = Vector256.Widen(Vector256.Load(d + i));
+                Vector256.Store(Vector256.Narrow(Separable(sl, dl, blend), Separable(sh, dh, blend)), d + i);
+            }
+        else if (vectorBits == 128)
+            for (; i + 16 <= n; i += 16)
+            {
+                var (sl, sh) = Vector128.Widen(Vector128.Load(s + i));
+                var (dl, dh) = Vector128.Widen(Vector128.Load(d + i));
+                Vector128.Store(Vector128.Narrow(Separable(sl, dl, blend), Separable(sh, dh, blend)), d + i);
+            }
         for (; i < n; i += 4)
         {
             int sa = s[i + 3], da = d[i + 3];
@@ -322,6 +352,40 @@ public static unsafe class PixelBlend
             _ => s + Mul(d, one - sa),
         };
         return Vector256.Min(r, one);
+    }
+
+    // ---- 128 ビット版 (ARM64 の NEON・AVX2 のない x64)。式は 256 ビット版と同じ ----
+
+    /// <summary>x * y / 255 (四捨五入)。16 ビットで計算する。</summary>
+    private static Vector128<ushort> Mul(Vector128<ushort> x, Vector128<ushort> y)
+    {
+        var t = x * y + Vector128.Create((ushort)128);
+        return (t + (t >>> 8)) >>> 8;
+    }
+
+    private static readonly Vector128<ushort> AlphaLanes128 = Vector128.Create((ushort)0, 0, 0, 0xFFFF, 0, 0, 0, 0xFFFF);
+    private static readonly Vector128<ushort> AlphaIndex128 = Vector128.Create((ushort)3, 3, 3, 3, 7, 7, 7, 7);
+
+    /// <summary>各画素のアルファを、その画素の 4 成分すべてに並べる。</summary>
+    private static Vector128<ushort> Alpha(Vector128<ushort> v) => Vector128.Shuffle(v, AlphaIndex128);
+
+    private static Vector128<ushort> Separable(Vector128<ushort> s, Vector128<ushort> d, int blend)
+    {
+        var sa = Alpha(s); var da = Alpha(d);
+        var one = Vector128.Create((ushort)255);
+        Vector128<ushort> r = blend switch
+        {
+            3 => Mul(s, one - da) + Mul(d, one - sa) + Mul(s, d),
+            4 => s + d - Mul(s, d),
+            6 => s + d - Vector128.Min(Mul(s, da), Mul(d, sa)),
+            7 => s + d - Vector128.Max(Mul(s, da), Mul(d, sa)),
+            12 => Vector128.ConditionalSelect(AlphaLanes128, s + d - Mul(s, d), s + d - (Vector128.Min(Mul(s, da), Mul(d, sa)) << 1)),
+            OpDstIn => Mul(d, sa),
+            OpDstOut => Mul(d, one - sa),
+            OpSrcATop => Mul(s, da) + Mul(d, one - sa),
+            _ => s + Mul(d, one - sa),
+        };
+        return Vector128.Min(r, one);
     }
 
     private static int Separable(int s, int d, int sa, int da, int blend, bool alpha)

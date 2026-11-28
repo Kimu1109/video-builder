@@ -53,10 +53,31 @@ public static unsafe class HardwareDecoding
             return WindowsOrder(PlatformInfo.IsArm64Process, Hint()?.Kind, Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_FRAMES") != "0");
         if (OperatingSystem.IsMacOS())
             return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_VIDEOTOOLBOX };
-        // Linux: NVIDIA (CUDA) → Intel / AMD (VAAPI)。描画に Intel / AMD の GPU を選んでいれば、VAAPI を先に試す
-        if (Hint() is { Kind: "vaapi" })
+        return LinuxOrder(PlatformInfo.IsArm64Process, Hint()?.Kind, HasNvidiaDevice());
+    }
+
+    /// <summary>
+    /// Linux で試す順番 (V4L2 M2M は hwaccel ではないので、この後に別に試す)。
+    /// x64: NVIDIA (CUDA) → Intel / AMD (VAAPI)。描画に Intel / AMD の GPU を選んでいれば、VAAPI を先に試す。
+    /// arm64: NVIDIA の装置 (/dev/nvidiactl) がなければ CUDA は試さない。ARM の SoC (Raspberry Pi・Rockchip・Qualcomm など) には
+    /// NVIDIA の GPU がなく、試しても失敗するだけ (環境設定にも使えない NVDEC の行が出ていた)。
+    /// NVIDIA の GPU を積んだ ARM64 の機械 (DGX Spark・Grace など) や、描画に NVIDIA の GPU を選んだときは、x64 と同じにする。
+    /// VAAPI は ARM64 の機械に AMD の GPU を挿したときなどに使えるので残す (CUDA・VAAPI のフレームは、V4L2 と違って GPU 上のまま描画に渡せる)。
+    /// </summary>
+    internal static AVHWDeviceType[] LinuxOrder(bool arm64, string? hintKind, bool nvidiaDevice)
+    {
+        if (arm64 && !nvidiaDevice && hintKind != "cuda")
+            return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI };
+        if (hintKind == "vaapi")
             return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI, AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA };
         return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI };
+    }
+
+    /// <summary>NVIDIA のドライバの装置 (/dev/nvidiactl) があるか。</summary>
+    internal static bool HasNvidiaDevice()
+    {
+        try { return File.Exists("/dev/nvidiactl"); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
     }
 
     /// <summary>

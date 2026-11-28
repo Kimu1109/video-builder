@@ -81,6 +81,9 @@ public class VoicevoxPluginTests
                 else { c.Response.StatusCode = 422; reply = Encoding.UTF8.GetBytes("{\"detail\":\"unknown\"}"); }
                 c.Response.ContentType = type;
                 c.Response.ContentLength64 = reply.Length;
+                // 応答ごとに接続を閉じる。使い回すと、Dispose の後の要求が閉じきっていない古い接続に流れ、
+                // 止まる途中の HttpListener から空の成功の応答が返ることがあった (「つながりません」にならない)
+                c.Response.KeepAlive = false;
                 await c.Response.OutputStream.WriteAsync(reply);
                 c.Response.Close();
             }
