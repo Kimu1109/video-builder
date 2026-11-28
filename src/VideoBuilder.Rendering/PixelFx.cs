@@ -265,7 +265,7 @@ public static unsafe partial class PixelFx
                         if (a == 0) continue;
                         // 乗算済みの明るさを、アルファで割って元の明るさにする
                         uint lum = ((c >> 16 & 0xFF) * 54 + (c >> 8 & 0xFF) * 183 + (c & 0xFF) * 19) >> 8;
-                        if (a != 255) lum = Math.Min(255, lum * 255 / a);
+                        if (a != 255) lum = Math.Min(255u, (uint)PixelOps.DivideByAlpha((int)lum * 255, (int)a));
                         uint t = lut[lum];
                         if (t == 256) continue;
                         p[x] = t == 0 ? 0 : Lerp(0, c, t);
@@ -371,7 +371,7 @@ public static unsafe partial class PixelFx
                         if (a == 255) { p[0] = t[p[0]]; p[1] = t[p[1]]; p[2] = t[p[2]]; }
                         else if (a != 0)
                         {
-                            int b = Math.Min(255, (p[0] * 255 + a / 2) / a), g = Math.Min(255, (p[1] * 255 + a / 2) / a), r = Math.Min(255, (p[2] * 255 + a / 2) / a);
+                            int b = Math.Min(255, PixelOps.Unpremultiply(p[0], a)), g = Math.Min(255, PixelOps.Unpremultiply(p[1], a)), r = Math.Min(255, PixelOps.Unpremultiply(p[2], a));
                             p[0] = (byte)((t[b] * a + 127) / 255); p[1] = (byte)((t[g] * a + 127) / 255); p[2] = (byte)((t[r] * a + 127) / 255);
                         }
                     }
