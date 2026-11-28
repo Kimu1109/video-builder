@@ -50,6 +50,48 @@ public unsafe class GpuD3D11FramesTests
         return result;
     }
 
+    /// <summary>
+    /// 読み取りにしか使えないテクスチャ (共有の NV12 の面など。描画先にはできない) を、シェーダで RGBA8 に写してから読み戻す。
+    /// </summary>
+    private static byte[] SampleTexture(GpuContext gpu, uint texture, int w, int h)
+    {
+        var gl = gpu.Gl!;
+        const string vs = "void main() { vec2 p = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }";
+        const string fs = "precision highp float; uniform sampler2D t; out vec4 color; void main() { color = texelFetch(t, ivec2(gl_FragCoord.xy), 0); }";
+        uint program = gl.Program(gl.ShaderVersion + "\n" + vs, gl.ShaderVersion + "\n" + fs, out var error);
+        Assert.True(program != 0, error);
+        uint output = gl.GenTexture(), vao, fbo;
+        gl.GenVertexArrays(1, &vao);
+        gl.GenFramebuffers(1, &fbo);
+        try
+        {
+            gl.BindTexture(GlFunctions.TEXTURE_2D, output);
+            gl.TexImage2D(GlFunctions.TEXTURE_2D, 0, (int)GlFunctions.RGBA8, w, h, 0, GlFunctions.RGBA, GlFunctions.UNSIGNED_BYTE, null);
+            gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, fbo);
+            gl.FramebufferTexture2D(GlFunctions.FRAMEBUFFER, GlFunctions.COLOR_ATTACHMENT0, GlFunctions.TEXTURE_2D, output, 0);
+            Assert.Equal(GlFunctions.FRAMEBUFFER_COMPLETE, gl.CheckFramebufferStatus(GlFunctions.FRAMEBUFFER));
+            gl.Viewport(0, 0, w, h);
+            gl.Disable(GlFunctions.BLEND);
+            gl.UseProgram(program);
+            gl.Uniform1i(gl.Uniform(program, "t"), 0);
+            gl.ActiveTexture(GlFunctions.TEXTURE0);
+            gl.BindTexture(GlFunctions.TEXTURE_2D, texture);
+            gl.BindVertexArray(vao);
+            gl.DrawArrays(GlFunctions.TRIANGLE_STRIP, 0, 4);
+            gl.BindVertexArray(0);
+            gl.BindFramebuffer(GlFunctions.FRAMEBUFFER, 0);
+            return ReadTexture(gl, output, w, h);
+        }
+        finally
+        {
+            gl.DeleteFramebuffers(1, &fbo);
+            gl.DeleteVertexArrays(1, &vao);
+            gl.DeleteTexture(output);
+            gl.DeleteProgram(program);
+            gpu.Context.ResetContext();
+        }
+    }
+
     private static GpuContext? OpenGpu()
     {
         if (!OperatingSystem.IsWindows()) return null;
@@ -103,11 +145,11 @@ public unsafe class GpuD3D11FramesTests
                 try
                 {
                     var (y, uv) = slices[slice];
-                    var ry = ReadTexture(gl, slot!.Textures[0], W, H);
+                    var ry = SampleTexture(gpu, slot!.Textures[0], W, H);
                     for (int r = 0; r < H; r++)
                         for (int x = 0; x < W; x++)
                             Assert.True(ry[(r * W + x) * 4] == y[r * W + x], $"Y ({x}, {r}) 周 {round}: {ry[(r * W + x) * 4]} != {y[r * W + x]}");
-                    var ruv = ReadTexture(gl, slot.Textures[1], W / 2, H / 2);
+                    var ruv = SampleTexture(gpu, slot.Textures[1], W / 2, H / 2);
                     for (int r = 0; r < H / 2; r++)
                         for (int x = 0; x < W / 2; x++)
                         {
