@@ -36,9 +36,12 @@ public class WindowsArmTests
         // 一覧を作れなくても (ヒントなし)、CUDA は試さない
         Assert.DoesNotContain(AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, HardwareDecoding.WindowsOrder(true, null));
 
-        // x64 はこれまでどおり
-        Assert.Equal(AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, HardwareDecoding.WindowsOrder(false, null)[0]);
-        Assert.Equal(AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, HardwareDecoding.WindowsOrder(false, "d3d11va")[0]);
+        // x64: D3D11VA のフレームはメモリへ写さずに描画へ渡せるので、NVIDIA でも D3D11VA を先に (CUDA はその次。設計書 22.65)
+        Assert.Equal(new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 },
+            HardwareDecoding.WindowsOrder(false, "cuda"));
+        // GPU 上のまま使わない設定 (VIDEO_BUILDER_GPU_FRAMES=0) なら以前どおり、NVIDIA (CUDA) が先
+        Assert.Equal(AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, HardwareDecoding.WindowsOrder(false, null, gpuFrames: false)[0]);
+        Assert.Equal(AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, HardwareDecoding.WindowsOrder(false, "d3d11va", gpuFrames: false)[0]);
         Assert.Equal("D3D12VA", HardwareDecoding.NameOf(AVHWDeviceType.AV_HWDEVICE_TYPE_D3D12VA));
     }
 

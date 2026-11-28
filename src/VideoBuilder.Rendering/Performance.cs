@@ -119,6 +119,13 @@ public sealed class ExportStats
     public string? CudaDirectError { get; internal set; }
     internal void AddCudaDirect() => Interlocked.Increment(ref _cudaDirectFrames);
 
+    private long _d3d11DirectFrames;
+    /// <summary>Windows: エンコーダの Direct3D 11 のフレームへ直接描いた (読み戻さなかった) フレームの数 (設計書 22.65)。</summary>
+    public long D3D11DirectFrames => Interlocked.Read(ref _d3d11DirectFrames);
+    /// <summary>エンコーダの Direct3D 11 のフレームへ直接描けなかった理由 (Windows の GPU のエンコーダで GPU 描画のときだけ)。</summary>
+    public string? D3D11DirectError { get; internal set; }
+    internal void AddD3D11Direct() => Interlocked.Increment(ref _d3d11DirectFrames);
+
     /// <summary>1 秒あたりに書けたフレーム数。</summary>
     public double FramesPerSecond => Elapsed.TotalSeconds > 0 ? Frames / Elapsed.TotalSeconds : 0;
 

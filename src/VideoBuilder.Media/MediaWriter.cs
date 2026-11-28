@@ -28,6 +28,12 @@ public sealed class ExportSettings
     /// GPU で描いた絵を、CUDA と GL の相互運用で GPU の中でエンコーダのフレームへ写して渡す。CUDA を使えなければ、これまでどおりメモリ上のフレームを渡す。
     /// </summary>
     public bool CudaFrames { get; set; }
+    /// <summary>
+    /// Windows: NVENC・AMF・Quick Sync・Media Foundation に、このデバイス (ID3D11Device。描画の ANGLE のもの) の
+    /// Direct3D 11 のフレーム (GPU 上の NV12) を渡せるようにする (設計書 22.65)。GPU で描いた絵を、エンコーダのフレームの面へ直接描いて渡す。
+    /// 使えなければ (エンコーダが受け取らない・開けない)、これまでどおりメモリ上のフレームを渡す。IntPtr.Zero なら使わない。
+    /// </summary>
+    public IntPtr D3D11Device { get; set; }
 }
 
 /// <summary>BGRA のフレームと float の音声を受け取って、動画ファイルに書き出す。</summary>
@@ -122,7 +128,7 @@ public sealed unsafe class MediaWriter : IDisposable
         _venc = VideoEncoderSetup.Open(s, _width, _height, globalHeader, out device, out var softwareFormat);
         _hwDevice = device;
         _uploadToHardware = _venc->hw_frames_ctx != null;
-        HardwareInputError = VideoEncoderSetup.LastCudaError;
+        HardwareInputError = VideoEncoderSetup.LastCudaError ?? VideoEncoderSetup.LastD3D11Error;
         FFmpegLoader.Check(ffmpeg.avcodec_parameters_from_context(_vst->codecpar, _venc), "映像ストリームの設定に失敗");
         _vst->time_base = _venc->time_base;
         _vst->avg_frame_rate = _venc->framerate;
@@ -233,7 +239,7 @@ public sealed unsafe class MediaWriter : IDisposable
     /// </summary>
     public bool AcceptsHardwareFrames => HardwareFrameKind != HardwareFrameKinds.None;
 
-    /// <summary>エンコーダに直接渡せる GPU 上のフレームの種類 (VAAPI か CUDA の NV12)。渡せなければ None。</summary>
+    /// <summary>エンコーダに直接渡せる GPU 上のフレームの種類 (VAAPI・CUDA・Direct3D 11 の NV12)。渡せなければ None。</summary>
     public HardwareFrameKinds HardwareFrameKind
     {
         get
@@ -244,12 +250,13 @@ public sealed unsafe class MediaWriter : IDisposable
             {
                 AVPixelFormat.AV_PIX_FMT_VAAPI => HardwareFrameKinds.Vaapi,
                 AVPixelFormat.AV_PIX_FMT_CUDA => HardwareFrameKinds.Cuda,
+                AVPixelFormat.AV_PIX_FMT_D3D11 => HardwareFrameKinds.D3D11,
                 _ => HardwareFrameKinds.None,
             };
         }
     }
 
-    /// <summary>CudaFrames を指定したのに CUDA のフレームを使えないとき、その理由。</summary>
+    /// <summary>CudaFrames・D3D11Device を指定したのに、GPU 上のフレームを使えないとき、その理由。</summary>
     public string? HardwareInputError { get; private set; }
 
     /// <summary>エンコーダのフレーム置き場から、GPU 上のフレームを 1 つ取る。取れなければ null (error に理由)。どのスレッドからでもよい。</summary>

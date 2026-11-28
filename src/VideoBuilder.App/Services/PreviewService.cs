@@ -684,6 +684,8 @@ public sealed class PreviewService : IDisposable
         _frameBudgetMs = 1000.0 * project.Settings.Fps.Den / Math.Max(1, project.Settings.Fps.Num);
         _slowFrames = 0; _fastFrames = 0;
         IsPlaying = true;
+        // Windows: 再生中だけタイマーの精度を 1ms にする (音声のバッファを積む間隔・再生の時計が 15.6ms 刻みにならないように。設計書 22.65)
+        _fineTimer ??= WindowsScheduling.FineTimer();
         StartClock();
         PlayStateChanged?.Invoke();
     }
@@ -802,8 +804,12 @@ public sealed class PreviewService : IDisposable
         // 再生中だけ縮めていたなら、止めたフレームを元の大きさで描き直す
         if (_playDivisor > 1) { _playDivisor = 1; Request(); }
         _audio?.Stop();
+        _fineTimer?.Dispose();
+        _fineTimer = null;
         PlayStateChanged?.Invoke();
     }
+
+    private IDisposable? _fineTimer;
 
     private void Tick()
     {

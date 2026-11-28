@@ -98,7 +98,21 @@ internal static unsafe class VideoEncoderSetup
     /// <param name="softwareFormat">メモリ上で用意するフレームの形式 (BGRA からここへ変換する)。</param>
     public static AVCodecContext* Open(ExportSettings s, int width, int height, bool globalHeader, out AVBufferRef* hwDevice, out AVPixelFormat softwareFormat)
     {
+        if (s.D3D11Device == IntPtr.Zero || !OperatingSystem.IsWindows()) return OpenCore(s, width, height, globalHeader, d3d11: false, out hwDevice, out softwareFormat);
+        // Direct3D 11 のフレームで開けなければ (ドライバ・エンコーダが受け取らない)、これまでどおりメモリ上のフレームで開き直す
+        try { return OpenCore(s, width, height, globalHeader, d3d11: true, out hwDevice, out softwareFormat); }
+        catch (InvalidOperationException ex)
+        {
+            var result = OpenCore(s, width, height, globalHeader, d3d11: false, out hwDevice, out softwareFormat);
+            LastD3D11Error = "Direct3D 11 のフレームでエンコーダを開けません: " + ex.Message;
+            return result;
+        }
+    }
+
+    private static AVCodecContext* OpenCore(ExportSettings s, int width, int height, bool globalHeader, bool d3d11, out AVBufferRef* hwDevice, out AVPixelFormat softwareFormat)
+    {
         hwDevice = null;
+        LastD3D11Error = null;
         softwareFormat = AVPixelFormat.AV_PIX_FMT_YUV420P;
         string name = s.VideoCodec;
         var codec = ffmpeg.avcodec_find_encoder_by_name(name);
@@ -150,6 +164,15 @@ internal static unsafe class VideoEncoderSetup
                     else if (CudaFrames(ctx, out device, out frames, out var cudaError)) ctx->pix_fmt = AVPixelFormat.AV_PIX_FMT_CUDA;
                     else LastCudaError = cudaError;
                 }
+                // Windows: 描画のデバイスの Direct3D 11 のフレームを渡す (GPU で描いた絵を、エンコーダのフレームへ直接描くため。設計書 22.65)
+                if (d3d11)
+                {
+                    if (family is not ("nvenc" or "amf" or "qsv" or "mf")) LastD3D11Error = "GPU のエンコーダではありません";
+                    else if (softwareFormat != AVPixelFormat.AV_PIX_FMT_NV12) LastD3D11Error = "エンコーダの形式が NV12 ではありません";
+                    else if (!CodecSupport.PixelFormats(codec).Contains(AVPixelFormat.AV_PIX_FMT_D3D11)) LastD3D11Error = "エンコーダが Direct3D 11 のフレームを受け取りません";
+                    else if (D3D11Frames(ctx, s.D3D11Device, out device, out frames, out var d3dError)) ctx->pix_fmt = AVPixelFormat.AV_PIX_FMT_D3D11;
+                    else LastD3D11Error = d3dError;
+                }
             }
 
             foreach (var (key, value) in OptionsFor(name, s.Crf, s.Preset)) ffmpeg.av_dict_set(&opts, key, value, 0);
@@ -197,6 +220,60 @@ internal static unsafe class VideoEncoderSetup
 
     /// <summary>直前の Open で、CUDA のフレームを使えなかった理由 (ExportSettings.CudaFrames のとき。同じスレッドで読む)。</summary>
     [ThreadStatic] internal static string? LastCudaError;
+
+    /// <summary>直前の Open で、Direct3D 11 のフレームを使えなかった理由 (ExportSettings.D3D11Device のとき。同じスレッドで読む)。</summary>
+    [ThreadStatic] internal static string? LastD3D11Error;
+
+    // libavutil/hwcontext_d3d11va.h の AVD3D11VAFramesContext (FFmpeg.AutoGen にはない)
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct AVD3D11VAFramesContextLayout { public IntPtr Texture; public uint BindFlags, MiscFlags; public IntPtr TextureInfos; }
+
+    private const uint D3D11_BIND_SHADER_RESOURCE = 0x8, D3D11_BIND_RENDER_TARGET = 0x20;
+    private static readonly Guid IID_ID3D10Multithread = new("9b7e4e00-342c-4106-a19f-4f2704f689f0");
+
+    /// <summary>
+    /// d3dDevice (描画の ANGLE の ID3D11Device) を包んだ FFmpeg の D3D11VA のデバイスと、NV12 のフレームの置き場 (描画先にできるテクスチャ) を
+    /// 作って ctx に付ける。作れなければ false (何も付けない)。設計書 22.65。
+    /// </summary>
+    private static bool D3D11Frames(AVCodecContext* ctx, IntPtr d3dDevice, out AVBufferRef* device, out AVBufferRef* frames, out string? error)
+    {
+        device = null; frames = null; error = null;
+        var d = ffmpeg.av_hwdevice_ctx_alloc(AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA);
+        if (d == null) { error = "D3D11VA のデバイスを作れません"; return false; }
+        var hw = (HardwareFrame.AVD3D11VADeviceContextLayout*)((AVHWDeviceContext*)d->data)->hwctx;
+        // FFmpeg が手放すときに Release するので、参照を 1 つ増やして渡す
+        ((delegate* unmanaged[Stdcall]<IntPtr, uint>)(*(IntPtr**)d3dDevice)[1])(d3dDevice);
+        hw->Device = d3dDevice;
+        // 描画 (ANGLE。描画のスレッド) とエンコーダ (書き出しのスレッド) が同じ即時のコンテキストを使うので、複数のスレッドから使えるようにする
+        IntPtr mt;
+        var iid = IID_ID3D10Multithread;
+        if (((delegate* unmanaged[Stdcall]<IntPtr, Guid*, IntPtr*, int>)(*(IntPtr**)d3dDevice)[0])(d3dDevice, &iid, &mt) >= 0)
+        {
+            ((delegate* unmanaged[Stdcall]<IntPtr, int, int>)(*(IntPtr**)mt)[5])(mt, 1);   // SetMultithreadProtected(TRUE)
+            ((delegate* unmanaged[Stdcall]<IntPtr, uint>)(*(IntPtr**)mt)[2])(mt);
+        }
+        int ret = ffmpeg.av_hwdevice_ctx_init(d);
+        if (ret < 0) { ffmpeg.av_buffer_unref(&d); error = "D3D11VA のデバイスを初期化できません (描画のデバイスに動画の機能がない?): " + FFmpegLoader.ErrorText(ret); return false; }
+        var f = ffmpeg.av_hwframe_ctx_alloc(d);
+        if (f == null) { ffmpeg.av_buffer_unref(&d); error = "Direct3D 11 のフレーム置き場を作れません"; return false; }
+        var fc = (AVHWFramesContext*)f->data;
+        fc->format = AVPixelFormat.AV_PIX_FMT_D3D11;
+        fc->sw_format = AVPixelFormat.AV_PIX_FMT_NV12;
+        fc->width = ctx->width; fc->height = ctx->height;
+        fc->initial_pool_size = 20;
+        // ANGLE で Y・U・V の面へ描く (描画先) ので、描画先と読み取りに使えるテクスチャにする
+        ((AVD3D11VAFramesContextLayout*)fc->hwctx)->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        ret = ffmpeg.av_hwframe_ctx_init(f);
+        if (ret < 0)
+        {
+            ffmpeg.av_buffer_unref(&f); ffmpeg.av_buffer_unref(&d);
+            error = "Direct3D 11 のフレーム置き場を初期化できません (NV12 を描画先にできない?): " + FFmpegLoader.ErrorText(ret);
+            return false;
+        }
+        ctx->hw_frames_ctx = ffmpeg.av_buffer_ref(f);
+        device = d; frames = f;
+        return true;
+    }
 
     /// <summary>CUDA のデバイスと、NV12 のフレームの置き場を作って ctx に付ける。作れなければ false (何も付けない)。</summary>
     private static bool CudaFrames(AVCodecContext* ctx, out AVBufferRef* device, out AVBufferRef* frames, out string? error)

@@ -49,7 +49,8 @@ public static unsafe class HardwareDecoding
             var t = ffmpeg.av_hwdevice_find_type_by_name(PreferredDevice);
             return t == AVHWDeviceType.AV_HWDEVICE_TYPE_NONE ? Array.Empty<AVHWDeviceType>() : new[] { t };
         }
-        if (OperatingSystem.IsWindows()) return WindowsOrder(PlatformInfo.IsArm64Process, Hint()?.Kind);
+        if (OperatingSystem.IsWindows())
+            return WindowsOrder(PlatformInfo.IsArm64Process, Hint()?.Kind, Environment.GetEnvironmentVariable("VIDEO_BUILDER_GPU_FRAMES") != "0");
         if (OperatingSystem.IsMacOS())
             return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_VIDEOTOOLBOX };
         // Linux: NVIDIA (CUDA) → Intel / AMD (VAAPI)。描画に Intel / AMD の GPU を選んでいれば、VAAPI を先に試す
@@ -60,15 +61,18 @@ public static unsafe class HardwareDecoding
 
     /// <summary>
     /// Windows で試す順番。
-    /// x64: NVIDIA (CUDA) → D3D11VA → DXVA2。描画に Intel / AMD の GPU を選んでいれば、D3D11VA を先に試す。
+    /// x64: D3D11VA → NVIDIA (CUDA) → DXVA2。D3D11VA のフレームは、メモリへ写さずに描画 (ANGLE) へ渡せる (設計書 22.65)。
+    /// NVIDIA の GPU でも D3D11VA は同じ NVDEC で動き、CUDA のフレームは ANGLE に取り込めない (毎回メモリへ写す) ため。
+    /// gpuFrames が false (VIDEO_BUILDER_GPU_FRAMES=0) なら以前どおり、NVIDIA (CUDA) → D3D11VA → DXVA2
+    /// (描画に Intel / AMD の GPU を選んでいれば D3D11VA を先に)。
     /// ARM64 (Snapdragon の Adreno など): CUDA (NVIDIA のドライバ) は ARM64 の Windows にないので試さず、
     /// D3D11VA → D3D12VA (新しいドライバで D3D11VA が使えないとき) → DXVA2 の順にする。
     /// </summary>
-    internal static AVHWDeviceType[] WindowsOrder(bool arm64, string? hintKind)
+    internal static AVHWDeviceType[] WindowsOrder(bool arm64, string? hintKind, bool gpuFrames = true)
     {
         if (arm64)
             return new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D12VA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 };
-        return hintKind == "d3d11va"
+        return gpuFrames || hintKind == "d3d11va"
             ? new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 }
             : new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 };
     }
