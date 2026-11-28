@@ -338,6 +338,9 @@ internal sealed unsafe class D3D11FrameImport : IDisposable
                 slot.Textures[i] = gl.GenTexture();
                 gl.BindTexture(GlFunctions.TEXTURE_2D, slot.Textures[i]);
                 _egl.BindToTexture(slot.Images[i]);
+                // ミップマップがないので、既定の縮小の補間 (NEAREST_MIPMAP_LINEAR) のままだと不完全なテクスチャになり、読むと 0 になる
+                gl.TexParameteri(GlFunctions.TEXTURE_2D, GlFunctions.TEXTURE_MIN_FILTER, GlFunctions.NEAREST);
+                gl.TexParameteri(GlFunctions.TEXTURE_2D, GlFunctions.TEXTURE_MAG_FILTER, GlFunctions.NEAREST);
                 if (gl.GetError() is var e and not 0) { error = $"取り込んだ画像をテクスチャにできません (0x{e:X4})"; return null; }
             }
             gl.BindTexture(GlFunctions.TEXTURE_2D, 0);
