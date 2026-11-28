@@ -52,7 +52,8 @@ public class GpuSelectionTests
             HardwareDecoding.DeviceHint = () => ("cuda", "");
             Assert.Equal(FFmpeg.AutoGen.AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, HardwareDecoding.DeviceOrder()[0]);
             HardwareDecoding.DeviceHint = () => throw new InvalidOperationException("一覧を作れない");
-            Assert.Equal(FFmpeg.AutoGen.AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA, HardwareDecoding.DeviceOrder()[0]);   // 既定の順に戻る
+            // 既定の順に戻る (x64 は CUDA が先。arm64 は NVIDIA の装置がなければ CUDA を試さない)
+            Assert.Equal(HardwareDecoding.LinuxOrder(PlatformInfo.IsArm64Process, null, HardwareDecoding.HasNvidiaDevice()), HardwareDecoding.DeviceOrder());
         }
         finally { HardwareDecoding.DeviceHint = null; HardwareDecoding.ResetDevices(); }
     }

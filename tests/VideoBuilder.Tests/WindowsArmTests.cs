@@ -46,6 +46,23 @@ public class WindowsArmTests
     }
 
     [Fact]
+    public void Hardware_decoding_on_linux_arm64_skips_cuda_without_an_nvidia_device()
+    {
+        var cuda = AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA;
+        var vaapi = AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI;
+        // ARM の SoC (Raspberry Pi など): NVIDIA の装置がないので CUDA は試さない (V4L2 M2M はこの後に試す)
+        Assert.Equal(new[] { vaapi }, HardwareDecoding.LinuxOrder(arm64: true, hintKind: null, nvidiaDevice: false));
+        Assert.Equal(new[] { vaapi }, HardwareDecoding.LinuxOrder(true, "vaapi", false));
+        // NVIDIA の GPU を積んだ ARM64 の機械 (DGX Spark など)・描画に NVIDIA を選んだときは、x64 と同じ
+        Assert.Equal(new[] { cuda, vaapi }, HardwareDecoding.LinuxOrder(true, null, true));
+        Assert.Equal(new[] { cuda, vaapi }, HardwareDecoding.LinuxOrder(true, "cuda", false));
+        Assert.Equal(new[] { vaapi, cuda }, HardwareDecoding.LinuxOrder(true, "vaapi", true));
+        // x64 はこれまでどおり (NVIDIA の装置の有無によらない)
+        Assert.Equal(new[] { cuda, vaapi }, HardwareDecoding.LinuxOrder(false, null, false));
+        Assert.Equal(new[] { vaapi, cuda }, HardwareDecoding.LinuxOrder(false, "vaapi", false));
+    }
+
+    [Fact]
     public void Media_foundation_encoders_are_hardware_only_and_rate_controlled_by_bitrate()
     {
         Assert.Equal("mf", HardwareEncoders.FamilyOf("h264_mf"));
