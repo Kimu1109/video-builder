@@ -506,7 +506,7 @@ public static unsafe partial class PixelFx
                         uint c = p[x], a = c >> 24;
                         if (a == 0) continue;
                         uint lum = ((c >> 16 & 0xFF) * 54 + (c >> 8 & 0xFF) * 183 + (c & 0xFF) * 19) >> 8;
-                        if (a != 255) lum = Math.Min(255, lum * 255 / a);
+                        if (a != 255) lum = Math.Min(255u, (uint)PixelOps.DivideByAlpha((int)lum * 255, (int)a));
                         uint t = lut[lum];
                         if (t != 256) p[x] = Lerp(0, c, t);
                     }

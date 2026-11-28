@@ -11,14 +11,52 @@ public static unsafe class PixelOps
     /// <summary>これより小さい画像は、スレッドに分ける手間の方が大きいので 1 スレッドで処理する。</summary>
     private const int ParallelThreshold = 64 * 1024;
 
-    /// <summary>行の範囲 [y0, y1) ごとに body を呼ぶ。大きな画像では複数スレッドに分ける。</summary>
+    /// <summary>1 つのコアあたりの帯の数。</summary>
+    private const int BandsPerCore = 8;
+
+    /// <summary>1 つの帯の最小の行数 (帯が細かすぎると、分ける手間の方が大きくなる)。</summary>
+    private const int MinRowsPerBand = 8;
+
+    /// <summary>
+    /// 行の範囲 [y0, y1) ごとに body を呼ぶ。大きな画像では複数スレッドに分ける。
+    /// 帯はコア数より多めに作る (コア数の 8 倍。1 つの帯は 8 行以上)。Parallel.For は空いたスレッドに次の帯を渡すので、
+    /// 速いコアと遅いコアが混ざった CPU (RK3588 の A76 + A55 などの big.LITTLE、Intel の P コア + E コア) でも、
+    /// 遅いコアに当たった大きな帯を最後まで待たずに済む。以前はコア数の 2 倍だった。
+    /// </summary>
     internal static void ForBands(int width, int height, Action<int, int> body)
     {
         int cores = Environment.ProcessorCount;
         if ((long)width * height < ParallelThreshold || cores == 1) { body(0, height); return; }
-        int bands = Math.Min(height, cores * 2);
+        int bands = BandCount(height, cores);
         Parallel.For(0, bands, b => body((int)((long)height * b / bands), (int)((long)height * (b + 1) / bands)));
     }
+
+    /// <summary>
+    /// 1〜255 の a について、2^32 / a を切り上げた値。n / a (n は 0〜65535) を、割り算でなく掛け算とシフトで求めるのに使う。
+    /// 割る数が画素ごとに変わる割り算は、定数の割り算と違って JIT が掛け算に直せず、ARM64 でも x64 でも遅い
+    /// (乗算済みアルファを戻すところで、半透明の画素ごとに 3 回ずつあった)。
+    /// n &lt; 2^16・a &lt; 2^8 なら、切り上げの誤差が n / 2^32 &lt; 1 / a に収まるので、結果は n / a と同じになる。
+    /// </summary>
+    private static readonly ulong[] Reciprocals = CreateReciprocals();
+
+    private static ulong[] CreateReciprocals()
+    {
+        var t = new ulong[256];
+        for (int a = 1; a < 256; a++) t[a] = ((1UL << 32) + (ulong)a - 1) / (ulong)a;
+        return t;
+    }
+
+    /// <summary>n / a (切り捨て)。n は 0〜65535、a は 1〜255。</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static int DivideByAlpha(int n, int a) => (int)(((ulong)(uint)n * Reciprocals[a]) >> 32);
+
+    /// <summary>乗算済みの値 c (0〜255) をアルファ a (1〜255) で割って戻す (四捨五入)。(c * 255 + a / 2) / a と同じ。255 を超えることがある。</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static int Unpremultiply(int c, int a) => DivideByAlpha(c * 255 + (a >> 1), a);
+
+    /// <summary>ForBands で分ける帯の数。</summary>
+    internal static int BandCount(int height, int cores) =>
+        Math.Max(1, Math.Min(height, Math.Min(cores * BandsPerCore, Math.Max(cores, height / MinRowsPerBand))));
 
     /// <summary>カラーマトリクスをアルファ行が「そのまま」の場合に限って適用できるか。</summary>
     public static bool CanApply(float[] m) =>
@@ -58,7 +96,7 @@ public static unsafe class PixelOps
                             if (a == 255) { p[0] = lb[p[0]]; p[1] = lg[p[1]]; p[2] = lr[p[2]]; }
                             else if (a != 0)
                             {
-                                int b = (p[0] * 255 + a / 2) / a, g = (p[1] * 255 + a / 2) / a, r = (p[2] * 255 + a / 2) / a;
+                                int b = Unpremultiply(p[0], a), g = Unpremultiply(p[1], a), r = Unpremultiply(p[2], a);
                                 if (b > 255) b = 255; if (g > 255) g = 255; if (r > 255) r = 255;
                                 p[0] = (byte)((lb[b] * a + 127) / 255); p[1] = (byte)((lg[g] * a + 127) / 255); p[2] = (byte)((lr[r] * a + 127) / 255);
                             }
@@ -96,7 +134,7 @@ public static unsafe class PixelOps
                     }
                     else if (a != 0)
                     {
-                        int b = (p[0] * 255 + a / 2) / a, g = (p[1] * 255 + a / 2) / a, r = (p[2] * 255 + a / 2) / a;
+                        int b = Unpremultiply(p[0], a), g = Unpremultiply(p[1], a), r = Unpremultiply(p[2], a);
                         if (b > 255) b = 255; if (g > 255) g = 255; if (r > 255) r = 255;
                         int nr = (c0 * r + c1 * g + c2 * b + c3 * a + c4 + Half) >> Shift;
                         int ng = (c5 * r + c6 * g + c7 * b + c8 * a + c9 + Half) >> Shift;
@@ -159,7 +197,7 @@ public static unsafe class PixelOps
                         int a = p[3];
                         if (a == 0) continue;
                         int b = p[0], g = p[1], r = p[2];
-                        if (a != 255) { b = Math.Min(255, b * 255 / a); g = Math.Min(255, g * 255 / a); r = Math.Min(255, r * 255 / a); }
+                        if (a != 255) { b = Math.Min(255, DivideByAlpha(b * 255, a)); g = Math.Min(255, DivideByAlpha(g * 255, a)); r = Math.Min(255, DivideByAlpha(r * 255, a)); }
                         int keep = lut[((r >> 2) << 12) | ((g >> 2) << 6) | (b >> 2)];
                         if (keep == 255) continue;
                         p[0] = (byte)(p[0] * keep / 255); p[1] = (byte)(p[1] * keep / 255); p[2] = (byte)(p[2] * keep / 255); p[3] = (byte)(a * keep / 255);
